@@ -1,0 +1,34 @@
+version: "3.8"
+
+# Development override - enables hot reload and dev dependencies
+# Usage: podman-compose -f podman-compose.yml -f docker-compose.override.yml up -d
+
+services:
+  backend:
+    build:
+      args:
+        DEBUG_MODE: "true"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /workspace/app --reload-dir /workspace/worker
+    volumes:
+      # Mount source code for hot reload
+      - ./backend/app:/workspace/app:ro
+      - ./backend/worker:/workspace/worker:ro
+      - ./backend/prompts:/workspace/prompts:ro
+      # Writable directories
+      - ./backend/storage:/workspace/storage
+      - ./backend/metadata.db:/workspace/metadata.db
+    environment:
+      - APP_ENV=development
+
+  worker:
+    build:
+      args:
+        DEBUG_MODE: "true"
+    volumes:
+      - ./backend/app:/workspace/app:ro
+      - ./backend/worker:/workspace/worker:ro
+      - ./backend/prompts:/workspace/prompts:ro
+      - ./backend/storage:/workspace/storage
+      - ./backend/metadata.db:/workspace/metadata.db
+    environment:
+      - APP_ENV=development

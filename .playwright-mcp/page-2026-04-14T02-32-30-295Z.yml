@@ -1,0 +1,8 @@
+- generic [ref=e2]:
+  - generic [ref=e4]:
+    - img [ref=e5]
+    - paragraph [ref=e7]: 正在加载项目...
+  - generic [ref=e9]:
+    - generic [ref=e10]: Unknown error
+    - button [ref=e11] [cursor=pointer]:
+      - img [ref=e12]

@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  # Frontend Development Service
+  frontend:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspace:cached
+      - frontend_node_modules:/workspace/frontend/node_modules
+    command: sleep infinity
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_BASE=http://backend:8000
+    ports:
+      - "3001:3000"
+    networks:
+      - video-maker-network
+    depends_on:
+      - backend
+      - redis
+
+  # Backend Development Service
+  backend:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile.backend
+    volumes:
+      - ..:/workspace:cached
+      - backend_venv:/workspace/backend/.venv
+    command: sleep infinity
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/workspace
+      - APP_ENV=development
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite+aiosqlite:///workspace/backend/data/dev.db
+      - LOG_LEVEL=debug
+    # Internal only - access through nginx or frontend
+    networks:
+      - video-maker-network
+    depends_on:
+      - redis
+
+  # Redis for task queue
+  redis:
+    image: redis:7-alpine
+    # Internal only - no external port exposure
+    volumes:
+      - redis_data:/data
+    networks:
+      - video-maker-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Background Worker (optional, for full functionality)
+  worker:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile.backend
+    volumes:
+      - ..:/workspace:cached
+      - backend_venv:/workspace/backend/.venv
+      - worker_storage:/workspace/backend/storage
+    command: sleep infinity
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/workspace
+      - APP_ENV=development
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite+aiosqlite:///workspace/backend/data/dev.db
+    networks:
+      - video-maker-network
+    depends_on:
+      - redis
+      - backend
+
+volumes:
+  frontend_node_modules:
+  backend_venv:
+  redis_data:
+  worker_storage:
+
+networks:
+  video-maker-network:
+    driver: bridge

@@ -1,0 +1,42 @@
+# Build stage for static export
+# syntax=docker/dockerfile:1
+
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Build static export
+RUN echo '/** @type {import("next").NextConfig} */ \
+const nextConfig = { \
+  output: "export", \
+  distDir: "dist", \
+  images: { unoptimized: true } \
+}; \
+module.exports = nextConfig;' > next.config.js
+
+RUN npm run build
+
+# Production stage - just copy static files
+FROM alpine:latest
+
+WORKDIR /output
+
+# Copy built static files from builder
+COPY --from=builder /app/dist .
+
+# Create a simple nginx config for the static files
+RUN echo 'server { \
+    listen 80; \
+    root /usr/share/nginx/html; \
+    index index.html; \
+    location / { try_files $uri $uri/ /index.html; } \
+}' > /output/nginx-static.conf
+
+CMD ["sh", "-c", "echo 'Static files ready in /output' && ls -la /output"]

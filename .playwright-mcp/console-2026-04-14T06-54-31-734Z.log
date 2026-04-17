@@ -1,0 +1,57 @@
+[      68ms] [INFO] %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold @ http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:21550
+[      93ms] [WARNING] ⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition. @ http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4435
+[      93ms] [WARNING] ⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath. @ http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4435
+[  422193ms] ReferenceError: handleDeleteRefs is not defined
+    at http://localhost:4000/src/components/ShotCard.tsx?t=1776150093843:883:26
+    at Array.map (<anonymous>)
+    at ShotCard (http://localhost:4000/src/components/ShotCard.tsx?t=1776150093843:861:23)
+    at renderWithHooks (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:11548:26)
+    at updateFunctionComponent (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:14582:28)
+    at beginWork (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:15924:22)
+    at HTMLUnknownElement.callCallback2 (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:3674:22)
+    at Object.invokeGuardedCallbackDev (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:3699:24)
+    at invokeGuardedCallback (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:3733:39)
+    at beginWork$1 (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:19765:15)
+[  422197ms] ReferenceError: handleDeleteRefs is not defined
+    at http://localhost:4000/src/components/ShotCard.tsx?t=1776150093843:883:26
+    at Array.map (<anonymous>)
+    at ShotCard (http://localhost:4000/src/components/ShotCard.tsx?t=1776150093843:861:23)
+    at renderWithHooks (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:11548:26)
+    at updateFunctionComponent (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:14582:28)
+    at beginWork (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:15924:22)
+    at HTMLUnknownElement.callCallback2 (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:3674:22)
+    at Object.invokeGuardedCallbackDev (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:3699:24)
+    at invokeGuardedCallback (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:3733:39)
+    at beginWork$1 (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:19765:15)
+[  422200ms] [ERROR] The above error occurred in the <ShotCard> component:
+
+    at ShotCard (http://localhost:4000/src/components/ShotCard.tsx?t=1776150093843:53:3)
+    at div
+    at main
+    at div
+    at ShotsPage (http://localhost:4000/src/pages/ShotsPage.tsx?t=1776150080854:61:20)
+    at RenderedRoute (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4131:5)
+    at Routes (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4601:5)
+    at FloatingDelayGroup (http://localhost:4000/node_modules/.vite/deps/chunk-AJHDJ5P7.js?v=58a65063:261:5)
+    at TooltipProvider2 (http://localhost:4000/node_modules/.vite/deps/@base-ui_react_tooltip.js?v=58a65063:709:5)
+    at TooltipProvider (http://localhost:4000/src/components/ui/tooltip.tsx:21:3)
+    at App
+    at Router (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4544:15)
+    at BrowserRouter (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:5290:5)
+
+Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://reactjs.org/link/error-boundaries to learn more about error boundaries. @ http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:14031
+[  422201ms] ReferenceError: handleDeleteRefs is not defined
+    at http://localhost:4000/src/components/ShotCard.tsx?t=1776150093843:883:26
+    at Array.map (<anonymous>)
+    at ShotCard (http://localhost:4000/src/components/ShotCard.tsx?t=1776150093843:861:23)
+    at renderWithHooks (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:11548:26)
+    at updateFunctionComponent (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:14582:28)
+    at beginWork (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:15924:22)
+    at beginWork$1 (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:19753:22)
+    at performUnitOfWork (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:19198:20)
+    at workLoopSync (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:19137:13)
+    at renderRootSync (http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:19116:15)
+[ 7078176ms] [INFO] %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold @ http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:21550
+[ 7078360ms] [WARNING] ⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition. @ http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4435
+[ 7078361ms] [WARNING] ⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath. @ http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4435

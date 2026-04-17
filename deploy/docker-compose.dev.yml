@@ -1,0 +1,147 @@
+# Dev backend stack — start with:
+#   make config    (write deploy/config.yml → deploy/config.env)
+#   make secrets   (write deploy/secrets.yml → deploy/secrets/)
+#   make dev       (runs both automatically, then starts all containers)
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: video-maker-redis-dev
+    ports:
+      - "6381:6379"
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: video-maker-backend-dev
+    container_name: video-maker-backend-dev
+    ports:
+      - "8002:8002"
+    volumes:
+      - ../backend:/app:z
+      - uv-cache:/root/.cache/uv
+      - backend-venv:/app/.venv
+      - ./secrets/gcp-sa.json:/run/secrets/gcp-sa.json:ro,z
+    secrets:
+      - gemini_api_key
+      - veo_api_key
+      - deepseek_api_key
+    env_file:
+      - path: ./config.env
+        required: true
+    working_dir: /app
+    environment:
+      REDIS_URL: redis://video-maker-redis-dev:6379
+      DATABASE_URL: sqlite+aiosqlite:////app/data/dev.db
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-sa.json
+      COSYVOICE_URL: http://video-maker-cosyvoice-vc:9880
+      HTTP_PROXY: http://host.containers.internal:10809
+      HTTPS_PROXY: http://host.containers.internal:10809
+      http_proxy: http://host.containers.internal:10809
+      https_proxy: http://host.containers.internal:10809
+    command: >
+      sh -c "export GEMINI_API_KEY=$(cat /run/secrets/gemini_api_key) &&
+             export VEO_API_KEY=$(cat /run/secrets/veo_api_key) &&
+             export DEEPSEEK_API_KEY=$(cat /run/secrets/deepseek_api_key) &&
+             uv run --project . uvicorn app.main:app --host 0.0.0.0 --port 8002
+             --reload --reload-dir /app/app --reload-dir /app/worker"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: video-maker-worker-dev
+    container_name: video-maker-worker-dev
+    volumes:
+      - ../backend:/app:z
+      - uv-cache:/root/.cache/uv
+      - backend-venv:/app/.venv
+      - ./secrets/gcp-sa.json:/run/secrets/gcp-sa.json:ro,z
+    secrets:
+      - gemini_api_key
+      - veo_api_key
+      - deepseek_api_key
+    env_file:
+      - path: ./config.env
+        required: true
+    working_dir: /app
+    environment:
+      REDIS_URL: redis://video-maker-redis-dev:6379
+      DATABASE_URL: sqlite+aiosqlite:////app/data/dev.db
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-sa.json
+      COSYVOICE_URL: http://video-maker-cosyvoice-vc:9880
+      HTTP_PROXY: http://host.containers.internal:10809
+      HTTPS_PROXY: http://host.containers.internal:10809
+      http_proxy: http://host.containers.internal:10809
+      https_proxy: http://host.containers.internal:10809
+    command: >
+      sh -c "export GEMINI_API_KEY=$(cat /run/secrets/gemini_api_key) &&
+             export VEO_API_KEY=$(cat /run/secrets/veo_api_key) &&
+             export DEEPSEEK_API_KEY=$(cat /run/secrets/deepseek_api_key) &&
+             uv run --project . python -m arq worker.arq_worker.WorkerSettings"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.41.0-jammy
+    container_name: video-maker-playwright
+    network_mode: host
+    command: npx playwright@1.41.0 run-server --port 3003 --host 0.0.0.0
+    restart: unless-stopped
+
+  cosyvoice-vc:
+    build:
+      context: ../cosyvoice-vc
+      dockerfile: Dockerfile
+    image: video-maker-cosyvoice-vc
+    container_name: video-maker-cosyvoice-vc
+    ports:
+      - "9880:9880"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      COSYVOICE_MODEL_DIR: FunAudioLLM/Fun-CosyVoice3-0.5B-2512
+      HTTP_PROXY: http://host.containers.internal:10809
+      HTTPS_PROXY: http://host.containers.internal:10809
+      http_proxy: http://host.containers.internal:10809
+      https_proxy: http://host.containers.internal:10809
+    restart: unless-stopped
+
+  frontend:
+    image: node:20-slim
+    container_name: video-maker-frontend-dev
+    ports:
+      - "4000:4000"
+    volumes:
+      - ../frontend-vite:/app:z
+    working_dir: /app
+    environment:
+      BACKEND_URL: http://video-maker-backend-dev:8002
+    # node_modules must exist on host before starting (run: cd frontend-vite && npm install)
+    command: npm run dev -- --host 0.0.0.0
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  uv-cache:
+  backend-venv:  # isolated venv for containers (avoids conflict with host uv)
+
+secrets:
+  gemini_api_key:
+    file: ./secrets/gemini_api_key  # written by: make secrets
+  veo_api_key:
+    file: ./secrets/veo_api_key  # written by: make secrets
+  deepseek_api_key:
+    file: ./secrets/deepseek_api_key  # written by: make secrets

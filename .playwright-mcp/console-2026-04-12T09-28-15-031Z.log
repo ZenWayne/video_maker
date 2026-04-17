@@ -1,0 +1,44 @@
+[     110ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[     607ms] [LOG] [Fast Refresh] done in 598ms @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[     915ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[     934ms] [LOG] [HMR] connected @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[     992ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:8000/api/projects/fd43263c-871d-4829-b097-92d9e195c7ce/events:0
+[     993ms] [ERROR] SSE connection error: Event @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:3272
+[    1012ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:8000/api/projects/fd43263c-871d-4829-b097-92d9e195c7ce/events:0
+[    1012ms] [ERROR] SSE connection error: Event @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:3272
+[   17627ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[   17655ms] [LOG] [Fast Refresh] done in 26ms @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[  614184ms] [ERROR] Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING @ http://localhost:3000/api/projects/fd43263c-871d-4829-b097-92d9e195c7ce/stream:0
+[  614184ms] [ERROR] SSE connection error: Event @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:3272
+[  614185ms] [ERROR] Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING @ http://localhost:3000/api/projects/fd43263c-871d-4829-b097-92d9e195c7ce/stream:0
+[  614187ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/__nextjs_original-stack-frames:0
+[  614190ms] [ERROR] WebSocket is already in CLOSING or CLOSED state. @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2790
+[  615193ms] [LOG] [HMR] connected @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[  615679ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[  615699ms] [LOG] [HMR] connected @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[  739237ms] [ERROR] SSE connection error: Event @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:3272
+[  739237ms] [ERROR] Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING @ http://localhost:3000/api/projects/fd43263c-871d-4829-b097-92d9e195c7ce/stream:0
+[  739244ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/__nextjs_original-stack-frames:0
+[  739244ms] [ERROR] WebSocket is already in CLOSING or CLOSED state. @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2790
+[  740240ms] [LOG] [HMR] connected @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[  740724ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[  740740ms] [LOG] [HMR] connected @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2431
+[  940876ms] [ERROR] SSE connection error: Event @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:3272
+[  940876ms] [ERROR] Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING @ http://localhost:3000/api/projects/fd43263c-871d-4829-b097-92d9e195c7ce/stream:0
+[  940885ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/__nextjs_original-stack-frames:0
+[  940886ms] [ERROR] WebSocket is already in CLOSING or CLOSED state. @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2790
+[  941879ms] [ERROR] WebSocket connection to 'ws://localhost:3000/_next/webpack-hmr?id=yTgRA_KZCPpjbSt-4uq14' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_client_12gpkjl._.js:13299
+[  942880ms] [ERROR] WebSocket connection to 'ws://localhost:3000/_next/webpack-hmr?id=yTgRA_KZCPpjbSt-4uq14' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_client_12gpkjl._.js:13299
+[  943877ms] [ERROR] SSE connection error: Event @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:3272
+[  943877ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/api/projects/fd43263c-871d-4829-b097-92d9e195c7ce/stream:0
+[  943881ms] [ERROR] WebSocket connection to 'ws://localhost:3000/_next/webpack-hmr?id=yTgRA_KZCPpjbSt-4uq14' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_client_12gpkjl._.js:13299
+[  943882ms] [ERROR] WebSocket is already in CLOSING or CLOSED state. @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2790
+[  944883ms] [ERROR] WebSocket connection to 'ws://localhost:3000/_next/webpack-hmr?id=yTgRA_KZCPpjbSt-4uq14' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_client_12gpkjl._.js:13299
+[  945885ms] [ERROR] WebSocket connection to 'ws://localhost:3000/_next/webpack-hmr?id=yTgRA_KZCPpjbSt-4uq14' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_client_12gpkjl._.js:13299
+[  946879ms] [ERROR] SSE connection error: Event @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:3272
+[  946879ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/api/projects/fd43263c-871d-4829-b097-92d9e195c7ce/stream:0
+[  946882ms] [ERROR] WebSocket is already in CLOSING or CLOSED state. @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2790
+[  949881ms] [ERROR] SSE connection error: Event @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:3272
+[  949882ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/api/projects/fd43263c-871d-4829-b097-92d9e195c7ce/stream:0
+[  949888ms] [ERROR] WebSocket is already in CLOSING or CLOSED state. @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_0gdr-x8._.js:2790
+[  950886ms] [ERROR] WebSocket connection to 'ws://localhost:3000/_next/webpack-hmr?id=yTgRA_KZCPpjbSt-4uq14' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/_next/static/chunks/0r9g_next_dist_client_12gpkjl._.js:13299

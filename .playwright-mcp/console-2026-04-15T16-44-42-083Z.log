@@ -1,0 +1,52 @@
+[      95ms] [INFO] %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold @ http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:21550
+[     172ms] [WARNING] ⚠️ React Router Future Flag Warning: React Router will begin wrapping state updates in `React.startTransition` in v7. You can use the `v7_startTransition` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_starttransition. @ http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4435
+[     172ms] [WARNING] ⚠️ React Router Future Flag Warning: Relative route resolution within Splat routes is changing in v7. You can use the `v7_relativeSplatPath` future flag to opt-in early. For more information, see https://reactrouter.com/v6/upgrading/future#v7_relativesplatpath. @ http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4435
+[     260ms] [ERROR] Warning: A component is changing an uncontrolled input to be controlled. This is likely caused by the value changing from undefined to a defined value, which should not happen. Decide between using a controlled or uncontrolled input element for the lifetime of the component. More info: https://reactjs.org/link/controlled-components%s 
+    at input
+    at label
+    at div
+    at div
+    at CardContent (http://localhost:4000/src/components/ui/card.tsx:130:24)
+    at div
+    at Card (http://localhost:4000/src/components/ui/card.tsx:19:3)
+    at ShotCard (http://localhost:4000/src/components/ShotCard.tsx?t=1776271110518:54:3)
+    at div
+    at main
+    at div
+    at ShotsPage (http://localhost:4000/src/pages/ShotsPage.tsx?t=1776271110518:65:20)
+    at RenderedRoute (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4131:5)
+    at Routes (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4601:5)
+    at FloatingDelayGroup (http://localhost:4000/node_modules/.vite/deps/chunk-AJHDJ5P7.js?v=58a65063:261:5)
+    at TooltipProvider2 (http://localhost:4000/node_modules/.vite/deps/@base-ui_react_tooltip.js?v=58a65063:709:5)
+    at TooltipProvider (http://localhost:4000/src/components/ui/tooltip.tsx:21:3)
+    at App
+    at Router (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4544:15)
+    at BrowserRouter (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:5290:5) @ http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:520
+[   54589ms] [ERROR] Warning: Function components cannot be given refs. Attempts to access this ref will fail. Did you mean to use React.forwardRef()?%s%s 
+
+Check the render method of `DialogClose`. 
+    at Button (http://localhost:4000/src/components/ui/button.tsx:50:3)
+    at DialogClose2 (http://localhost:4000/node_modules/.vite/deps/@base-ui_react_dialog.js?v=58a65063:148:5)
+    at div
+    at FloatingFocusManager (http://localhost:4000/node_modules/.vite/deps/chunk-AJHDJ5P7.js?v=58a65063:931:5)
+    at DialogPopup2 (http://localhost:4000/node_modules/.vite/deps/@base-ui_react_dialog.js?v=58a65063:251:5)
+    at FloatingPortal2 (http://localhost:4000/node_modules/.vite/deps/chunk-AJHDJ5P7.js?v=58a65063:470:5)
+    at DialogPortal2 (http://localhost:4000/node_modules/.vite/deps/@base-ui_react_dialog.js?v=58a65063:337:5)
+    at DialogPortal (http://localhost:4000/src/components/ui/dialog.tsx:38:28)
+    at DialogContent (http://localhost:4000/src/components/ui/dialog.tsx:80:3)
+    at DialogRoot (http://localhost:4000/node_modules/.vite/deps/@base-ui_react_dialog.js?v=58a65063:559:5)
+    at Dialog (http://localhost:4000/src/components/ui/dialog.tsx:22:22)
+    at TrimDialog (http://localhost:4000/src/components/TrimDialog.tsx:29:3)
+    at ShotCard (http://localhost:4000/src/components/ShotCard.tsx?t=1776271110518:54:3)
+    at div
+    at main
+    at div
+    at ShotsPage (http://localhost:4000/src/pages/ShotsPage.tsx?t=1776271110518:65:20)
+    at RenderedRoute (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4131:5)
+    at Routes (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4601:5)
+    at FloatingDelayGroup (http://localhost:4000/node_modules/.vite/deps/chunk-AJHDJ5P7.js?v=58a65063:261:5)
+    at TooltipProvider2 (http://localhost:4000/node_modules/.vite/deps/@base-ui_react_tooltip.js?v=58a65063:709:5)
+    at TooltipProvider (http://localhost:4000/src/components/ui/tooltip.tsx:21:3)
+    at App
+    at Router (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:4544:15)
+    at BrowserRouter (http://localhost:4000/node_modules/.vite/deps/react-router-dom.js?v=58a65063:5290:5) @ http://localhost:4000/node_modules/.vite/deps/chunk-NUMECXU6.js?v=58a65063:520

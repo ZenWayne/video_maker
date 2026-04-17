@@ -1,0 +1,23 @@
+# Application configuration — non-secret, like a K8s ConfigMap.
+# Committed to git. Apply with: make config
+#
+# Each key becomes an env var in backend/worker containers.
+# Overrides any host-injected proxy env vars (podman auto-injects lowercase variants).
+
+# Gemini model selection
+GEMINI_SCRIPT_MODEL: gemini-3.1-pro-preview
+GEMINI_DIRECTOR_MODEL: gemini-3.1-pro-preview
+
+# Veo video generation (via Vertex AI)
+VEO_MODEL: veo-3.1-fast-generate-001
+VEO_POLL_INTERVAL_SECONDS: "10"
+VEO_MAX_WAIT_SECONDS: "300"
+
+# Worker
+WORKER_POOL_SIZE: "4"
+
+# CosyVoice VC service
+COSYVOICE_URL: "http://video-maker-cosyvoice-vc:9880"
+
+# CORS — include both Vite dev and production origins
+CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000,http://127.0.0.1:4000"

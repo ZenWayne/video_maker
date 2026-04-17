@@ -1,0 +1,15 @@
+deploy/secrets.yml
+deploy/secrets/
+deploy/config.env
+backend/.venv/
+backend/data/
+backend/storage/
+storage/
+metadata.db
+frontend-vite/node_modules/
+frontend-vite/dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+test-results/
+playwright-report/

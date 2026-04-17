@@ -1,0 +1,231 @@
+- generic [ref=e1]:
+  - generic [ref=e3]:
+    - banner [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e16]:
+          - button [ref=e17] [cursor=pointer]:
+            - img
+          - heading [level=1] [ref=e197]: tarot
+          - generic [ref=e19]: 分镜审批
+          - generic [ref=e20]: 镜头 4/5
+        - generic [ref=e21]:
+          - generic [ref=e22]: 已选 0 个
+          - button [ref=e198] [cursor=pointer]: 全选
+    - main [ref=e9]:
+      - generic [ref=e24]:
+        - generic [ref=e25]:
+          - heading [level=2] [ref=e199]: 场景概览
+          - button [ref=e200] [cursor=pointer]:
+            - img
+            - text: 保存
+        - textbox [ref=e201]:
+          - /placeholder: 描述整体场景氛围...
+          - text: A cozy, dimly lit esoteric space. The speaker sits at a rustic wooden table with an astrology tapestry, crystals, and vintage jars in the background. The atmosphere is intimate, grounded, and slightly mysterious, framed vertically for a personal, one-on-one feel.
+      - generic [ref=e29]:
+        - generic [ref=e31]:
+          - generic [ref=e32]:
+            - generic [ref=e33]:
+              - button [ref=e34] [cursor=pointer]:
+                - img [ref=e35]
+              - generic [ref=e37]: "#1"
+              - generic [ref=e38]: 中景
+              - generic [ref=e39]: 8s
+            - generic [ref=e40]:
+              - generic [ref=e41]:
+                - img
+                - text: 断开
+              - button [ref=e42] [cursor=pointer]:
+                - img
+          - generic [ref=e43] [cursor=pointer]:
+            - img [ref=e202]
+            - img [ref=e46]
+          - generic [ref=e48]: People always ask me to read their relationship spreads, and honestly... the cards never lie about physical chemistry. It is usually right there.
+          - paragraph [ref=e49]: Looking directly at the camera with a calm, knowing expression, hands loosely clasped on the wooden table.
+          - generic [ref=e51]:
+            - generic [ref=e52]:
+              - img [ref=e203]
+              - generic [ref=e54]: "1"
+              - button [ref=e55] [cursor=pointer]:
+                - img [ref=e56]
+            - button [ref=e204] [cursor=pointer]:
+              - img
+              - text: 参考图
+          - generic [ref=e60]:
+            - img [ref=e205] [cursor=pointer]
+            - generic [ref=e63]:
+              - button [ref=e206] [cursor=pointer]:
+                - img
+                - text: 重新生成
+              - button [ref=e207] [cursor=pointer]:
+                - img
+                - text: 裁剪
+        - generic [ref=e67]:
+          - generic [ref=e68]:
+            - generic [ref=e69]:
+              - button [ref=e70] [cursor=pointer]:
+                - img [ref=e71]
+              - generic [ref=e73]: "#2"
+              - generic [ref=e74]: 特写
+              - generic [ref=e75]: 4s
+            - generic [ref=e76]:
+              - generic [ref=e77]:
+                - img
+                - text: 连续
+              - button [ref=e78] [cursor=pointer]:
+                - img
+          - generic [ref=e79] [cursor=pointer]:
+            - img [ref=e208]
+            - img [ref=e82]
+          - generic [ref=e84]: You think you are hiding that intense spark, but then the Devil card just shows up.
+          - paragraph [ref=e85]: Slight tilt of the head, a small knowing smirk appears when mentioning the Devil card.
+          - generic [ref=e86]:
+            - img [ref=e209] [cursor=pointer]
+            - generic [ref=e89]:
+              - button [ref=e210] [cursor=pointer]:
+                - img
+                - text: 重新生成
+              - button [ref=e211] [cursor=pointer]:
+                - img
+                - text: 裁剪
+        - generic [ref=e93]:
+          - generic [ref=e94]:
+            - generic [ref=e95]:
+              - button [ref=e96] [cursor=pointer]:
+                - img [ref=e97]
+              - generic [ref=e99]: "#3"
+              - generic [ref=e100]: 中景
+              - generic [ref=e101]: 8s
+            - generic [ref=e102]:
+              - generic [ref=e103]:
+                - img
+                - text: 断开
+              - button [ref=e104] [cursor=pointer]:
+                - img
+          - generic [ref=e105] [cursor=pointer]:
+            - img [ref=e212]
+            - img [ref=e108]
+          - generic [ref=e110]: Sometimes I pull the Ace of Wands next to the Two of Cups. That is when I know it is not just physical attraction, but a really deep, almost magnetic soul connection.
+          - paragraph [ref=e111]: The camera angle shifts slightly. She gestures softly with her hands as if placing imaginary cards on the table.
+          - generic [ref=e112]:
+            - generic [ref=e113]: "Upload: Ace of Wands and Two of Cups tarot cards — representing fiery passion and emotional connection"
+            - generic [ref=e114] [cursor=pointer]:
+              - checkbox [ref=e213]
+              - text: 使用上一镜头末帧作为首张参考图
+            - generic [ref=e116]:
+              - generic [ref=e117]:
+                - img [ref=e214]
+                - generic [ref=e119]: "1"
+                - button [ref=e120] [cursor=pointer]:
+                  - img [ref=e121]
+              - generic [ref=e124]:
+                - img [ref=e215]
+                - generic [ref=e126]: "2"
+                - button [ref=e127] [cursor=pointer]:
+                  - img [ref=e128]
+              - generic [ref=e131]:
+                - img [ref=e216]
+                - generic [ref=e133]: "3"
+                - button [ref=e134] [cursor=pointer]:
+                  - img [ref=e135]
+              - button [ref=e217] [cursor=pointer]:
+                - img
+                - text: 参考图
+          - generic [ref=e139]:
+            - img [ref=e218] [cursor=pointer]
+            - generic [ref=e142]:
+              - button [ref=e219] [cursor=pointer]:
+                - img
+                - text: 重新生成
+              - button [ref=e220] [cursor=pointer]:
+                - img
+                - text: 裁剪
+        - generic [ref=e146]:
+          - generic [ref=e147]:
+            - generic [ref=e148]:
+              - button [ref=e149] [cursor=pointer]:
+                - img [ref=e150]
+              - generic [ref=e152]: "#4"
+              - generic [ref=e153]: 特写
+              - generic [ref=e154]: 8s
+            - generic [ref=e155]:
+              - generic [ref=e156]:
+                - img
+                - text: 连续
+              - button [ref=e157] [cursor=pointer]:
+                - img
+          - generic [ref=e158] [cursor=pointer]:
+            - img [ref=e221]
+            - img [ref=e161]
+          - generic [ref=e163]: But when the swords enter the mix... well, that is a totally different story. It usually means someone is just overthinking the intimacy.
+          - paragraph [ref=e164]: Leaning in slightly closer to the lens, lowering her expression a bit for a more intimate, serious tone.
+          - generic [ref=e165]:
+            - img [ref=e222] [cursor=pointer]
+            - generic [ref=e168]:
+              - button [ref=e223] [cursor=pointer]:
+                - img
+                - text: 重新生成
+              - button [ref=e224] [cursor=pointer]:
+                - img
+                - text: 裁剪
+        - generic [ref=e172]:
+          - generic [ref=e173]:
+            - generic [ref=e174]:
+              - button [ref=e175] [cursor=pointer]:
+                - img [ref=e176]
+              - generic [ref=e178]: "#5"
+              - generic [ref=e179]: 中景
+              - generic [ref=e180]: 8s
+            - generic [ref=e181]:
+              - generic [ref=e182]:
+                - img
+                - text: 断开
+              - button [ref=e183] [cursor=pointer]:
+                - img
+          - generic [ref=e184]: If you want to know what your current spread says about your love life, just pull three cards tonight. You might be surprised by the raw truth they actually reveal.
+          - paragraph [ref=e185]: Relaxing back into her chair, maintaining steady eye contact with a warm, authentic expression.
+          - generic [ref=e186]:
+            - generic [ref=e187]: "Upload: A three-card tarot spread on a dark wooden table — representing a love reading"
+            - generic [ref=e188] [cursor=pointer]:
+              - checkbox [ref=e225]
+              - text: 使用上一镜头末帧作为首张参考图
+            - button [ref=e226] [cursor=pointer]:
+              - img
+              - text: 参考图
+      - generic [ref=e193]:
+        - button [ref=e227] [cursor=pointer]:
+          - img
+          - text: 退回修改脚本
+        - generic [ref=e195]:
+          - button [disabled]:
+            - img
+            - text: 重跑选中的镜
+          - button [ref=e228] [cursor=pointer]:
+            - img
+            - text: 通过，继续生成下一个（4/5）
+  - 'dialog "裁剪视频 — Shot #1" [ref=e232]':
+    - 'heading "裁剪视频 — Shot #1" [level=2] [ref=e234]'
+    - generic [ref=e235]:
+      - slider [ref=e241]: "188"
+      - generic [ref=e242]:
+        - generic [ref=e243]: "帧: 188 / 188"
+        - generic [ref=e244]: "时间: 7.83s / 7.83s"
+      - generic [ref=e245]:
+        - generic [ref=e246]:
+          - button "-10" [ref=e247] [cursor=pointer]:
+            - img
+            - text: "-10"
+          - button "-1" [ref=e248] [cursor=pointer]:
+            - img
+            - text: "-1"
+          - button "+1" [disabled]:
+            - text: "+1"
+            - img
+          - button "+10" [disabled]:
+            - text: "+10"
+            - img
+        - generic [ref=e249]:
+          - button "取消" [ref=e250] [cursor=pointer]
+          - button "确认裁剪" [disabled]
+    - button "Close" [active] [ref=e251] [cursor=pointer]:
+      - img
+      - generic [ref=e252]: Close

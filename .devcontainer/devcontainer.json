@@ -1,0 +1,82 @@
+{
+  "name": "Video Maker Full Stack Dev",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "frontend",
+  "workspaceFolder": "/workspace",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20",
+      "nodeGypDependencies": true
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12",
+      "installTools": true
+    },
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        // Frontend
+        "bradlc.vscode-tailwindcss",
+        "esbenp.prettier-vscode",
+        "ms-vscode.vscode-typescript-next",
+        "formulahendry.auto-rename-tag",
+        // Backend
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "matangover.mypy",
+        "tamasfe.even-better-toml",
+        // General
+        "christian-kohler.path-intellisense",
+        "ms-vscode.vscode-json",
+        "dbaeumer.vscode-eslint",
+        "GitHub.vscode-pull-request-github",
+        "redhat.vscode-yaml",
+        "ms-kubernetes-tools.vscode-kubernetes-tools"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "typescript.preferences.importModuleSpecifier": "relative",
+        "python.defaultInterpreterPath": "/workspace/backend/.venv/bin/python",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": false,
+        "python.linting.ruffEnabled": true,
+        "python.formatting.provider": "ruff",
+        "python.analysis.typeCheckingMode": "basic",
+        "ruff.path": ["/workspace/backend/.venv/bin/ruff"],
+        "ruff.lint.args": ["--config=/workspace/backend/pyproject.toml"],
+        "mypy.enabled": true
+      }
+    }
+  },
+  "forwardPorts": [3000, 8000, 6379],
+  "portsAttributes": {
+    "3000": {
+      "label": "Frontend",
+      "onAutoForward": "notify"
+    },
+    "8000": {
+      "label": "Backend API",
+      "onAutoForward": "notify"
+    },
+    "6379": {
+      "label": "Redis",
+      "onAutoForward": "silent"
+    }
+  },
+  "postCreateCommand": ".devcontainer/scripts/post-create.sh",
+  "postStartCommand": ".devcontainer/scripts/post-start.sh",
+  "remoteUser": "root",
+  "mounts": [
+    "source=${localWorkspaceFolder}/frontend/node_modules,target=/workspace/frontend/node_modules,type=volume",
+    "source=${localWorkspaceFolder}/backend/.venv,target=/workspace/backend/.venv,type=volume",
+    "source=${localWorkspaceFolder}/backend/data,target=/workspace/backend/data,type=volume",
+    "source=${localWorkspaceFolder}/backend/storage,target=/workspace/backend/storage,type=volume"
+  ]
+}
