@@ -1,0 +1,90 @@
+version: "3.8"
+
+services:
+  redis:
+    image: docker.io/redis:7-alpine
+    container_name: video-maker-redis
+    # Internal only - no external port exposure
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        DEBUG_MODE: "false"
+    container_name: video-maker-backend
+    # Internal only - no external port exposure
+    expose:
+      - "8000"
+    volumes:
+      # Persistent storage (bind mounts for proper permissions)
+      - ./backend/storage:/workspace/storage
+      - ./backend/data:/workspace/data
+      # GCP credentials (read-only)
+      - ./secrets/vertex.json:/secrets/vertex.json:ro
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite+aiosqlite:////workspace/data/metadata.db
+      - STORAGE_ROOT=/workspace/storage
+      - GOOGLE_APPLICATION_CREDENTIALS=/secrets/vertex.json
+      - GCP_PROJECT=${GCP_PROJECT:-local-project}
+      - GCP_LOCATION=${GCP_LOCATION:-us-central1}
+      - CORS_ORIGINS=http://localhost:3001,http://127.0.0.1:3001,http://localhost:5173,http://localhost:8080
+      - GEMINI_SCRIPT_MODEL=${GEMINI_SCRIPT_MODEL:-gemini-2.5-pro}
+      - GEMINI_DIRECTOR_MODEL=${GEMINI_DIRECTOR_MODEL:-gemini-2.5-flash}
+      - WORKER_POOL_SIZE=${WORKER_POOL_SIZE:-4}
+      - VEO_POLL_INTERVAL_SECONDS=${VEO_POLL_INTERVAL_SECONDS:-10}
+      - VEO_MAX_WAIT_SECONDS=${VEO_MAX_WAIT_SECONDS:-300}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        DEBUG_MODE: "false"
+    container_name: video-maker-worker
+    command: python -m worker.arq_worker
+    volumes:
+      - ./backend/storage:/workspace/storage
+      - ./backend/data:/workspace/data
+      - ./secrets/vertex.json:/secrets/vertex.json:ro
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite+aiosqlite:////workspace/data/metadata.db
+      - STORAGE_ROOT=/workspace/storage
+      - GOOGLE_APPLICATION_CREDENTIALS=/secrets/vertex.json
+      - GCP_PROJECT=${GCP_PROJECT:-local-project}
+      - GCP_LOCATION=${GCP_LOCATION:-us-central1}
+      - WORKER_POOL_SIZE=${WORKER_POOL_SIZE:-4}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend-vite
+      dockerfile: Dockerfile
+    container_name: video-maker-frontend
+    ports:
+      - "3001:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  backend-storage:
+  backend-db:

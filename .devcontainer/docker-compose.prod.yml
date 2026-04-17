@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  # Nginx - Reverse Proxy + Static Files
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - frontend_dist:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+    networks:
+      - video-maker-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/nginx-health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Backend API
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/workspace
+      - APP_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite+aiosqlite:///workspace/data/production.db
+      - LOG_LEVEL=info
+      - CORS_ORIGINS=http://localhost,http://127.0.0.1
+    volumes:
+      - backend_data:/workspace/data
+      - backend_storage:/workspace/storage
+      - backend_logs:/workspace/logs
+    depends_on:
+      - redis
+    networks:
+      - video-maker-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis for task queue
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    networks:
+      - video-maker-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Background Worker
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "arq", "worker.WorkerSettings"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/workspace
+      - APP_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite+aiosqlite:///workspace/data/production.db
+      - LOG_LEVEL=info
+    volumes:
+      - backend_data:/workspace/data
+      - backend_storage:/workspace/storage
+      - backend_logs:/workspace/logs
+    depends_on:
+      - redis
+      - backend
+    networks:
+      - video-maker-network
+    deploy:
+      replicas: 2  # Scale workers as needed
+
+  # Frontend Builder (builds static files)
+  frontend-builder:
+    build:
+      context: ../frontend
+      dockerfile: ../.devcontainer/Dockerfile.prod
+    volumes:
+      - frontend_dist:/app/.next/static
+    command: ["sh", "-c", "cp -r /app/.next/standalone/* /app/.next/static/ 2>/dev/null || true; cp -r /app/dist/* /app/.next/static/ 2>/dev/null || true; echo 'Build complete'"]
+    # For static export, we need to copy the built files
+
+volumes:
+  frontend_dist:
+  backend_data:
+  backend_storage:
+  backend_logs:
+  redis_data:
+
+networks:
+  video-maker-network:
+    driver: bridge

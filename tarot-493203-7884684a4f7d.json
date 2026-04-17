@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "tarot-493203",
+  "private_key_id": "7884684a4f7dd06ed3a309442ad5a99b4abbcb08",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7l8QgE1tG25uv\n4Bv/OqSeuKH2cn2tgzhi4hIbOd4eM6cNdFwlOFBCVARpBlnAnJSw24FwK8bMb3r0\n3DErmmAjgCo2XJ9nHh9VosFuO3ClPWdXjpx+DWUGpk8Z4QM9HGn1SVv3IDRzWQe1\nURm60ZhUFop9yUVcb8yT1Cdphj0AxQO+HqMigg+bAFI2WPXB2aS7R7zn1lIVz1g2\nAY7jD5OhySawK3JvjKbOrCX/SxbG9W+NtjGp3Wvu3BJHfLHM1mSSTwBViQpiXufq\nRN1wN7ObyXPgBG/1CHwwxv5llKHFy+MyOwHkAa02mF/1cNO2hDW2XOdZ82yDFqWn\nGZpSMBBFAgMBAAECggEAIqIB/ib8sL/+BfIS0SO/PSNamXBpNfW2HQFeNOMR2BMS\nqgf7tA5puNkgiFA5FTeDNwSLaM1YMil5soeNV160lZFFmcwvTJ8Ry2JVIjf8k7Ea\nqV5Fk3r/FgNxspYpXiinAjclMKJkNJBw/R9IKAamgA26Sz8znD1ysC8YiKGVFRU5\na3oVonj35n4alIFiDOofvZoxe450cR77kHsHLvRqIlRM2530ULRRBedJk720d6ap\nGn91gchjAv+1td3vX4eTNy+cXK33nEBBEmzZgWXbQN2e9gDjpri0gGUC+mZJMIZx\nI4u4r2l+ESd/p11V20IZOsF2mrqgdIWjpnFgqk1kqQKBgQDgaCUZg+Dut13CUDKK\nbU51UoiQuNITcW8rZYdYql3niNYeJLsUfCav+IIl7CsJbvSOcAE01esYiy5Cn5El\nBaIbZitNwZBuWzhgQ2MRSP2+X+8mc9UQnsepCsdcgBc0d8wCDdTQ2GGBiChxzL0d\nZbJ8EMluIIsDxoVf2v+IyG2XGQKBgQDWAM6cOM7atTP0ksge47PdNaPkdPelGuKX\nU4JOgvfiYnRtsvuIN2toXL2JrAvg51qPEjzjMzbYmBa4aBZuytAV2OwOL/2z16G6\nYWetpfOuwCyiGHsFUQJNb6vuxvKVhoAFfhI4R1twLwaPgTkyCCQsl6/UIzaRF8zb\nLb3eZ7sEDQKBgQC6QxdQJ1uDKOYEzEY3CeVOklPSM+YCx2urzJjb6oUJElYPLROv\nPCFsfEuiqHVMXjFVLPiDX2/ErnmWSRXTceqM7W/SGXEFeGfB1w0aosgixUQeWZSn\nN/Onhs/VImigXzMRHWPgeUntlxNi6bqq9OeB/PkElLRuTNAVsRPa9+mmuQKBgQCX\n20DBmIoopla04YeCa+ARQ+QF1H56uYY7DbY00jjmeyjVQyG8Ol9MUirpS52uPV2E\nktOEAa6Uqe/NcYchnWdlaWWwd5uXB5eq8z2n+k/eHF5PtAFv91kj6+9cY+517lhg\nDWMOboxTIfuMz4zvlNlej1DkvwwUj4f9rArEjGUn7QKBgHK0uCkK97Zan57aGwvn\nTmEJhfTTWqHolZa6Cd1BHboYmMcg5LItuarn+6bny5AfiOA2Ddod1ZMSi1bofEd1\nAVwaBJyOnWwAIP/SG5wfJgYyLmQZwQNQ7aTTo1JpnPVErGboT2ZcyzNV033zBUyD\nXFtnefnUL4qc2z02SpxdSVwz\n-----END PRIVATE KEY-----\n",
+  "client_email": "vertex-video@tarot-493203.iam.gserviceaccount.com",
+  "client_id": "109363494611604436012",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/vertex-video%40tarot-493203.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

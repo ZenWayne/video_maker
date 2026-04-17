@@ -1,0 +1,19 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - button [ref=e5]:
+          - img
+        - heading "加载中..." [level=1] [ref=e6]
+        - generic [ref=e7]: 生成脚本中
+    - main [ref=e8]:
+      - generic [ref=e9]:
+        - img [ref=e10]
+        - paragraph [ref=e12]: 正在生成脚本，请稍候...
+      - generic [ref=e13]:
+        - generic [ref=e14]:
+          - generic [ref=e15]: 连接中...
+          - generic [ref=e16]: 0%
+        - progressbar [ref=e17]: x
+  - button "Open Next.js Dev Tools" [ref=e24] [cursor=pointer]:
+    - img [ref=e25]

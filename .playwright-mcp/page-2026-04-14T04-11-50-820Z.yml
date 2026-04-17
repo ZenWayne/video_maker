@@ -1,0 +1,117 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - button [ref=e7] [cursor=pointer]:
+          - img
+        - heading "塔罗牌" [level=1] [ref=e8]
+        - generic [ref=e9]: 分镜审批
+        - generic [ref=e10]: 镜头 0/5
+      - generic [ref=e11]:
+        - generic [ref=e12]: 已选 0 个
+        - button "全选" [ref=e13] [cursor=pointer]
+  - main [ref=e14]:
+    - generic [ref=e15]:
+      - generic [ref=e17]:
+        - generic [ref=e18]:
+          - generic [ref=e19]:
+            - button [ref=e20] [cursor=pointer]:
+              - img [ref=e21]
+            - generic [ref=e23]: "#1"
+            - generic [ref=e24]: 中景
+          - generic [ref=e26]:
+            - img
+            - text: 断开
+        - generic [ref=e27] [cursor=pointer]:
+          - img "Shot 1" [ref=e28]
+          - img [ref=e30]
+        - generic [ref=e32]: Okay, so... I've just pulled some cards for you on this connection you're asking about.
+        - generic [ref=e33]:
+          - generic [ref=e34]: 运镜提示词
+          - text: 固定机位中景，画面平稳。人物双手自然置于塔罗牌旁，直视镜头，眼神交流。嘴唇自然开合，口型与说话节奏完美同步，面部肌肉伴随发音自然牵引，伴有自然的呼吸起伏和随意的眨眼。角色说：『Okay, so... I've just pulled some cards for you on this connection you're asking about.』
+        - button "参考图" [ref=e36] [cursor=pointer]:
+          - img
+          - text: 参考图
+        - generic [ref=e37]:
+          - img "尾帧" [ref=e39] [cursor=pointer]
+          - button "运镜提示词" [ref=e41] [cursor=pointer]:
+            - img
+            - text: 运镜提示词
+      - generic [ref=e43]:
+        - generic [ref=e44]:
+          - generic [ref=e45]:
+            - button [ref=e46] [cursor=pointer]:
+              - img [ref=e47]
+            - generic [ref=e49]: "#2"
+            - generic [ref=e50]: 特写
+          - generic [ref=e52]:
+            - img
+            - text: 断开
+        - generic [ref=e53] [cursor=pointer]:
+          - img "Shot 2" [ref=e54]
+          - img [ref=e56]
+        - generic [ref=e58]: The first card, the Two of Cups, shows a real soul connection here. A genuine meeting of minds, you know?
+        - generic [ref=e59]:
+          - generic [ref=e60]: 运镜提示词
+          - text: 固定机位特写，一只手在画面前景轻巧地翻开一张面朝下的纸牌，展示出牌面。视线从纸牌上抬起，望向镜头，脸上浮现出温暖而了然的微笑。嘴唇自然开合，口型与说话节奏完美同步，面部肌肉伴随发音自然牵引，伴有自然的呼吸起伏和随意的眨眼。角色说：『The first card, the Two of Cups, shows a real soul connection here. A genuine meeting of minds, you know?』
+        - button "参考图" [ref=e62] [cursor=pointer]:
+          - img
+          - text: 参考图
+        - generic [ref=e63]:
+          - img "尾帧" [ref=e65] [cursor=pointer]
+          - button "运镜提示词" [ref=e67] [cursor=pointer]:
+            - img
+            - text: 运镜提示词
+      - generic [ref=e69]:
+        - generic [ref=e70]:
+          - generic [ref=e71]:
+            - button [ref=e72] [cursor=pointer]:
+              - img [ref=e73]
+            - generic [ref=e75]: "#3"
+            - generic [ref=e76]: 中景
+          - generic [ref=e78]:
+            - img
+            - text: 连续
+        - generic [ref=e79]: But then we have the Five of Swords right next to it. This one... it suggests some unspoken conflict, maybe miscommunication creating distance.
+        - button "运镜提示词" [ref=e82] [cursor=pointer]:
+          - img
+          - text: 运镜提示词
+      - generic [ref=e84]:
+        - generic [ref=e85]:
+          - generic [ref=e86]:
+            - button [ref=e87] [cursor=pointer]:
+              - img [ref=e88]
+            - generic [ref=e90]: "#4"
+            - generic [ref=e91]: 特写
+          - generic [ref=e93]:
+            - img
+            - text: 连续
+        - generic [ref=e94]: And finally, the Star. This is a card of hope and healing. It's about being open and honest to find that clarity again.
+        - button "运镜提示词" [ref=e97] [cursor=pointer]:
+          - img
+          - text: 运镜提示词
+      - generic [ref=e99]:
+        - generic [ref=e100]:
+          - generic [ref=e101]:
+            - button [ref=e102] [cursor=pointer]:
+              - img [ref=e103]
+            - generic [ref=e105]: "#5"
+            - generic [ref=e106]: 中景
+          - generic [ref=e108]:
+            - img
+            - text: 连续
+        - generic [ref=e109]: So yeah... there's definitely something real here. It just needs a little bit of light.
+        - button "运镜提示词" [ref=e112] [cursor=pointer]:
+          - img
+          - text: 运镜提示词
+    - generic [ref=e113]:
+      - button "退回修改脚本" [ref=e114] [cursor=pointer]:
+        - img
+        - text: 退回修改脚本
+      - generic [ref=e115]:
+        - button "重跑选中的镜" [disabled]:
+          - img
+          - text: 重跑选中的镜
+        - button "通过，继续生成下一个（0/5）" [disabled]:
+          - img
+          - text: 通过，继续生成下一个（0/5）

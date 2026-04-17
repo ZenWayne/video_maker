@@ -1,0 +1,43 @@
+- generic [active] [ref=e1]:
+  - button "Open Next.js Dev Tools" [ref=e60] [cursor=pointer]:
+    - img [ref=e61]
+  - alert [ref=e64]
+  - generic [ref=e65]:
+    - banner [ref=e66]:
+      - generic [ref=e67]:
+        - button [ref=e68]:
+          - img
+        - heading "新建项目" [level=1] [ref=e69]
+    - main [ref=e70]:
+      - generic [ref=e71]:
+        - generic [ref=e72]:
+          - generic [ref=e73]:
+            - text: 项目标题
+            - generic [ref=e74]: "*"
+          - textbox "项目标题 *" [ref=e75]:
+            - /placeholder: 给你的项目起个名字
+        - generic [ref=e76]:
+          - generic [ref=e77]:
+            - text: 主题描述
+            - generic [ref=e78]: "*"
+          - textbox "主题描述 *" [ref=e79]:
+            - /placeholder: 用一句话描述视频的主题内容...
+        - generic [ref=e80]:
+          - generic [ref=e81]:
+            - text: 角色参考图*
+            - generic [ref=e82]: (最多 3 张)
+          - generic [ref=e84] [cursor=pointer]:
+            - img [ref=e85]
+            - paragraph [ref=e88]: 拖拽图片到此处，或点击选择
+            - paragraph [ref=e89]: 支持 JPG、PNG、WebP 格式
+        - generic [ref=e90]:
+          - generic [ref=e91]:
+            - text: 场景参考图
+            - generic [ref=e92]: (最多 3 张)
+          - generic [ref=e94] [cursor=pointer]:
+            - img [ref=e95]
+            - paragraph [ref=e98]: 拖拽图片到此处，或点击选择
+            - paragraph [ref=e99]: 支持 JPG、PNG、WebP 格式
+        - generic [ref=e100]:
+          - button "取消" [ref=e101]
+          - button "创建并启动" [ref=e102]
