@@ -38,6 +38,7 @@ export default function ProjectPage() {
           case 'script_review':
           case 'shot_generating':
           case 'shot_review':
+          case 'shots_ready':
             navigate(`/projects/${projectId}/shots`, { replace: true })
             break
           case 'exporting':

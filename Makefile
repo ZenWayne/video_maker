@@ -16,12 +16,14 @@ REGISTRY      ?= ghcr.io
 NAMESPACE     ?= $(shell echo $(USER) | tr '[:upper:]' '[:lower:]')
 FRONTEND_IMAGE ?= video-maker-frontend
 BACKEND_IMAGE  ?= video-maker-backend
-COSYVOICE_IMAGE ?= video-maker-cosyvoice-vc
+COSYVOICE_IMAGE  ?= video-maker-cosyvoice-vc
+VC_WORKER_IMAGE  ?= video-maker-vc-worker
 TAG           ?= latest
 
 FRONTEND_FULL_IMAGE  = $(REGISTRY)/$(NAMESPACE)/$(FRONTEND_IMAGE):$(TAG)
 BACKEND_FULL_IMAGE   = $(REGISTRY)/$(NAMESPACE)/$(BACKEND_IMAGE):$(TAG)
-COSYVOICE_FULL_IMAGE = $(REGISTRY)/$(NAMESPACE)/$(COSYVOICE_IMAGE):$(TAG)
+COSYVOICE_FULL_IMAGE  = $(REGISTRY)/$(NAMESPACE)/$(COSYVOICE_IMAGE):$(TAG)
+VC_WORKER_FULL_IMAGE  = $(REGISTRY)/$(NAMESPACE)/$(VC_WORKER_IMAGE):$(TAG)
 
 # Local ports
 FRONTEND_PORT ?= 4000
@@ -135,7 +137,7 @@ dev-redis:
 
 # View dev logs
 dev-logs:
-	podman compose -f $(DEV_COMPOSE) logs -f
+	podman compose -f $(DEV_COMPOSE) logs --tail 100
 
 # Build frontend and serve via nginx + backend on same port (no CORS, no HMR)
 # All traffic: http://localhost:$(FRONTEND_PORT)
@@ -188,14 +190,23 @@ build-backend:
 		-f backend/Dockerfile \
 		./backend
 
-# Build CosyVoice VC service image
+# Build CosyVoice VC service image (standalone HTTP service, optional)
 build-cosyvoice:
 	@echo "Building CosyVoice VC image..."
 	podman build \
 		--platform linux/amd64 \
 		-t $(COSYVOICE_FULL_IMAGE) \
 		-f cosyvoice-vc/Dockerfile \
-		./cosyvoice-vc
+		.
+
+# Build VC worker image (vc2 + ONNX models baked in)
+build-vc-worker:
+	@echo "Building VC worker image..."
+	podman build \
+		--platform linux/amd64 \
+		-t $(VC_WORKER_FULL_IMAGE) \
+		-f deploy/Dockerfile.vc-worker \
+		.
 
 # =============================================
 # Push Images

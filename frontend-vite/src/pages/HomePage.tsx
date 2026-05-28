@@ -222,7 +222,7 @@ export default function HomePage() {
                 <CardContent>
                   {/* 缩略图或进度 */}
                   {project.status === 'exported' && project.final_video_path ? (
-                    <div className="aspect-video bg-zinc-100 rounded-lg overflow-hidden">
+                    <div className={`${project.aspect_ratio === '9:16' ? 'aspect-[9/16]' : 'aspect-video'} bg-zinc-100 rounded-lg overflow-hidden`}>
                       <video
                         src={project.final_video_path}
                         className="w-full h-full object-cover"
@@ -231,7 +231,7 @@ export default function HomePage() {
                   ) : ['scripting', 'shot_generating', 'exporting'].includes(project.status) ? (
                     <ProgressStream projectId={project.id} />
                   ) : (
-                    <div className="aspect-video bg-zinc-100 rounded-lg flex items-center justify-center">
+                    <div className={`${project.aspect_ratio === '9:16' ? 'aspect-[9/16]' : 'aspect-video'} bg-zinc-100 rounded-lg flex items-center justify-center`}>
                       <span className="text-zinc-400 text-sm">{project.theme_text.slice(0, 50)}...</span>
                     </div>
                   )}

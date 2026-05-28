@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { createSSEConnection, type SSEConnection } from '@/lib/sse'
 import { Progress } from '@/components/ui/progress'
 import { useStore } from '@/lib/state'
+import { api } from '@/lib/api'
 import type {
   SSEEventType,
   StateSnapshotData,
@@ -31,19 +32,34 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
   const [lastEventTime, setLastEventTime] = useState(Date.now())
   const sseRef = useRef<SSEConnection | null>(null)
 
-  // 检查长时间无事件
+  // Fallback: 当有异步操作进行中且 SSE 长时间无事件时，从 API 拉取最新状态
+  // 防止 Redis pub/sub 事件丢失导致前端卡住
   useEffect(() => {
-    const interval = setInterval(() => {
+    const interval = setInterval(async () => {
       const elapsed = Date.now() - lastEventTime
-      if (elapsed > 60000) {
-        setStatus('检查服务器状态...')
-        // 触发父组件刷新
-        onEvent?.('state_change', { check: true })
+      if (elapsed < 30000) return
+
+      // 检查是否有进行中的异步操作
+      const currentShots = useStore.getState().shots
+      const hasPending = currentShots.some(
+        (s) =>
+          s.vc_status === 'converting' ||
+          s.cc_status === 'calibrating' ||
+          s.tf_status === 'generating',
+      )
+      if (!hasPending) return
+
+      try {
+        const detail = await api.getProject(projectId)
+        setShots(detail.shots)
+        setLastEventTime(Date.now())
+      } catch {
+        // ignore fetch errors
       }
     }, 10000)
 
     return () => clearInterval(interval)
-  }, [lastEventTime, onEvent])
+  }, [projectId, lastEventTime, setShots])
 
   // 计算总体进度
   const calculateProgress = useCallback((shots: { status: string }[]) => {
@@ -107,8 +123,8 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       const completedData = data as ShotCompletedData
       updateShot(completedData.shot_id, {
         status: 'completed',
-        video_path: completedData.video_path,
-        last_frame_path: completedData.last_frame_path,
+        video_path: `${completedData.video_path}?t=${Date.now()}`,
+        last_frame_path: `${completedData.last_frame_path}?t=${Date.now()}`,
       })
       // 重新计算进度
       const currentShots = useStore.getState().shots
@@ -168,6 +184,122 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       setStatus(statusData.message)
     })
 
+    // tf_started - 尾帧开始生成
+    const unsubscribeTfStarted = sse.subscribe('tf_started', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number }
+      updateShot(d.shot_id, { tf_status: 'generating' } as Partial<{ tf_status: string }>)
+      setStatus(`分镜 #${d.shot_id} 尾帧生成中`)
+      onEvent?.('tf_started', data)
+    })
+
+    // tf_pose_analyzed - 动作分析完成，开始生成尾帧图片
+    const unsubscribeTfPoseAnalyzed = sse.subscribe('tf_pose_analyzed', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number; end_pose: string }
+      setStatus(`分镜 #${d.shot_id} 动作分析完成，正在生成尾帧图片`)
+      onEvent?.('tf_pose_analyzed', data)
+    })
+
+    // tf_completed - 尾帧生成完成
+    const unsubscribeTfCompleted = sse.subscribe('tf_completed', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number; target_last_frame_path: string; motion_prompt: string }
+      updateShot(d.shot_id, {
+        tf_status: 'done',
+        target_last_frame_path: `${d.target_last_frame_path}?t=${Date.now()}`,
+        motion_prompt: d.motion_prompt,
+        tf_confirmed: false,
+      } as Partial<{ tf_status: string; target_last_frame_path: string; motion_prompt: string; tf_confirmed: boolean }>)
+      updateProjectStatus('shot_review')
+      setStatus(`分镜 #${d.shot_id} 尾帧已生成，请确认`)
+      addToast({ type: 'success', message: `分镜 #${d.shot_id} 尾帧已生成，请确认` })
+      onEvent?.('tf_completed', data)
+    })
+
+    // tf_failed - 尾帧生成失败
+    const unsubscribeTfFailed = sse.subscribe('tf_failed', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number; error_message: string }
+      updateShot(d.shot_id, {
+        tf_status: 'failed',
+        tf_error_message: d.error_message,
+      } as Partial<{ tf_status: string; tf_error_message: string }>)
+      updateProjectStatus('shot_review')
+      setStatus(`分镜 #${d.shot_id} 尾帧生成失败`)
+      addToast({ type: 'error', message: `分镜 #${d.shot_id} 尾帧生成失败: ${d.error_message}` })
+      onEvent?.('tf_failed', data)
+    })
+
+    // vc_started - 音色转换开始
+    const unsubscribeVcStarted = sse.subscribe('vc_started', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number }
+      updateShot(d.shot_id, { vc_status: 'converting' } as any)
+      setStatus(`分镜 #${d.shot_id} 音色转换中`)
+      onEvent?.('vc_started', data)
+    })
+
+    // vc_completed - 音色转换完成
+    const unsubscribeVcCompleted = sse.subscribe('vc_completed', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number; video_path: string; version?: number }
+      const vp = d.version ? `${d.video_path}?v=${d.version}` : d.video_path
+      updateShot(d.shot_id, { vc_status: 'done', video_path: vp } as any)
+      setStatus(`分镜 #${d.shot_id} 音色转换完成`)
+      onEvent?.('vc_completed', data)
+    })
+
+    // vc_failed - 音色转换失败
+    const unsubscribeVcFailed = sse.subscribe('vc_failed', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number; error_message: string }
+      updateShot(d.shot_id, { vc_status: 'failed', vc_error_message: d.error_message } as any)
+      addToast({ type: 'error', message: `分镜 #${d.shot_id} 音色转换失败` })
+      onEvent?.('vc_failed', data)
+    })
+
+    // vc_batch_done - 批量音色转换完成
+    const unsubscribeVcBatchDone = sse.subscribe('vc_batch_done', (data) => {
+      setLastEventTime(Date.now())
+      addToast({ type: 'success', message: '批量音色转换完成' })
+      onEvent?.('vc_batch_done', data)
+    })
+
+    // cc_started - 人物校准开始
+    const unsubscribeCcStarted = sse.subscribe('cc_started', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number }
+      updateShot(d.shot_id, { cc_status: 'calibrating' } as any)
+      setStatus(`分镜 #${d.shot_id} 人物校准中`)
+      onEvent?.('cc_started', data)
+    })
+
+    // cc_completed - 人物校准完成
+    const unsubscribeCcCompleted = sse.subscribe('cc_completed', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number; last_frame_path: string }
+      updateShot(d.shot_id, { cc_status: 'done', last_frame_path: `${d.last_frame_path}?t=${Date.now()}` } as any)
+      setStatus(`分镜 #${d.shot_id} 人物校准完成`)
+      onEvent?.('cc_completed', data)
+    })
+
+    // cc_failed - 人物校准失败
+    const unsubscribeCcFailed = sse.subscribe('cc_failed', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number; error_message: string }
+      updateShot(d.shot_id, { cc_status: 'failed', cc_error_message: d.error_message } as any)
+      addToast({ type: 'error', message: `分镜 #${d.shot_id} 人物校准失败` })
+      onEvent?.('cc_failed', data)
+    })
+
+    // cc_batch_done - 批量人物校准完成
+    const unsubscribeCcBatchDone = sse.subscribe('cc_batch_done', (data) => {
+      setLastEventTime(Date.now())
+      addToast({ type: 'success', message: '批量人物校准完成' })
+      onEvent?.('cc_batch_done', data)
+    })
+
     // pipeline_failed - Pipeline 失败
     const unsubscribePipelineFailed = sse.subscribe('pipeline_failed', (data) => {
       setLastEventTime(Date.now())
@@ -189,6 +321,18 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       unsubscribeShotReviewReady()
       unsubscribeExportDone()
       unsubscribeWorkerStatus()
+      unsubscribeTfStarted()
+      unsubscribeTfPoseAnalyzed()
+      unsubscribeTfCompleted()
+      unsubscribeTfFailed()
+      unsubscribeVcStarted()
+      unsubscribeVcCompleted()
+      unsubscribeVcFailed()
+      unsubscribeVcBatchDone()
+      unsubscribeCcStarted()
+      unsubscribeCcCompleted()
+      unsubscribeCcFailed()
+      unsubscribeCcBatchDone()
       unsubscribePipelineFailed()
       sse.close()
     }

@@ -59,6 +59,13 @@ class ShotResponse(BaseModel):
     reference_image_hint: Optional[str] = None
     vc_status: Optional[str] = None
     vc_error_message: Optional[str] = None
+    cc_status: Optional[str] = None
+    cc_error_message: Optional[str] = None
+    target_last_frame_path: Optional[str] = None
+    tf_status: Optional[str] = None
+    tf_error_message: Optional[str] = None
+    tf_confirmed: bool = False
+    auto_trim: bool = True
     created_at: datetime
     updated_at: datetime
 
@@ -73,6 +80,7 @@ class ShotUpdate(BaseModel):
     align_with_previous: Optional[bool] = None
     use_prev_last_frame: Optional[bool] = None
     shot_duration: Optional[int] = Field(default=None, ge=4, le=8)
+    auto_trim: Optional[bool] = None
 
 
 class ShotTrimRequest(BaseModel):
@@ -169,6 +177,10 @@ class ProjectList(BaseModel):
 
 class RegenerateShotsRequest(BaseModel):
     shot_ids: List[int]
+
+
+class ExportRequest(BaseModel):
+    crossfade_duration: Optional[float] = Field(default=None, ge=0, le=2.0)
 
 
 class PipelineActionResponse(BaseModel):

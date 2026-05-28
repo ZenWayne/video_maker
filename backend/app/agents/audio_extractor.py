@@ -44,7 +44,11 @@ def remux_video_with_audio(video_path: str, audio_path: str, output_path: str) -
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    # ffmpeg -y -i video -i audio -c:v copy -map 0:v:0 -map 1:a:0 -shortest output
+    # Normalise audio to 48kHz stereo AAC to match original video format.
+    # VC output is 24kHz mono; without normalisation the concat demuxer
+    # produces broken audio when mixing VC'd and non-VC'd shots.
+    # apad: pad silence if VC audio is shorter than video (tokenisation rounding).
+    # shortest: stop at video end so audio never exceeds video duration.
     (
         FFmpeg()
         .option("y")
@@ -53,6 +57,10 @@ def remux_video_with_audio(video_path: str, audio_path: str, output_path: str) -
         .output(
             output_path,
             vcodec="copy",
+            acodec="aac",
+            ar=48000,
+            ac=2,
+            af="apad",
             shortest=None,
             map=["0:v:0", "1:a:0"],
         )

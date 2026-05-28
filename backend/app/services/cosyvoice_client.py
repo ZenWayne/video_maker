@@ -1,45 +1,37 @@
-"""HTTP client for CosyVoice Voice Conversion service."""
+"""In-process voice conversion using vc2.VoiceConverter (no HTTP)."""
 
+import asyncio
 import logging
+import os
+from functools import lru_cache
 from pathlib import Path
-
-import httpx
-
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=1)
+def _get_converter():
+    """Load VoiceConverter once and cache for the process lifetime."""
+    from vc2 import VoiceConverter  # installed from CosyVoice/vc2_pkg
+
+    model_dir = os.environ.get("MODEL_DIR", "/workspace/exported_vc2")
+    num_threads = int(os.environ.get("VC_NUM_THREADS", "4"))
+    logger.info("Loading VoiceConverter from %s (threads=%d)", model_dir, num_threads)
+    vc = VoiceConverter(model_dir, num_threads=num_threads)
+    logger.info("VoiceConverter ready (sample_rate=%d)", vc.sample_rate)
+    return vc
+
+
 async def voice_convert(source_wav: str, prompt_wav: str, output_wav: str) -> str:
-    """Call the CosyVoice VC service to convert voice timbre.
+    """Convert voice timbre of source_wav to match prompt_wav.
 
-    Args:
-        source_wav: Path to source audio (voice to be converted)
-        prompt_wav: Path to reference audio (target voice timbre)
-        output_wav: Path to save converted audio
-
-    Returns:
-        The output_wav path
-
-    Raises:
-        httpx.HTTPStatusError: If the VC service returns an error
+    Runs onnxruntime inference in a thread-pool executor so the
+    async event loop is not blocked.
     """
     Path(output_wav).parent.mkdir(parents=True, exist_ok=True)
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        with open(source_wav, "rb") as src, open(prompt_wav, "rb") as ref:
-            logger.info(
-                "Calling CosyVoice VC: source=%s, prompt=%s", source_wav, prompt_wav
-            )
-            resp = await client.post(
-                f"{settings.cosyvoice_url}/vc",
-                files={
-                    "source_audio": ("source.wav", src, "audio/wav"),
-                    "prompt_audio": ("prompt.wav", ref, "audio/wav"),
-                },
-            )
-            resp.raise_for_status()
-            Path(output_wav).write_bytes(resp.content)
-
-    logger.info("VC result saved to %s", output_wav)
+    vc = _get_converter()
+    loop = asyncio.get_running_loop()
+    logger.info("VC: %s → %s", source_wav, output_wav)
+    await loop.run_in_executor(None, vc.convert, source_wav, prompt_wav, output_wav)
+    logger.info("VC done: %s", output_wav)
     return output_wav

@@ -47,6 +47,8 @@ export interface Project {
 }
 
 export type VcStatus = 'converting' | 'done' | 'failed'
+export type CcStatus = 'calibrating' | 'done' | 'failed'
+export type TfStatus = 'generating' | 'done' | 'failed'
 
 export interface Shot {
   id: number
@@ -70,6 +72,13 @@ export interface Shot {
   reference_image_hint: string | null
   vc_status: VcStatus | null
   vc_error_message: string | null
+  cc_status: CcStatus | null
+  cc_error_message: string | null
+  target_last_frame_path: string | null
+  tf_status: TfStatus | null
+  tf_error_message: string | null
+  tf_confirmed: boolean
+  auto_trim: boolean
 }
 
 export interface ReferenceImage {
@@ -103,6 +112,14 @@ export type SSEEventType =
   | 'vc_completed'
   | 'vc_failed'
   | 'vc_batch_done'
+  | 'cc_started'
+  | 'cc_completed'
+  | 'cc_failed'
+  | 'cc_batch_done'
+  | 'tf_started'
+  | 'tf_pose_analyzed'
+  | 'tf_completed'
+  | 'tf_failed'
 
 export interface WorkerStatusData {
   message: string

@@ -32,7 +32,7 @@ def _default_provider() -> LLMProvider:
             base_url=settings.deepseek_base_url,
             model=settings.deepseek_model,
         )
-    return GeminiProvider(api_key=settings.gemini_api_key, vertexai_api_key=settings.veo_api_key)
+    return GeminiProvider(project=settings.gemini_project, location=settings.gemini_location)
 
 
 async def run_shot_editor(
