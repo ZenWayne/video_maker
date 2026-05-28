@@ -20,7 +20,7 @@ def test_generate_videos_config_last_frame_field():
 @pytest.mark.asyncio
 async def test_last_frame_set_in_image_to_video_mode():
     """When last_frame_path is provided in image-to-video mode, config.last_frame is set."""
-    from app.agents.video_generator import generate_video
+    from app.agents.video_generator import generate_video, VertexVeoProvider
 
     captured_config = None
 
@@ -38,7 +38,8 @@ async def test_last_frame_set_in_image_to_video_mode():
     mock_client = MagicMock()
     mock_client.aio.models.generate_videos = fake_generate_videos
 
-    with patch("app.agents.video_generator._get_veo_client", return_value=mock_client), \
+    with patch.object(VertexVeoProvider, "_client", return_value=mock_client), \
+         patch("app.agents.video_generator.center_crop_to_aspect", side_effect=lambda p, *a, **k: p), \
          patch("google.genai.types.Image") as mock_image:
         mock_image.from_file.return_value = MagicMock()
         await generate_video(
@@ -59,7 +60,7 @@ async def test_last_frame_set_in_image_to_video_mode():
 @pytest.mark.asyncio
 async def test_last_frame_not_set_in_asset_mode():
     """When reference_image_paths are provided (ASSET mode), last_frame is NOT set."""
-    from app.agents.video_generator import generate_video
+    from app.agents.video_generator import generate_video, VertexVeoProvider
 
     captured_config = None
 
@@ -77,7 +78,8 @@ async def test_last_frame_not_set_in_asset_mode():
     mock_client = MagicMock()
     mock_client.aio.models.generate_videos = fake_generate_videos
 
-    with patch("app.agents.video_generator._get_veo_client", return_value=mock_client), \
+    with patch.object(VertexVeoProvider, "_client", return_value=mock_client), \
+         patch("app.agents.video_generator.center_crop_to_aspect", side_effect=lambda p, *a, **k: p), \
          patch("google.genai.types.Image") as mock_image, \
          patch("google.genai.types.VideoGenerationReferenceImage") as mock_ref_image, \
          patch("google.genai.types.VideoGenerationReferenceType") as mock_ref_type:
@@ -100,7 +102,7 @@ async def test_last_frame_not_set_in_asset_mode():
 @pytest.mark.asyncio
 async def test_last_frame_not_set_when_none():
     """When last_frame_path is None, config.last_frame stays None."""
-    from app.agents.video_generator import generate_video
+    from app.agents.video_generator import generate_video, VertexVeoProvider
 
     captured_config = None
 
@@ -118,7 +120,8 @@ async def test_last_frame_not_set_when_none():
     mock_client = MagicMock()
     mock_client.aio.models.generate_videos = fake_generate_videos
 
-    with patch("app.agents.video_generator._get_veo_client", return_value=mock_client), \
+    with patch.object(VertexVeoProvider, "_client", return_value=mock_client), \
+         patch("app.agents.video_generator.center_crop_to_aspect", side_effect=lambda p, *a, **k: p), \
          patch("google.genai.types.Image") as mock_image:
         mock_image.from_file.return_value = MagicMock()
         await generate_video(
