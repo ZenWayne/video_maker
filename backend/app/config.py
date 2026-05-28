@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # Worker settings (from config.yml / config.env)
     worker_pool_size: int = 4
 
+    # Video provider selection: "vertex" (Veo via Vertex AI) or "kie" (kie.ai REST)
+    video_provider: str = "vertex"
+
     # Veo (video generation via Vertex AI)
     veo_api_key: str = ""
     veo_project: str = "tarot-493203"
@@ -39,6 +42,17 @@ class Settings(BaseSettings):
     veo_model: str = "veo-3.1-fast-generate-001"
     veo_poll_interval_seconds: int = 10
     veo_max_wait_seconds: int = 300
+
+    # kie.ai (video generation via REST — used when video_provider == "kie")
+    # API key from https://kie.ai/api-key — set via secrets/kie_api_key
+    kie_api_key: str = ""
+    kie_base_url: str = "https://api.kie.ai"
+    kie_upload_url: str = "https://kieai.redpandaai.co"
+    # veo3 | veo3_fast | veo3_lite (REFERENCE_2_VIDEO requires veo3_fast)
+    kie_veo_model: str = "veo3_fast"
+    kie_resolution: str = "1080p"  # 720p | 1080p | 4k
+    kie_poll_interval_seconds: int = 10
+    kie_max_wait_seconds: int = 600
 
     # Voice conversion (in-process vc2.VoiceConverter)
     model_dir: str = "/workspace/exported_vc2"
