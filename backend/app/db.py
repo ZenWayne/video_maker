@@ -71,3 +71,24 @@ async def _run_migrations(conn):
         await conn.execute(
             sa.text("ALTER TABLE shots ADD COLUMN vc_error_message TEXT")
         )
+    if not await _has_column("shots", "cc_status"):
+        await conn.execute(
+            sa.text("ALTER TABLE shots ADD COLUMN cc_status VARCHAR(20)")
+        )
+    if not await _has_column("shots", "cc_error_message"):
+        await conn.execute(
+            sa.text("ALTER TABLE shots ADD COLUMN cc_error_message TEXT")
+        )
+    for col, typ in [
+        ("target_last_frame_path", "TEXT"),
+        ("tf_status", "VARCHAR(20)"),
+        ("tf_error_message", "TEXT"),
+        ("tf_confirmed", "BOOLEAN DEFAULT 0"),
+    ]:
+        if not await _has_column("shots", col):
+            await conn.execute(sa.text(f"ALTER TABLE shots ADD COLUMN {col} {typ}"))
+
+    if not await _has_column("shots", "auto_trim"):
+        await conn.execute(
+            sa.text("ALTER TABLE shots ADD COLUMN auto_trim BOOLEAN NOT NULL DEFAULT 1")
+        )

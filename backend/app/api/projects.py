@@ -184,6 +184,15 @@ async def create_project(
                     if s.custom_reference_paths else None
                 ),
                 "reference_image_hint": s.reference_image_hint,
+                "use_prev_last_frame": s.use_prev_last_frame,
+                "vc_status": s.vc_status,
+                "vc_error_message": s.vc_error_message,
+                "cc_status": s.cc_status,
+                "cc_error_message": s.cc_error_message,
+                "target_last_frame_path": to_media_url(s.target_last_frame_path),
+                "tf_status": s.tf_status,
+                "tf_error_message": s.tf_error_message,
+                "tf_confirmed": bool(s.tf_confirmed),
                 "created_at": s.created_at,
                 "updated_at": s.updated_at,
             }
@@ -266,6 +275,15 @@ async def get_project(
                     if s.custom_reference_paths else None
                 ),
                 "reference_image_hint": s.reference_image_hint,
+                "use_prev_last_frame": s.use_prev_last_frame,
+                "vc_status": s.vc_status,
+                "vc_error_message": s.vc_error_message,
+                "cc_status": s.cc_status,
+                "cc_error_message": s.cc_error_message,
+                "target_last_frame_path": to_media_url(s.target_last_frame_path),
+                "tf_status": s.tf_status,
+                "tf_error_message": s.tf_error_message,
+                "tf_confirmed": bool(s.tf_confirmed),
                 "created_at": s.created_at,
                 "updated_at": s.updated_at,
             }

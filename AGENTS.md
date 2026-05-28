@@ -55,6 +55,61 @@ services:
 
 
 
+## Shot 素材文件变更审计
+
+**任何修改 shot 素材文件（视频、音频、帧图片）的代码变更，必须审计所有引用这些文件的下游代码路径，确认不会读到过期文件。**
+
+### 背景
+
+每个 shot 目录下存在多个版本的素材文件，它们之间有依赖关系：
+
+| 文件 | 用途 | 产生时机 |
+|------|------|----------|
+| `output.mp4` | 当前视频（`shot.video_path`） | 生成 / 裁剪 / VC / 还原 |
+| `output_original.mp4` | 裁剪前原始备份 | 首次裁剪时从 `output.mp4` 重命名 |
+| `output_pre_vc.mp4` | VC 前备份 | 首次 voice clone 时从 `output.mp4` 复制 |
+| `last_frame.png` | 最后一帧 | 生成 / 裁剪 / VC / 还原时重新提取 |
+| `last_frame_pre_cc.png` | 角色校准前备份 | 首次 CC 时复制 |
+| `audio_original.wav` | VC 前原始音频 | VC 时从视频提取 |
+
+### 审计规则
+
+当你的代码变更涉及以下操作时，**必须启动审计**：
+
+1. **修改了任何写入 / 重命名 / 删除素材文件的逻辑**（裁剪、还原、VC、CC、生成）
+2. **新增了读取素材文件的代码路径**（导出、合并、预览等）
+3. **改变了素材文件的命名或存储位置**
+
+### 审计检查清单
+
+- [ ] 所有下游读取方是否通过 `shot.video_path`（DB 字段）或 `shot_output_path()` 获取路径，而非硬编码文件名
+- [ ] 备份文件（`output_original.mp4`、`output_pre_vc.mp4`、`last_frame_pre_cc.png`）在素材变更后是否需要清除或更新
+- [ ] 相关的 status 字段（`vc_status`、`cc_status`）是否需要重置
+- [ ] `get_original_video_for_audio()` 的优先级链是否仍然正确
+- [ ] 新代码路径是否会意外读到过期的备份文件
+
+### 示例：裁剪操作需要清理的关联文件
+
+```python
+# 裁剪/还原后必须清理：
+# 1. 重新提取 last_frame
+# 2. 删除 pre-CC last_frame 备份 + 重置 cc_status
+# 3. 删除 pre-VC video 备份 + 重置 vc_status
+```
+
+
+## Google GenAI — 必须使用 Vertex AI
+
+**所有后端对接 `google.genai` 的代码必须使用 `vertexai=True`，通过 service account 认证，禁止使用 API key。**
+
+```python
+# ✓ 正确
+client = genai.Client(vertexai=True, project=settings.project, location=settings.location)
+
+# ✗ 禁止
+client = genai.Client(api_key=settings.gemini_api_key)
+```
+
 ## Playwright Tests — AI Endpoint Mocking
 
 **Always mock AI-triggering backend endpoints in Playwright tests to avoid billing.**
@@ -64,6 +119,8 @@ Endpoints that trigger AI workers (mock with `route.fulfill`):
 - `POST /api/projects/{id}/approve-script`
 - `POST /api/projects/{id}/regenerate-script`
 - `POST /api/projects/{id}/regenerate-shots`
+- `POST /api/projects/{id}/shots/{shot_id}/generate-tail-frame`
+- `POST /api/projects/{id}/shots/{shot_id}/confirm-tail-frame`
 - `POST /api/projects/{id}/export`
 
 ```typescript

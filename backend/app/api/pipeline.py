@@ -1,10 +1,13 @@
 """Pipeline API routes for video generation workflow."""
 
 import json
+import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, HTTPException, Header, UploadFile, File
@@ -18,7 +21,7 @@ from app.models.project import Project, Shot, ReferenceImage
 from app.models.schemas import (
     ProjectResponse, StoryboardUpdate, ShotUpdate, ShotAiEditRequest,
     ShotTrimRequest, RegenerateShotsRequest, PipelineActionResponse,
-    ReferenceVoiceRequest,
+    ReferenceVoiceRequest, ExportRequest,
 )
 from app.services.state_machine import (
     ProjectStatus, ShotStatus,
@@ -27,10 +30,53 @@ from app.services.state_machine import (
 from app.services.storage import (
     storyboard_path, archived_storyboard_path, shot_custom_frames_dir, to_media_url,
     shot_pre_vc_video_path, shot_audio_original_path, shot_audio_vc_path,
+    shot_pre_cc_last_frame_path,
 )
 from app.services.events import publish_event
 
 router = APIRouter()
+
+
+def _shot_needs_tail_frame(shot: Shot) -> bool:
+    """Check if a shot should go through tail frame generation before video."""
+    if shot.tf_confirmed:
+        return False  # already confirmed
+    # Shot 1 or connected shots need tail frames
+    return shot.shot_id == 1 or shot.align_with_previous
+
+
+async def _enqueue_next_shot_task(
+    project_id: str, session: AsyncSession, arq, user: str
+) -> str:
+    """Pick the next pending shot and enqueue the right task (tail frame or video).
+
+    Returns the enqueued job name.
+    """
+    result = await session.execute(
+        select(Shot)
+        .where(
+            Shot.project_id == project_id,
+            Shot.status.in_([ShotStatus.PENDING.value, ShotStatus.FAILED.value]),
+        )
+        .order_by(Shot.shot_id)
+        .limit(1)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        return "none"
+
+    if _shot_needs_tail_frame(shot):
+        shot.tf_status = "generating"
+        shot.tf_confirmed = False
+        session.add(shot)
+        await session.commit()
+        await arq.enqueue_job(
+            "run_tail_frame_pipeline", project_id, shot.shot_id, f"user:{user}"
+        )
+        return "run_tail_frame_pipeline"
+    else:
+        await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}")
+        return "run_shot_pipeline"
 
 
 def _require_user(x_user_name: Optional[str] = Header(default=None)) -> str:
@@ -218,19 +264,24 @@ async def approve_script(
     except InvalidTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    # Reset all shots to PENDING
+    # Reset all shots to PENDING and clear tail frame state
     result = await session.execute(
         select(Shot).where(Shot.project_id == project_id)
     )
     for shot in result.scalars().all():
         shot.status = ShotStatus.PENDING.value
         shot.error_message = None
+        shot.motion_prompt = None
+        shot.tf_status = None
+        shot.tf_error_message = None
+        shot.tf_confirmed = False
+        shot.target_last_frame_path = None
         session.add(shot)
     await session.commit()
 
-    # Enqueue shot pipeline task
+    # Enqueue tail frame or video pipeline for the first pending shot
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}")
+    job = await _enqueue_next_shot_task(project_id, session, arq, user)
 
     return {"status": "queued", "message": "Shot generation queued"}
 
@@ -253,7 +304,9 @@ async def regenerate_shots(
     except InvalidTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    # Reset specified shots to PENDING
+    # Reset specified shots to PENDING and clear post-processing state.
+    # Preserve target tail frame and motion prompt when the tail-frame file
+    # still exists on disk so the re-run uses the latest materials.
     result = await session.execute(
         select(Shot).where(
             Shot.project_id == project_id,
@@ -263,12 +316,42 @@ async def regenerate_shots(
     for shot in result.scalars().all():
         shot.status = ShotStatus.PENDING.value
         shot.error_message = None
+        shot.video_path = None
+        shot.last_frame_path = None
+        shot.vc_status = None
+        shot.vc_error_message = None
+        shot.cc_status = None
+        shot.cc_error_message = None
+
+        has_valid_tail_frame = (
+            shot.target_last_frame_path
+            and Path(shot.target_last_frame_path).exists()
+        )
+        logger.info(
+            "regenerate shot %d: target_last_frame_path=%s exists=%s has_valid=%s",
+            shot.shot_id,
+            shot.target_last_frame_path,
+            Path(shot.target_last_frame_path).exists() if shot.target_last_frame_path else "N/A",
+            has_valid_tail_frame,
+        )
+        if has_valid_tail_frame:
+            # Keep target_last_frame_path, motion_prompt as-is
+            shot.tf_status = "done"
+            shot.tf_error_message = None
+            shot.tf_confirmed = True
+        else:
+            shot.motion_prompt = None
+            shot.tf_status = None
+            shot.tf_error_message = None
+            shot.tf_confirmed = False
+            shot.target_last_frame_path = None
+
         session.add(shot)
     await session.commit()
 
-    # Enqueue shot pipeline task
+    # Enqueue tail frame or video pipeline for the first pending shot
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}")
+    job = await _enqueue_next_shot_task(project_id, session, arq, user)
 
     return {"status": "queued", "message": "Shot regeneration queued"}
 
@@ -280,21 +363,37 @@ async def continue_generation(
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
-    """Continue generating the next pending shot (approve current, generate next)."""
+    """Continue generating the next pending shot (approve current, generate next).
+
+    Unlike approve-script, this does NOT auto-generate tail frames.
+    The user is expected to have already generated and confirmed tail frames
+    for shots that need them before clicking continue.
+    """
     project = await _get_project_or_404(project_id, session)
 
     if project.status != ProjectStatus.SHOT_REVIEW.value:
         raise HTTPException(status_code=409, detail="Project must be in shot_review status")
 
-    # Check at least one pending shot exists
+    # Find next pending shot
     result = await session.execute(
-        select(Shot).where(
+        select(Shot)
+        .where(
             Shot.project_id == project_id,
             Shot.status.in_([ShotStatus.PENDING.value, ShotStatus.FAILED.value]),
         )
+        .order_by(Shot.shot_id)
+        .limit(1)
     )
-    if not result.scalars().first():
+    next_shot = result.scalar_one_or_none()
+    if not next_shot:
         raise HTTPException(status_code=400, detail="No pending shots to generate")
+
+    # Validate: if the shot needs a tail frame, it must be confirmed already
+    if _shot_needs_tail_frame(next_shot):
+        raise HTTPException(
+            status_code=400,
+            detail=f"镜头 #{next_shot.shot_id} 需要先生成并确认尾帧",
+        )
 
     try:
         await transition_project_status(
@@ -303,6 +402,7 @@ async def continue_generation(
     except InvalidTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
+    # Directly enqueue video generation — no auto tail frame generation
     arq = await _get_arq_redis(redis)
     await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}")
 
@@ -340,6 +440,8 @@ async def patch_shot(
         shot.use_prev_last_frame = body.use_prev_last_frame
     if body.shot_duration is not None:
         shot.shot_duration = body.shot_duration
+    if body.auto_trim is not None:
+        shot.auto_trim = body.auto_trim
 
     shot.updated_at = datetime.utcnow()
     session.add(shot)
@@ -354,6 +456,7 @@ async def patch_shot(
         "align_with_previous": shot.align_with_previous,
         "use_prev_last_frame": shot.use_prev_last_frame,
         "shot_duration": shot.shot_duration,
+        "auto_trim": shot.auto_trim,
     }
 
 
@@ -416,9 +519,119 @@ async def ai_edit_shot(
     return result
 
 
+@router.post("/projects/{project_id}/shots/{shot_id}/ai-edit-prompt")
+async def ai_edit_motion_prompt(
+    project_id: str,
+    shot_id: int,
+    body: ShotAiEditRequest,
+):
+    """Use AI to revise a shot's motion prompt based on a user instruction."""
+    from app.agents.llm import GeminiProvider
+    from app.db import AsyncSession as session_factory
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Shot).where(
+                Shot.project_id == project_id, Shot.shot_id == shot_id
+            )
+        )
+        shot = result.scalar_one_or_none()
+        if not shot:
+            raise HTTPException(status_code=404, detail="Shot not found")
+        if not shot.motion_prompt:
+            raise HTTPException(status_code=400, detail="Shot has no motion prompt yet")
+
+        current_prompt = shot.motion_prompt
+        shot_type = shot.shot_type
+        text = shot.text
+        duration = shot.shot_duration
+
+    provider = GeminiProvider(
+        project=settings.gemini_project, location=settings.gemini_location
+    )
+    system = (
+        "You are a professional video motion director. The user gives you an existing "
+        "Veo motion prompt and a revision instruction.\n"
+        "Revise the prompt according to the instruction. Output ONLY the revised full "
+        "motion prompt in English. No explanation.\n"
+        "Rules:\n"
+        "- Never describe character appearance (face, gender, clothing, colors)\n"
+        "- 100% focus on motion, camera movement, expression changes\n"
+        "- If there is dialogue, keep the lip-sync instructions\n"
+        "- All visible body parts must remain visible throughout the shot — no unmotivated "
+        "disappearances; if a body part exits frame, describe the exit trajectory\n"
+        "- The output MUST be in English even if the input is in another language"
+    )
+    user_msg = (
+        f"Shot type: {shot_type}\n"
+        f"Duration: {duration}s\n"
+        f"Dialogue: {text or 'None'}\n\n"
+        f"Current motion prompt:\n{current_prompt}\n\n"
+        f"Revision instruction: {body.instruction}\n\n"
+        f"Output the revised full motion prompt in English:"
+    )
+
+    try:
+        new_prompt = await provider.generate_text(
+            model=settings.gemini_director_model,
+            system_prompt=system,
+            user_message=user_msg,
+            temperature=0.7,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI generation failed: {e}")
+
+    return {"motion_prompt": new_prompt}
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/rewrite-prompt")
+async def rewrite_motion_prompt(
+    project_id: str,
+    shot_id: int,
+):
+    """Re-generate a shot's motion prompt from scratch using the Director agent."""
+    from app.agents.director import run_director as run_director_agent
+    from app.agents.llm import GeminiProvider
+    from app.db import AsyncSession as session_factory
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Shot).where(
+                Shot.project_id == project_id, Shot.shot_id == shot_id
+            )
+        )
+        shot = result.scalar_one_or_none()
+        if not shot:
+            raise HTTPException(status_code=404, detail="Shot not found")
+
+        shot_type = shot.shot_type
+        visual_description = shot.visual_description
+        text = shot.text
+        duration = shot.shot_duration
+
+    provider = GeminiProvider(
+        project=settings.gemini_project, location=settings.gemini_location
+    )
+
+    try:
+        new_prompt = await run_director_agent(
+            shot_id=shot_id,
+            shot_type=shot_type,
+            visual_description=visual_description,
+            text=text,
+            duration=duration,
+            llm_provider=provider,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Director agent failed: {e}")
+
+    return {"motion_prompt": new_prompt}
+
+
 @router.post("/projects/{project_id}/export", status_code=202)
 async def export_project(
     project_id: str,
+    body: ExportRequest = ExportRequest(),
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
@@ -447,7 +660,7 @@ async def export_project(
 
     # Enqueue merger task
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_merger", project_id, f"user:{user}")
+    await arq.enqueue_job("run_merger", project_id, f"user:{user}", body.crossfade_duration)
 
     return {"status": "queued", "message": "Export queued"}
 
@@ -461,6 +674,17 @@ async def cancel_generation(
 ):
     """Cancel shot generation and return to shot review."""
     project = await _get_project_or_404(project_id, session)
+
+    # Reset any in-progress shots back to pending
+    result = await session.execute(
+        select(Shot).where(
+            Shot.project_id == project_id,
+            Shot.status.in_(["video_generating", "prompt_generating"]),
+        )
+    )
+    for shot in result.scalars().all():
+        shot.status = ShotStatus.PENDING.value
+        session.add(shot)
 
     try:
         await transition_project_status(
@@ -528,6 +752,134 @@ async def reset_project(
     return {"status": "draft", "message": "Project reset to draft"}
 
 
+@router.post("/projects/{project_id}/shots/{shot_id}/generate-tail-frame", status_code=202)
+async def generate_tail_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+    redis=Depends(get_redis),
+):
+    """Generate a target tail frame for a shot (director + tail frame generation)."""
+    project = await _get_project_or_404(project_id, session)
+
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    # Transition to SHOT_GENERATING
+    try:
+        await transition_project_status(
+            project, ProjectStatus.SHOT_GENERATING, f"user:{user}", session, redis
+        )
+    except InvalidTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    shot.tf_status = "generating"
+    shot.tf_error_message = None
+    shot.tf_confirmed = False
+    shot.target_last_frame_path = None
+    session.add(shot)
+    await session.commit()
+
+    arq = await _get_arq_redis(redis)
+    await arq.enqueue_job("run_tail_frame_pipeline", project_id, shot_id, f"user:{user}")
+
+    return {"status": "queued", "shot_id": shot_id}
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/confirm-tail-frame", status_code=202)
+async def confirm_tail_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+    redis=Depends(get_redis),
+):
+    """Confirm tail frame and start video generation for this shot."""
+    project = await _get_project_or_404(project_id, session)
+
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    if shot.tf_status != "done":
+        raise HTTPException(status_code=400, detail="Tail frame not generated yet")
+
+    if not shot.target_last_frame_path:
+        raise HTTPException(status_code=400, detail="No target tail frame exists")
+
+    shot.tf_confirmed = True
+    session.add(shot)
+    await session.commit()
+
+    # Transition to SHOT_GENERATING and enqueue video generation
+    try:
+        await transition_project_status(
+            project, ProjectStatus.SHOT_GENERATING, f"user:{user}", session, redis
+        )
+    except InvalidTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    arq = await _get_arq_redis(redis)
+    await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}", shot_id)
+
+    return {
+        "shot_id": shot_id,
+        "tf_confirmed": True,
+        "target_last_frame_path": to_media_url(shot.target_last_frame_path),
+    }
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/extract-tail-frame")
+async def extract_tail_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Use the video's actual last frame as the target tail frame."""
+    await _get_project_or_404(project_id, session)
+
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    if not shot.last_frame_path:
+        raise HTTPException(status_code=400, detail="Shot has no last frame")
+
+    src = Path(shot.last_frame_path)
+    if not src.exists():
+        raise HTTPException(status_code=400, detail="Last frame file not found")
+
+    # Copy last_frame.png → target_last_frame.png
+    from app.services.storage import shot_target_last_frame_path
+    dest = shot_target_last_frame_path(project_id, shot_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(src), str(dest))
+
+    shot.target_last_frame_path = str(dest)
+    shot.tf_status = "done"
+    shot.tf_error_message = None
+    shot.tf_confirmed = False
+    session.add(shot)
+    await session.commit()
+
+    return {
+        "shot_id": shot_id,
+        "target_last_frame_path": to_media_url(str(dest)),
+        "tf_status": "done",
+    }
+
+
 @router.post("/projects/{project_id}/shots/{shot_id}/reference-images")
 async def upload_shot_references(
     project_id: str,
@@ -562,8 +914,6 @@ async def upload_shot_references(
     existing_paths: list[str] = []
     if shot.custom_reference_paths:
         existing_paths = json.loads(shot.custom_reference_paths)
-    elif shot.custom_first_frame_path:
-        existing_paths = [shot.custom_first_frame_path]
 
     # Save new files (append)
     for upload in files:
@@ -574,14 +924,10 @@ async def upload_shot_references(
         dest_path.write_bytes(content)
         existing_paths.append(str(dest_path))
 
-    # Update DB: 1 image → first frame mode, multiple → reference_images mode
+    # Always store as reference_images so they are passed as object refs
     all_paths = existing_paths
-    if len(all_paths) == 1:
-        shot.custom_first_frame_path = all_paths[0]
-        shot.custom_reference_paths = None
-    else:
-        shot.custom_first_frame_path = None
-        shot.custom_reference_paths = json.dumps(all_paths)
+    shot.custom_first_frame_path = None
+    shot.custom_reference_paths = json.dumps(all_paths) if all_paths else None
 
     await session.commit()
     return _ref_images_response(shot)
@@ -612,8 +958,6 @@ async def delete_shot_references(
         all_paths: list[str] = []
         if shot.custom_reference_paths:
             all_paths = json.loads(shot.custom_reference_paths)
-        elif shot.custom_first_frame_path:
-            all_paths = [shot.custom_first_frame_path]
 
         if index < 0 or index >= len(all_paths):
             raise HTTPException(status_code=400, detail="Invalid index")
@@ -623,15 +967,8 @@ async def delete_shot_references(
         removed.unlink(missing_ok=True)
 
         # Update DB
-        if len(all_paths) == 0:
-            shot.custom_first_frame_path = None
-            shot.custom_reference_paths = None
-        elif len(all_paths) == 1:
-            shot.custom_first_frame_path = all_paths[0]
-            shot.custom_reference_paths = None
-        else:
-            shot.custom_first_frame_path = None
-            shot.custom_reference_paths = json.dumps(all_paths)
+        shot.custom_first_frame_path = None
+        shot.custom_reference_paths = json.dumps(all_paths) if all_paths else None
     else:
         # Delete all
         dest_dir = shot_custom_frames_dir(project_id, shot_id)
@@ -675,23 +1012,15 @@ async def reorder_shot_references(
 
     order = body.get("order", [])
 
-    all_paths = []
-    if shot.custom_reference_paths:
-        all_paths = json.loads(shot.custom_reference_paths)
-    elif shot.custom_first_frame_path:
-        all_paths = [shot.custom_first_frame_path]
+    all_paths = json.loads(shot.custom_reference_paths) if shot.custom_reference_paths else []
 
     if len(order) != len(all_paths):
         raise HTTPException(status_code=400, detail="Order length mismatch")
 
     reordered = [all_paths[i] for i in order]
 
-    if len(reordered) == 1:
-        shot.custom_first_frame_path = reordered[0]
-        shot.custom_reference_paths = None
-    else:
-        shot.custom_first_frame_path = None
-        shot.custom_reference_paths = json.dumps(reordered)
+    shot.custom_first_frame_path = None
+    shot.custom_reference_paths = json.dumps(reordered) if reordered else None
 
     await session.commit()
     return _ref_images_response(shot)
@@ -714,7 +1043,10 @@ async def get_shot_video_info(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    return get_video_info(shot.video_path)
+    info = get_video_info(shot.video_path)
+    backup = Path(shot.video_path).with_name("output_original.mp4")
+    info["has_backup"] = backup.exists()
+    return info
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/trim")
@@ -747,20 +1079,36 @@ async def trim_shot_video(
     if body.end_frame >= info["total_frames"]:
         raise HTTPException(status_code=400, detail="end_frame must be less than total frames")
 
-    end_time = body.end_frame / info["fps"]
-
     # Backup original on first trim
     backup = video_path.with_name("output_original.mp4")
     if not backup.exists():
         video_path.rename(backup)
     source = str(backup)
 
-    # Trim
-    trim_video(source, str(video_path), end_time)
+    # Trim (use frame count, not time — avoids float rounding ±1 frame)
+    trim_video(source, str(video_path), body.end_frame)
 
     # Re-extract last frame
     if shot.last_frame_path:
         extract_last_frame(str(video_path), shot.last_frame_path)
+
+    # Reset character calibration since last frame changed
+    shot.cc_status = None
+    shot.cc_error_message = None
+
+    # Remove stale pre-CC backup so next calibration creates a fresh one
+    from app.services.storage import shot_pre_cc_last_frame_path
+    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
+    if pre_cc.exists():
+        pre_cc.unlink()
+
+    # Remove stale pre-VC backup — audio length no longer matches trimmed video
+    from app.services.storage import shot_pre_vc_video_path
+    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
+    if pre_vc.exists():
+        pre_vc.unlink()
+    shot.vc_status = None
+    shot.vc_error_message = None
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
@@ -769,6 +1117,140 @@ async def trim_shot_video(
         "video_path": to_media_url(str(video_path)),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "version": ts,
+        **get_video_info(str(video_path)),
+    }
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/restore-trim")
+async def restore_trim(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Restore the original video before any trimming."""
+    from app.agents.video_trimmer import get_video_info
+    from app.agents.frame_porter import extract_last_frame
+
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot or not shot.video_path:
+        raise HTTPException(status_code=404, detail="Shot or video not found")
+
+    video_path = Path(shot.video_path)
+    backup = video_path.with_name("output_original.mp4")
+    if not backup.exists():
+        raise HTTPException(status_code=404, detail="No backup found — video was never trimmed")
+
+    # Restore original
+    import shutil
+    shutil.copy2(str(backup), str(video_path))
+    backup.unlink()
+
+    # Re-extract last frame
+    if shot.last_frame_path:
+        extract_last_frame(str(video_path), shot.last_frame_path)
+
+    # Reset character calibration since last frame changed
+    shot.cc_status = None
+    shot.cc_error_message = None
+
+    from app.services.storage import shot_pre_cc_last_frame_path
+    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
+    if pre_cc.exists():
+        pre_cc.unlink()
+
+    # Remove stale pre-VC backup — audio length no longer matches restored video
+    from app.services.storage import shot_pre_vc_video_path
+    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
+    if pre_vc.exists():
+        pre_vc.unlink()
+    shot.vc_status = None
+    shot.vc_error_message = None
+
+    ts = int(datetime.utcnow().timestamp())
+    await session.commit()
+
+    return {
+        "video_path": to_media_url(str(video_path)),
+        "last_frame_path": to_media_url(shot.last_frame_path),
+        "version": ts,
+        **get_video_info(str(video_path)),
+    }
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/align-tail-frame")
+async def align_tail_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Auto-trim video to the frame that best matches the target tail frame (SSIM)."""
+    from app.agents.video_trimmer import find_best_tail_frame, get_video_info, trim_video
+    from app.agents.frame_porter import extract_last_frame
+
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot or not shot.video_path:
+        raise HTTPException(status_code=404, detail="Shot or video not found")
+    if not shot.target_last_frame_path:
+        raise HTTPException(status_code=400, detail="No target tail frame for this shot")
+
+    best_frames = find_best_tail_frame(shot.video_path, shot.target_last_frame_path)
+    if best_frames is None:
+        # Already optimal — return current info without trimming
+        info = get_video_info(shot.video_path)
+        return {
+            "video_path": to_media_url(shot.video_path),
+            "last_frame_path": to_media_url(shot.last_frame_path),
+            "version": int(datetime.utcnow().timestamp()),
+            "aligned_to_frame": info["total_frames"],
+            **info,
+        }
+
+    video_path = Path(shot.video_path)
+
+    # Backup original on first trim (same logic as manual trim)
+    backup = video_path.with_name("output_original.mp4")
+    if not backup.exists():
+        video_path.rename(backup)
+    source = str(backup)
+
+    trim_video(source, str(video_path), best_frames)
+
+    # Re-extract last frame
+    if shot.last_frame_path:
+        extract_last_frame(str(video_path), shot.last_frame_path)
+
+    # Reset character calibration since last frame changed
+    shot.cc_status = None
+    shot.cc_error_message = None
+    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
+    if pre_cc.exists():
+        pre_cc.unlink()
+
+    # Remove stale pre-VC backup
+    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
+    if pre_vc.exists():
+        pre_vc.unlink()
+    shot.vc_status = None
+    shot.vc_error_message = None
+
+    ts = int(datetime.utcnow().timestamp())
+    await session.commit()
+
+    return {
+        "video_path": to_media_url(str(video_path)),
+        "last_frame_path": to_media_url(shot.last_frame_path),
+        "version": ts,
+        "aligned_to_frame": best_frames,
         **get_video_info(str(video_path)),
     }
 
@@ -860,7 +1342,8 @@ async def voice_convert_shot(
 
     arq = await _get_arq_redis(redis)
     await arq.enqueue_job(
-        "run_voice_convert", project_id, shot_id, f"user:{user}"
+        "run_voice_convert", project_id, shot_id, f"user:{user}",
+        _queue_name="arq:vc",
     )
 
     return {"status": "queued", "shot_id": shot_id}
@@ -902,7 +1385,8 @@ async def voice_convert_all(
 
     arq = await _get_arq_redis(redis)
     await arq.enqueue_job(
-        "run_voice_convert_batch", project_id, shot_ids, f"user:{user}"
+        "run_voice_convert_batch", project_id, shot_ids, f"user:{user}",
+        _queue_name="arq:vc",
     )
 
     return {"status": "queued", "shot_ids": shot_ids}
@@ -941,8 +1425,150 @@ async def voice_revert_shot(
     session.add(shot)
     await session.commit()
 
+    ts = int(datetime.utcnow().timestamp())
     return {
         "shot_id": shot_id,
         "vc_status": None,
         "video_path": to_media_url(shot.video_path),
+        "version": ts,
+    }
+
+
+# ============== Character Calibration ==============
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/character-calibrate", status_code=202)
+async def character_calibrate_shot(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+    redis=Depends(get_redis),
+):
+    """Calibrate a shot's last frame to match character reference images."""
+    project = await _get_project_or_404(project_id, session)
+
+    # Validate project has character reference images
+    ref_result = await session.execute(
+        select(ReferenceImage).where(
+            ReferenceImage.project_id == project_id,
+            ReferenceImage.kind == "character",
+        )
+    )
+    if not ref_result.scalars().first():
+        raise HTTPException(status_code=400, detail="No character reference images")
+
+    result = await session.execute(
+        select(Shot).where(
+            Shot.project_id == project_id, Shot.shot_id == shot_id
+        )
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    if shot.status != ShotStatus.COMPLETED.value:
+        raise HTTPException(status_code=400, detail="Shot must be completed")
+    if not shot.last_frame_path:
+        raise HTTPException(status_code=400, detail="Shot has no last frame")
+
+    shot.cc_status = "calibrating"
+    shot.cc_error_message = None
+    session.add(shot)
+    await session.commit()
+
+    arq = await _get_arq_redis(redis)
+    await arq.enqueue_job(
+        "run_character_calibrate", project_id, shot_id, f"user:{user}",
+    )
+
+    return {"status": "queued", "shot_id": shot_id}
+
+
+@router.post("/projects/{project_id}/character-calibrate-all", status_code=202)
+async def character_calibrate_all(
+    project_id: str,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+    redis=Depends(get_redis),
+):
+    """Calibrate all completed shots' last frames to match character references."""
+    project = await _get_project_or_404(project_id, session)
+
+    # Validate project has character reference images
+    ref_result = await session.execute(
+        select(ReferenceImage).where(
+            ReferenceImage.project_id == project_id,
+            ReferenceImage.kind == "character",
+        )
+    )
+    if not ref_result.scalars().first():
+        raise HTTPException(status_code=400, detail="No character reference images")
+
+    # Find all completed shots with last frames
+    result = await session.execute(
+        select(Shot).where(
+            Shot.project_id == project_id,
+            Shot.status == ShotStatus.COMPLETED.value,
+            Shot.last_frame_path.isnot(None),
+        )
+    )
+    shots = result.scalars().all()
+
+    if not shots:
+        raise HTTPException(status_code=400, detail="No eligible shots to calibrate")
+
+    shot_ids = []
+    for shot in shots:
+        shot.cc_status = "calibrating"
+        shot.cc_error_message = None
+        session.add(shot)
+        shot_ids.append(shot.shot_id)
+    await session.commit()
+
+    arq = await _get_arq_redis(redis)
+    await arq.enqueue_job(
+        "run_character_calibrate_batch", project_id, shot_ids, f"user:{user}",
+    )
+
+    return {"status": "queued", "shot_ids": shot_ids}
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/character-calibrate-revert")
+async def character_calibrate_revert(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Revert a shot's character calibration back to the original last frame."""
+    await _get_project_or_404(project_id, session)
+
+    result = await session.execute(
+        select(Shot).where(
+            Shot.project_id == project_id, Shot.shot_id == shot_id
+        )
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    if shot.cc_status != "done":
+        raise HTTPException(status_code=400, detail="Shot has not been character-calibrated")
+
+    # Restore pre-CC last frame
+    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
+    if pre_cc.exists() and shot.last_frame_path:
+        shutil.copy2(str(pre_cc), shot.last_frame_path)
+
+    shot.cc_status = None
+    shot.cc_error_message = None
+    session.add(shot)
+    await session.commit()
+
+    ts = int(datetime.utcnow().timestamp())
+    return {
+        "shot_id": shot_id,
+        "cc_status": None,
+        "last_frame_path": to_media_url(shot.last_frame_path),
+        "version": ts,
     }

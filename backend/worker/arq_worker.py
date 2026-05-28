@@ -9,9 +9,10 @@ from app.config import settings
 from worker.tasks import (
     run_screenwriter,
     run_shot_pipeline,
+    run_tail_frame_pipeline,
     run_merger,
-    run_voice_convert,
-    run_voice_convert_batch,
+    run_character_calibrate,
+    run_character_calibrate_batch,
 )
 
 # Configure app/worker loggers so INFO+ messages reach stderr
@@ -68,9 +69,10 @@ class WorkerSettings:
     functions = [
         run_screenwriter,
         run_shot_pipeline,
+        run_tail_frame_pipeline,
         run_merger,
-        run_voice_convert,
-        run_voice_convert_batch,
+        run_character_calibrate,
+        run_character_calibrate_batch,
     ]
 
     # Worker settings

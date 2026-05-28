@@ -128,7 +128,7 @@ class Shot(Base):
     shot_duration = Column(Integer, nullable=False)  # 4, 6, or 8 seconds
     status = Column(String(30), nullable=False, default=ShotStatus.PENDING.value)
     align_with_previous = Column(Boolean, nullable=False, default=True)
-    use_prev_last_frame = Column(Boolean, nullable=False, default=False)
+    use_prev_last_frame = Column(Boolean, nullable=False, default=True)
     motion_prompt = Column(Text, nullable=True)
     first_frame_path = Column(Text, nullable=True)
     video_path = Column(Text, nullable=True)
@@ -141,6 +141,13 @@ class Shot(Base):
     reference_image_hint = Column(Text, nullable=True)  # AI 生成的参考图上传提示
     vc_status = Column(String(20), nullable=True)  # null | "converting" | "done" | "failed"
     vc_error_message = Column(Text, nullable=True)
+    cc_status = Column(String(20), nullable=True)  # null | "calibrating" | "done" | "failed"
+    cc_error_message = Column(Text, nullable=True)
+    target_last_frame_path = Column(Text, nullable=True)  # AI 生成的目标尾帧
+    tf_status = Column(String(20), nullable=True)  # null | "generating" | "done" | "failed"
+    tf_error_message = Column(Text, nullable=True)
+    tf_confirmed = Column(Boolean, default=False)  # 用户已确认尾帧
+    auto_trim = Column(Boolean, nullable=False, default=True)  # 生成后自动 SSIM 裁剪
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

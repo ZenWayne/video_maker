@@ -3,7 +3,7 @@
 'use client'
 
 import { useState, useRef } from 'react'
-import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Play, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2 } from 'lucide-react'
+import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Play, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -17,12 +17,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { TrimDialog } from '@/components/TrimDialog'
-import type { Shot, ShotStatus } from '@/lib/types'
+import type { AspectRatio, Shot, ShotStatus } from '@/lib/types'
 
 interface ShotCardProps {
   shot: Shot
   variant: 'script' | 'review' | 'generating'
   projectId?: string
+  aspectRatio?: AspectRatio
   selected?: boolean
   prevLastFramePath?: string | null
   isReferenceVoice?: boolean
@@ -37,6 +38,11 @@ interface ShotCardProps {
   onSetReferenceVoice?: (shotId: number) => void
   onVoiceConvert?: (shotId: number) => void
   onVoiceRevert?: (shotId: number) => void
+  onCharacterCalibrate?: (shotId: number) => void
+  onCharacterCalibrateRevert?: (shotId: number) => void
+  onGenerateTailFrame?: (shotId: number) => void
+  onConfirmTailFrame?: (shotId: number) => void
+  onExtractTailFrame?: (shotId: number) => void
 }
 
 const shotTypeLabels: Record<string, string> = {
@@ -65,6 +71,7 @@ export function ShotCard({
   shot,
   variant,
   projectId,
+  aspectRatio,
   selected,
   prevLastFramePath,
   onSelect,
@@ -79,6 +86,11 @@ export function ShotCard({
   onSetReferenceVoice,
   onVoiceConvert,
   onVoiceRevert,
+  onCharacterCalibrate,
+  onCharacterCalibrateRevert,
+  onGenerateTailFrame,
+  onConfirmTailFrame,
+  onExtractTailFrame,
 }: ShotCardProps) {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isPromptDialogOpen, setIsPromptDialogOpen] = useState(false)
@@ -89,6 +101,9 @@ export function ShotCard({
   const [editPrompt, setEditPrompt] = useState(shot.motion_prompt || '')
   const [aiInstruction, setAiInstruction] = useState('')
   const [isAiLoading, setIsAiLoading] = useState(false)
+  const [promptAiInstruction, setPromptAiInstruction] = useState('')
+  const [isPromptAiLoading, setIsPromptAiLoading] = useState(false)
+  const [isPromptRewriting, setIsPromptRewriting] = useState(false)
   const [isPlaying, setIsPlaying] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [dragIdx, setDragIdx] = useState<number | null>(null)
@@ -143,7 +158,35 @@ export function ShotCard({
 
   const handleSavePrompt = () => {
     onEditPrompt?.(shot.shot_id, editPrompt)
+    onShotUpdated?.(shot.shot_id, { motion_prompt: editPrompt })
     setIsPromptDialogOpen(false)
+  }
+
+  const handleAiEditPrompt = async () => {
+    if (!projectId || !promptAiInstruction.trim()) return
+    setIsPromptAiLoading(true)
+    try {
+      const result = await api.aiEditPrompt(projectId, shot.shot_id, promptAiInstruction)
+      setEditPrompt(result.motion_prompt)
+      setPromptAiInstruction('')
+    } catch {
+      // error handled by parent
+    } finally {
+      setIsPromptAiLoading(false)
+    }
+  }
+
+  const handleRewritePrompt = async () => {
+    if (!projectId) return
+    setIsPromptRewriting(true)
+    try {
+      const result = await api.rewritePrompt(projectId, shot.shot_id)
+      setEditPrompt(result.motion_prompt)
+    } catch {
+      // error handled by parent
+    } finally {
+      setIsPromptRewriting(false)
+    }
   }
 
   const handleUploadRefs = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -347,51 +390,39 @@ export function ShotCard({
               </div>
             </div>
 
-            {/* 断开分镜参考图提示 + 上传 */}
+            {/* 参考图上传 */}
             {!shot.align_with_previous && (
               <div className="space-y-2 pt-2 border-t">
-                {shot.reference_image_hint && (
-                  <div className="text-xs text-amber-700 bg-amber-50 p-2 rounded">
-                    {shot.reference_image_hint}
-                  </div>
-                )}
-                <div className="flex items-center gap-2 flex-wrap">
-                  {customRefUrls.map((url, i) => (
-                    <div key={i} className="relative group">
-                      <img
-                        src={url}
-                        alt={`参考图 ${i + 1}`}
-                        className="w-10 h-10 object-cover rounded border"
-                      />
-                      <button
-                        className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        onClick={() => handleDeleteRef(i)}
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
-                  <input
-                    ref={refUploadRef}
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    className="hidden"
-                    onChange={handleUploadRefs}
-                  />
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={isUploading}
-                    onClick={() => refUploadRef.current?.click()}
-                  >
-                    {isUploading ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <><ImagePlus className="w-4 h-4 mr-1" />参考图</>
-                    )}
+                <div className="flex items-center gap-2">
+                  <input ref={refUploadRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUploadRefs} />
+                  <Button variant="outline" size="sm" onClick={() => refUploadRef.current?.click()} disabled={isUploading}>
+                    {isUploading ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <ImagePlus className="w-3 h-3 mr-1" />}
+                    添加参考图
                   </Button>
                 </div>
+                {customRefUrls.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {customRefUrls.map((url, idx) => (
+                      <div
+                        key={idx}
+                        draggable
+                        onDragStart={() => setDragIdx(idx)}
+                        onDragOver={(e) => { e.preventDefault(); setDragOverIdx(idx) }}
+                        onDrop={() => { if (dragIdx !== null) handleDrop(dragIdx, idx); setDragIdx(null); setDragOverIdx(null) }}
+                        onDragEnd={() => { setDragIdx(null); setDragOverIdx(null) }}
+                        className={`relative group cursor-grab ${dragOverIdx === idx ? 'ring-2 ring-indigo-400 rounded' : ''}`}
+                      >
+                        <img src={url} alt={`参考图 ${idx + 1}`} className="w-14 h-14 object-cover rounded border cursor-pointer" onClick={() => setPreviewUrl(url)} />
+                        <button
+                          onClick={() => handleDeleteRef(idx)}
+                          className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </CardContent>
@@ -414,21 +445,39 @@ export function ShotCard({
             </Badge>
           </div>
 
-          {(shot.status === 'prompt_generating' || shot.status === 'video_generating') && (
-            <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          )}
+          <div className="flex items-center gap-2">
+            {(shot.status === 'prompt_generating' || shot.status === 'video_generating') && (
+              <>
+                <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                {projectId && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs text-red-500 hover:text-red-700"
+                    onClick={async () => {
+                      try {
+                        await api.cancelGeneration(projectId)
+                      } catch { /* handled by parent */ }
+                    }}
+                  >
+                    <X className="w-3 h-3 mr-1" />取消
+                  </Button>
+                )}
+              </>
+            )}
 
-          {shot.status === 'completed' && (
-            <Badge variant="outline" className="border-green-500 text-green-600">
-              <CheckSquare className="w-3 h-3 mr-1" />完成
-            </Badge>
-          )}
+            {shot.status === 'completed' && (
+              <Badge variant="outline" className="border-green-500 text-green-600">
+                <CheckSquare className="w-3 h-3 mr-1" />完成
+              </Badge>
+            )}
 
-          {shot.status === 'failed' && (
-            <Badge variant="outline" className="border-red-500 text-red-600">
-              <AlertTriangle className="w-3 h-3 mr-1" />失败
-            </Badge>
-          )}
+            {shot.status === 'failed' && (
+              <Badge variant="outline" className="border-red-500 text-red-600">
+                <AlertTriangle className="w-3 h-3 mr-1" />失败
+              </Badge>
+            )}
+          </div>
         </CardContent>
       </Card>
     )
@@ -487,25 +536,25 @@ export function ShotCard({
 
           {/* 视频播放器 */}
           {shot.video_path && isPlaying && (
-            <div className="relative aspect-video bg-zinc-900 rounded-lg overflow-hidden">
+            <div className="relative rounded-lg overflow-hidden">
               <video
                 src={shot.video_path}
                 controls
                 autoPlay
-                className="w-full h-full"
+                className="w-full"
               />
             </div>
           )}
 
           {shot.video_path && !isPlaying && (
             <div
-              className="relative aspect-video bg-zinc-900 rounded-lg overflow-hidden flex items-center justify-center cursor-pointer group"
+              className="relative rounded-lg overflow-hidden cursor-pointer group"
               onClick={() => setIsPlaying(true)}
             >
               <img
                 src={shot.last_frame_path || shot.first_frame_path || undefined}
                 alt={`Shot ${shot.shot_id}`}
-                className="w-full h-full object-cover"
+                className="w-full"
               />
               <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/20 transition-colors">
                 <Play className="w-12 h-12 text-white opacity-80" />
@@ -539,89 +588,172 @@ export function ShotCard({
             </div>
           )}
 
-          {/* 断开分镜参考图提示 + 上传 */}
-          {!shot.align_with_previous && (
-            <div className="space-y-2">
-              {shot.reference_image_hint && (
-                <div className="text-xs text-amber-700 bg-amber-50 p-2 rounded">
-                  {shot.reference_image_hint}
-                </div>
-              )}
-              {prevLastFramePath && (
-                <label className="flex items-center gap-2 text-xs text-zinc-600 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={shot.use_prev_last_frame}
-                    onChange={async (e) => {
-                      if (!projectId) return
-                      const val = e.target.checked
-                      try {
-                        await api.patchShot(projectId, shot.shot_id, { use_prev_last_frame: val })
-                        onShotUpdated?.(shot.shot_id, { use_prev_last_frame: val })
-                      } catch { /* handled by parent */ }
-                    }}
-                    className="rounded border-zinc-300"
-                  />
-                  使用上一镜头末帧作为首张参考图
-                  {shot.use_prev_last_frame && (
-                    <img src={prevLastFramePath} alt="上一镜头末帧" className="w-12 h-12 object-cover rounded border ml-1 cursor-pointer" onClick={() => setPreviewUrl(prevLastFramePath!)} />
-                  )}
-                </label>
-              )}
-              <div className="flex items-center gap-2 flex-wrap">
-                {customRefUrls.map((url, i) => (
+          {/* 参考图提示 + 上传（所有镜头均可上传） */}
+          <div className="space-y-2">
+            {!shot.align_with_previous && shot.reference_image_hint && (
+              <div className="text-xs text-amber-700 bg-amber-50 p-2 rounded">
+                {shot.reference_image_hint}
+              </div>
+            )}
+            {!shot.align_with_previous && prevLastFramePath && (
+              <label className="flex items-center gap-2 text-xs text-zinc-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={shot.use_prev_last_frame}
+                  onChange={async (e) => {
+                    if (!projectId) return
+                    const val = e.target.checked
+                    try {
+                      await api.patchShot(projectId, shot.shot_id, { use_prev_last_frame: val })
+                      onShotUpdated?.(shot.shot_id, { use_prev_last_frame: val })
+                    } catch { /* handled by parent */ }
+                  }}
+                  className="rounded border-zinc-300"
+                />
+                使用上一镜头末帧作为首张参考图
+                {shot.use_prev_last_frame && (
+                  <img src={prevLastFramePath} alt="上一镜头末帧" className="w-12 h-12 object-cover rounded border ml-1 cursor-pointer" onClick={() => setPreviewUrl(prevLastFramePath!)} />
+                )}
+              </label>
+            )}
+            {/* 参考图上传 */}
+            <div className="flex items-center gap-2">
+              <input ref={refUploadRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUploadRefs} />
+              <Button variant="outline" size="sm" onClick={() => refUploadRef.current?.click()} disabled={isUploading}>
+                {isUploading ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <ImagePlus className="w-3 h-3 mr-1" />}
+                添加参考图
+              </Button>
+            </div>
+            {customRefUrls.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {customRefUrls.map((url, idx) => (
                   <div
-                    key={i}
-                    className={`relative group cursor-grab ${dragOverIdx === i ? 'ring-2 ring-blue-400' : ''}`}
+                    key={idx}
                     draggable
-                    onDragStart={() => setDragIdx(i)}
-                    onDragOver={(e) => { e.preventDefault(); setDragOverIdx(i) }}
-                    onDragLeave={() => setDragOverIdx(null)}
-                    onDrop={(e) => {
-                      e.preventDefault()
-                      setDragOverIdx(null)
-                      if (dragIdx !== null) handleDrop(dragIdx, i)
-                      setDragIdx(null)
-                    }}
+                    onDragStart={() => setDragIdx(idx)}
+                    onDragOver={(e) => { e.preventDefault(); setDragOverIdx(idx) }}
+                    onDrop={() => { if (dragIdx !== null) handleDrop(dragIdx, idx); setDragIdx(null); setDragOverIdx(null) }}
                     onDragEnd={() => { setDragIdx(null); setDragOverIdx(null) }}
+                    className={`relative group cursor-grab ${dragOverIdx === idx ? 'ring-2 ring-indigo-400 rounded' : ''}`}
                   >
-                    <img
-                      src={url}
-                      alt={`参考图 ${i + 1}`}
-                      className={`w-12 h-12 object-cover rounded border ${dragIdx === i ? 'opacity-40' : ''}`}
-                      onClick={() => setPreviewUrl(url)}
-                    />
-                    <span className="absolute bottom-0 left-0 bg-black/60 text-white text-[10px] px-1 rounded-tr">{i + 1}</span>
+                    <img src={url} alt={`参考图 ${idx + 1}`} className="w-14 h-14 object-cover rounded border cursor-pointer" onClick={() => setPreviewUrl(url)} />
                     <button
-                      className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                      onClick={() => handleDeleteRef(i)}
+                      onClick={() => handleDeleteRef(idx)}
+                      className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                     >
-                      <X className="w-3 h-3" />
+                      <X className="w-2.5 h-2.5" />
                     </button>
                   </div>
                 ))}
-                <input
-                  ref={refUploadRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  className="hidden"
-                  onChange={handleUploadRefs}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-12 px-3"
-                  disabled={isUploading}
-                  onClick={() => refUploadRef.current?.click()}
-                >
-                  {isUploading ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <><ImagePlus className="w-4 h-4 mr-1" />参考图</>
-                  )}
-                </Button>
               </div>
+            )}
+          </div>
+
+          {/* 自动裁剪开关 */}
+          <div className="flex items-center justify-between rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2">
+            <span className="text-sm text-zinc-600">
+              <Scissors className="w-3.5 h-3.5 inline mr-1.5 text-zinc-400" />
+              生成后自动裁剪（尾帧对齐, 推荐打开）
+            </span>
+            <Switch
+              checked={shot.auto_trim}
+              onCheckedChange={async (checked: boolean) => {
+                if (!projectId) return
+                try {
+                  await api.patchShot(projectId, shot.shot_id, { auto_trim: checked })
+                  onShotUpdated?.(shot.shot_id, { auto_trim: checked })
+                } catch { /* handled by parent */ }
+              }}
+            />
+          </div>
+
+          {/* 尾帧生成状态 */}
+          {shot.tf_status === 'generating' && (
+            <div className="flex items-center gap-2 text-sm text-indigo-600 bg-indigo-50 p-2 rounded">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              正在生成目标尾帧...
+            </div>
+          )}
+          {shot.tf_status === 'done' && !shot.tf_confirmed && (
+            <div className="space-y-2 p-2 bg-indigo-50 rounded border border-indigo-200">
+              <div className="flex items-center gap-3">
+                {shot.target_last_frame_path && (
+                  <img
+                    src={shot.target_last_frame_path}
+                    alt="目标尾帧"
+                    className="w-16 h-16 object-cover rounded cursor-pointer border-2 border-dashed border-indigo-400 hover:ring-2 hover:ring-indigo-500"
+                    onClick={() => setPreviewUrl(shot.target_last_frame_path)}
+                  />
+                )}
+                <div className="flex-1 space-y-1">
+                  <div className="text-xs font-medium text-indigo-700">目标尾帧已生成</div>
+                  <div className="flex items-center gap-2">
+                    {onConfirmTailFrame && (
+                      <Button
+                        size="sm"
+                        className="h-7 px-3 text-xs bg-indigo-600 hover:bg-indigo-700 text-white"
+                        onClick={() => onConfirmTailFrame(shot.shot_id)}
+                      >
+                        <Sparkles className="w-3 h-3 mr-1" />确认并生成视频
+                      </Button>
+                    )}
+                    {onGenerateTailFrame && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-indigo-600"
+                        onClick={() => onGenerateTailFrame(shot.shot_id)}
+                      >
+                        <RefreshCw className="w-3 h-3 mr-1" />重新生成
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          {shot.tf_status === 'done' && shot.tf_confirmed && shot.target_last_frame_path && (
+            <div className="flex items-center justify-between text-sm text-indigo-700 bg-indigo-50 p-2 rounded">
+              <div className="flex items-center gap-2">
+                <img
+                  src={shot.target_last_frame_path}
+                  alt="目标尾帧"
+                  className="w-10 h-10 object-cover rounded cursor-pointer border-2 border-dashed border-indigo-400"
+                  onClick={() => setPreviewUrl(shot.target_last_frame_path)}
+                />
+                <span>尾帧已确认</span>
+              </div>
+              {onGenerateTailFrame && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs text-indigo-600 hover:text-indigo-800"
+                  onClick={() => onGenerateTailFrame(shot.shot_id)}
+                >
+                  <RefreshCw className="w-3 h-3 mr-1" />重新生成尾帧
+                </Button>
+              )}
+            </div>
+          )}
+          {shot.tf_status === 'failed' && (
+            <div className="text-sm text-red-600 bg-red-50 p-2 rounded space-y-1">
+              <div className="flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" />
+                尾帧生成失败
+              </div>
+              {shot.tf_error_message && (
+                <p className="text-xs text-red-500">{shot.tf_error_message}</p>
+              )}
+              {onGenerateTailFrame && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={() => onGenerateTailFrame(shot.shot_id)}
+                >
+                  <RefreshCw className="w-3 h-3 mr-1" />重试
+                </Button>
+              )}
             </div>
           )}
 
@@ -669,30 +801,89 @@ export function ShotCard({
             </div>
           )}
 
-          {/* 操作栏 */}
-          <div className="flex items-center justify-between pt-2">
-            <div className="flex items-center gap-2">
-              {shot.last_frame_path && (
-                <img
-                  src={shot.last_frame_path}
-                  alt="尾帧"
-                  className="w-10 h-10 object-cover rounded cursor-pointer hover:ring-2 hover:ring-blue-500"
-                  onClick={() => setPreviewUrl(shot.last_frame_path)}
-                />
-              )}
+          {/* 人物校准状态指示器 */}
+          {shot.cc_status === 'calibrating' && (
+            <div className="flex items-center gap-2 text-sm text-purple-600 bg-purple-50 p-2 rounded">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              正在校准人物...
             </div>
-
-            <div className="flex items-center gap-1">
-              {(shot.status === 'completed' || shot.status === 'failed') && onRedraw && (
+          )}
+          {shot.cc_status === 'done' && (
+            <div className="flex items-center justify-between text-sm text-purple-700 bg-purple-50 p-2 rounded">
+              <div className="flex items-center gap-2">
+                {shot.last_frame_path && (
+                  <img
+                    src={shot.last_frame_path}
+                    alt="校准后尾帧"
+                    className="w-12 h-12 object-cover rounded cursor-pointer border-2 border-purple-300 hover:ring-2 hover:ring-purple-500"
+                    onClick={() => setPreviewUrl(shot.last_frame_path)}
+                  />
+                )}
+                <span>人物已校准</span>
+              </div>
+              {onCharacterCalibrateRevert && (
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => onRedraw(shot.shot_id)}
+                  className="h-6 px-2 text-xs text-purple-700 hover:text-red-600"
+                  onClick={() => onCharacterCalibrateRevert(shot.shot_id)}
                 >
-                  <RefreshCw className="w-4 h-4 mr-1" />重新生成
+                  <Undo2 className="w-3 h-3 mr-1" />还原
                 </Button>
               )}
-              {shot.status === 'completed' && shot.video_path && projectId && (
+            </div>
+          )}
+          {shot.cc_status === 'failed' && (
+            <div className="text-sm text-red-600 bg-red-50 p-2 rounded space-y-1">
+              <div className="flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" />
+                人物校准失败
+              </div>
+              {shot.cc_error_message && (
+                <p className="text-xs text-red-500">{shot.cc_error_message}</p>
+              )}
+              {onCharacterCalibrate && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={() => onCharacterCalibrate(shot.shot_id)}
+                >
+                  <RefreshCw className="w-3 h-3 mr-1" />重试
+                </Button>
+              )}
+            </div>
+          )}
+
+          {/* 视频尾帧 + 目标尾帧对比 */}
+          {shot.video_path && shot.last_frame_path && (
+            <div className="flex items-center gap-3 p-2 bg-zinc-50 rounded border">
+              <div className="flex flex-col items-center gap-1">
+                <img
+                  src={shot.last_frame_path}
+                  alt="视频尾帧"
+                  className="w-16 h-16 object-cover rounded cursor-pointer hover:ring-2 hover:ring-blue-500 border"
+                  onClick={() => setPreviewUrl(shot.last_frame_path)}
+                />
+                <span className="text-[10px] text-zinc-500">视频尾帧</span>
+              </div>
+              {shot.target_last_frame_path && (
+                <div className="flex flex-col items-center gap-1">
+                  <img
+                    src={shot.target_last_frame_path}
+                    alt="目标尾帧"
+                    className="w-16 h-16 object-cover rounded cursor-pointer hover:ring-2 hover:ring-indigo-500 border-2 border-dashed border-indigo-400"
+                    onClick={() => setPreviewUrl(shot.target_last_frame_path)}
+                  />
+                  <span className="text-[10px] text-indigo-500">目标尾帧</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 操作栏 */}
+          <div className="flex flex-wrap items-center gap-1 pt-2">
+              {shot.video_path && projectId && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -701,17 +892,36 @@ export function ShotCard({
                   <Scissors className="w-4 h-4 mr-1" />裁剪
                 </Button>
               )}
-              {shot.motion_prompt != null && (
+              {shot.motion_prompt != null ? (
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setIsPromptDialogOpen(true)}
+                  onClick={() => { setEditPrompt(shot.motion_prompt || ''); setIsPromptDialogOpen(true) }}
                 >
                   <Edit className="w-4 h-4 mr-1" />运镜提示词
                 </Button>
+              ) : projectId && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={isPromptRewriting}
+                  onClick={async () => {
+                    setIsPromptRewriting(true)
+                    try {
+                      const result = await api.rewritePrompt(projectId, shot.shot_id)
+                      onShotUpdated?.(shot.shot_id, { motion_prompt: result.motion_prompt })
+                      setEditPrompt(result.motion_prompt)
+                    } catch { /* handled by parent */ } finally {
+                      setIsPromptRewriting(false)
+                    }
+                  }}
+                >
+                  {isPromptRewriting ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Sparkles className="w-4 h-4 mr-1" />}
+                  生成运镜提示词
+                </Button>
               )}
               {/* 音色操作按钮 */}
-              {shot.status === 'completed' && onSetReferenceVoice && (
+              {shot.video_path && onSetReferenceVoice && (
                 <Button
                   variant={isReferenceVoice ? 'secondary' : 'ghost'}
                   size="sm"
@@ -722,7 +932,7 @@ export function ShotCard({
                   {isReferenceVoice ? '取消基准' : '设为基准'}
                 </Button>
               )}
-              {shot.status === 'completed' && !isReferenceVoice && hasReferenceVoice && !shot.vc_status && onVoiceConvert && (
+              {shot.video_path && !isReferenceVoice && hasReferenceVoice && !shot.vc_status && onVoiceConvert && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -731,7 +941,43 @@ export function ShotCard({
                   <Mic className="w-4 h-4 mr-1" />转换音色
                 </Button>
               )}
-            </div>
+              {shot.video_path && onCharacterCalibrate && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onCharacterCalibrate(shot.shot_id)}
+                  disabled={shot.cc_status === 'calibrating'}
+                >
+                  <User className="w-4 h-4 mr-1" />{shot.cc_status === 'done' ? '重新校准' : '校准人物'}
+                </Button>
+              )}
+              {!shot.tf_status && onGenerateTailFrame && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onGenerateTailFrame(shot.shot_id)}
+                >
+                  <Sparkles className="w-4 h-4 mr-1" />生成尾帧
+                </Button>
+              )}
+              {shot.video_path && shot.last_frame_path && onExtractTailFrame && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onExtractTailFrame(shot.shot_id)}
+                >
+                  <ImagePlus className="w-4 h-4 mr-1" />视频尾帧→目标
+                </Button>
+              )}
+              {(shot.status === 'completed' || shot.status === 'failed' || shot.status === 'pending') && onRedraw && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onRedraw(shot.shot_id)}
+                >
+                  <RefreshCw className="w-4 h-4 mr-1" />生成分镜
+                </Button>
+              )}
           </div>
         </CardContent>
       </Card>
@@ -750,9 +996,44 @@ export function ShotCard({
             className="mt-4"
             placeholder="描述镜头运动方式..."
           />
-          <div className="flex justify-end gap-2 mt-4">
-            <Button variant="outline" onClick={() => setIsPromptDialogOpen(false)}>取消</Button>
-            <Button onClick={handleSavePrompt}>保存</Button>
+          {projectId && (
+            <div className="flex gap-2 mt-2">
+              <Textarea
+                value={promptAiInstruction}
+                onChange={(e) => setPromptAiInstruction(e.target.value)}
+                rows={1}
+                placeholder="AI 修改指令，例如：加入缓慢推进的镜头运动"
+                className="text-sm"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleAiEditPrompt()
+                }}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleAiEditPrompt}
+                disabled={isPromptAiLoading || !promptAiInstruction.trim()}
+                className="shrink-0 self-end"
+              >
+                {isPromptAiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><Sparkles className="w-3 h-3 mr-1" />AI</>}
+              </Button>
+            </div>
+          )}
+          <div className="flex justify-between mt-4">
+            {projectId && (
+              <Button
+                variant="outline"
+                onClick={handleRewritePrompt}
+                disabled={isPromptRewriting}
+              >
+                {isPromptRewriting ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-1" />}
+                重写
+              </Button>
+            )}
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setIsPromptDialogOpen(false)}>取消</Button>
+              <Button onClick={handleSavePrompt}>保存</Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
@@ -764,6 +1045,7 @@ export function ShotCard({
             video_path: videoVersion ? `${shot.video_path}?v=${videoVersion}` : shot.video_path,
           }}
           projectId={projectId}
+          aspectRatio={aspectRatio}
           open={isTrimOpen}
           onOpenChange={setIsTrimOpen}
           onTrimmed={({ video_path, last_frame_path, version }) => {

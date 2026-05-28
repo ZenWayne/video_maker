@@ -132,7 +132,7 @@ export default function ExportPage() {
           <div className="lg:col-span-2">
             <Card className="overflow-hidden">
               {finalVideoPath ? (
-                <div className="aspect-video bg-zinc-900">
+                <div className={`${currentProject?.aspect_ratio === '9:16' ? 'aspect-[9/16]' : 'aspect-video'} bg-zinc-900`}>
                   <video
                     src={finalVideoPath}
                     controls
@@ -140,7 +140,7 @@ export default function ExportPage() {
                   />
                 </div>
               ) : (
-                <div className="aspect-video bg-zinc-100 flex items-center justify-center">
+                <div className={`${currentProject?.aspect_ratio === '9:16' ? 'aspect-[9/16]' : 'aspect-video'} bg-zinc-100 flex items-center justify-center`}>
                   <FileVideo className="w-16 h-16 text-zinc-300" />
                 </div>
               )}

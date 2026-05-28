@@ -22,7 +22,7 @@ def load_system_prompt() -> str:
 
 Your task is to create detailed motion prompts for Veo 3 video generation.
 
-Given shot information, generate a Chinese motion prompt that describes:
+Given shot information, generate an English motion prompt that describes:
 1. Camera movement (pan, tilt, dolly, etc.)
 2. Subject motion and actions
 3. Lighting and atmosphere changes
@@ -50,7 +50,7 @@ Duration: {duration} seconds
     if text:
         prompt += f"Dialogue/Narration: {text}\n"
 
-    prompt += "\nGenerate a motion prompt for this shot:"
+    prompt += "\nGenerate a motion prompt for this shot in English:"
 
     return prompt
 
@@ -67,7 +67,7 @@ def postprocess_motion_prompt(motion_prompt: str, text: str) -> str:
             motion_prompt = motion_prompt.strip()
             if not motion_prompt.endswith("。"):
                 motion_prompt += "。"
-            motion_prompt += f"角色说：『{text.strip()}』"
+            motion_prompt += f" The character says: \"{text.strip()}\""
 
     return motion_prompt
 

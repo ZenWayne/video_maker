@@ -33,10 +33,11 @@ class Storyboard(BaseModel):
 
 
 # Word count rules by duration (English word count)
+# Normal speaking pace ≈ 2.6 words/sec
 WORD_COUNT_RULES = {
-    4: (15, 18),
-    6: (22, 25),
-    8: (30, 34),
+    4: (8, 10),
+    6: (13, 16),
+    8: (18, 21),
 }
 
 

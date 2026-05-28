@@ -1,0 +1,25 @@
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    echo "deb https://mirrors.aliyun.com/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
+    echo "deb https://mirrors.aliyun.com/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    apt-get update -qq && \
+    apt-get install -y --no-install-recommends ffmpeg libsndfile1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install CPU-only torch first (avoids pulling in 1GB+ of CUDA libs)
+# vc2 uses onnxruntime CPUExecutionProvider — no GPU needed
+RUN uv pip install --system \
+    --index-url https://mirrors.nju.edu.cn/pytorch/whl/cpu \
+    torch torchaudio
+
+# Install vc2 package (onnxruntime + fastapi etc.) from NJU PyPI mirror
+COPY CosyVoice/vc2_pkg /vc2_pkg
+RUN uv pip install --system \
+    --index-url https://mirrors.nju.edu.cn/pypi/web/simple/ \
+    /vc2_pkg
+
+# Bake exported ONNX models (~2.6 GB)
+COPY CosyVoice/exported_vc2 /workspace/exported_vc2
+ENV MODEL_DIR=/workspace/exported_vc2
