@@ -285,11 +285,15 @@ async def run_shot_pipeline(
                     duration=shot.shot_duration,
                     llm_provider=provider,
                 )
-                shot.motion_prompt = motion_prompt
 
                 # Refresh shot from DB to pick up any reference images
-                # uploaded after the worker loaded the shot list
+                # uploaded after the worker loaded the shot list. This must come
+                # BEFORE assigning motion_prompt: with autoflush=False the refresh
+                # re-reads the row and would discard an unsaved motion_prompt,
+                # leaving the completed shot with motion_prompt=NULL (which hides
+                # the "运镜提示词" edit button in the UI).
                 await session.refresh(shot)
+                shot.motion_prompt = motion_prompt
 
                 # Pick first frame (None = multi-image reference mode)
                 first_frame = await _pick_first_frame(project_id, shot, session)
