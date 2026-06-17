@@ -28,6 +28,8 @@ from app.services.storage import (
     shot_audio_original_path,
     shot_audio_vc_path,
     shot_pre_vc_video_path,
+    shot_pre_cc_last_frame_path,
+    shot_target_last_frame_path,
     get_original_video_for_audio,
 )
 from app.services.events import publish_event
@@ -36,7 +38,7 @@ from app.agents.screenwriter import run_screenwriter as run_screenwriter_agent
 from app.agents.director import run_director as run_director_agent
 from app.agents.video_generator import generate_video
 from app.agents.frame_porter import extract_last_frame
-from app.agents.merger import merge_shots
+from app.agents.merger import merge_shots, merge_shots_with_crossfade
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,7 @@ class WorkerContext:
 
 def get_provider() -> GeminiProvider:
     """Create Gemini provider from settings."""
-    return GeminiProvider(api_key=settings.gemini_api_key, vertexai_api_key=settings.veo_api_key)
+    return GeminiProvider(project=settings.gemini_project, location=settings.gemini_location)
 
 
 def get_prompts_dir() -> Path:
@@ -186,17 +188,22 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
         logger.info(f"Screenwriter completed for project {project_id}")
 
 
-async def run_shot_pipeline(ctx: Dict[str, Any], project_id: str, actor: str) -> None:
+async def run_shot_pipeline(
+    ctx: Dict[str, Any], project_id: str, actor: str, shot_id: int | None = None,
+) -> None:
     """
     Run shot pipeline: director + video generation for ONE pending shot.
 
-    Processes only the first pending/failed shot, then transitions back to
-    SHOT_REVIEW so the user can review before the next shot is generated.
+    Processes only the first pending/failed shot (or a specific shot when
+    *shot_id* is given), then transitions back to SHOT_REVIEW so the user
+    can review before the next shot is generated.
 
     Args:
         ctx: arq context
         project_id: Project ID
         actor: Who triggered this
+        shot_id: Optional — when given, process this specific shot instead of
+                 the first pending one (used by confirm-tail-frame).
     """
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory
@@ -211,30 +218,44 @@ async def run_shot_pipeline(ctx: Dict[str, Any], project_id: str, actor: str) ->
             logger.error(f"Project {project_id} not found")
             return
 
-        # Get pending shots
-        shots_result = await session.execute(
-            select(Shot)
-            .where(
-                Shot.project_id == project_id,
-                Shot.status.in_([ShotStatus.PENDING.value, ShotStatus.FAILED.value]),
+        if shot_id is not None:
+            # Process a specific shot (e.g. after confirm-tail-frame)
+            shot_result = await session.execute(
+                select(Shot).where(
+                    Shot.project_id == project_id, Shot.shot_id == shot_id
+                )
             )
-            .order_by(Shot.shot_id)
-        )
-        pending_shots = shots_result.scalars().all()
+            shot = shot_result.scalar_one_or_none()
+            if not shot:
+                logger.error("Shot %d not found in project %s", shot_id, project_id)
+                await transition_project_status(
+                    project, ProjectStatus.SHOT_REVIEW, "system:worker", session, redis
+                )
+                return
+        else:
+            # Get pending shots
+            shots_result = await session.execute(
+                select(Shot)
+                .where(
+                    Shot.project_id == project_id,
+                    Shot.status.in_([ShotStatus.PENDING.value, ShotStatus.FAILED.value]),
+                )
+                .order_by(Shot.shot_id)
+            )
+            pending_shots = shots_result.scalars().all()
 
-        if not pending_shots:
-            logger.info(f"No pending shots for project {project_id}")
-            await transition_project_status(
-                project, ProjectStatus.SHOT_REVIEW, "system:worker", session, redis
-            )
-            return
+            if not pending_shots:
+                logger.info(f"No pending shots for project {project_id}")
+                await transition_project_status(
+                    project, ProjectStatus.SHOT_REVIEW, "system:worker", session, redis
+                )
+                return
+
+            shot = pending_shots[0]
 
         provider = get_provider()
         genai_client = getattr(provider, "client", None)
         has_failures = False
-
-        # Process only the FIRST pending shot
-        shot = pending_shots[0]
 
         await publish_event(
             redis,
@@ -246,28 +267,37 @@ async def run_shot_pipeline(ctx: Dict[str, Any], project_id: str, actor: str) ->
         )
 
         try:
-            # Run director
-            shot.status = ShotStatus.PROMPT_GENERATING.value
-            session.add(shot)
-            await session.commit()
+            # If tail frame was confirmed, reuse existing motion_prompt and first_frame
+            if shot.tf_confirmed and shot.motion_prompt and shot.first_frame_path:
+                motion_prompt = shot.motion_prompt
+                first_frame = Path(shot.first_frame_path) if shot.first_frame_path else None
+            else:
+                # Run director
+                shot.status = ShotStatus.PROMPT_GENERATING.value
+                session.add(shot)
+                await session.commit()
 
-            motion_prompt = await run_director_agent(
-                shot_id=shot.shot_id,
-                shot_type=shot.shot_type,
-                visual_description=shot.visual_description,
-                text=shot.text,
-                duration=shot.shot_duration,
-                llm_provider=provider,
-            )
-            shot.motion_prompt = motion_prompt
+                motion_prompt = await run_director_agent(
+                    shot_id=shot.shot_id,
+                    shot_type=shot.shot_type,
+                    visual_description=shot.visual_description,
+                    text=shot.text,
+                    duration=shot.shot_duration,
+                    llm_provider=provider,
+                )
 
-            # Refresh shot from DB to pick up any reference images
-            # uploaded after the worker loaded the shot list
-            await session.refresh(shot)
+                # Refresh shot from DB to pick up any reference images
+                # uploaded after the worker loaded the shot list. This must come
+                # BEFORE assigning motion_prompt: with autoflush=False the refresh
+                # re-reads the row and would discard an unsaved motion_prompt,
+                # leaving the completed shot with motion_prompt=NULL (which hides
+                # the "运镜提示词" edit button in the UI).
+                await session.refresh(shot)
+                shot.motion_prompt = motion_prompt
 
-            # Pick first frame (None = multi-image reference mode)
-            first_frame = await _pick_first_frame(project_id, shot, session)
-            shot.first_frame_path = str(first_frame) if first_frame else None
+                # Pick first frame (None = multi-image reference mode)
+                first_frame = await _pick_first_frame(project_id, shot, session)
+                shot.first_frame_path = str(first_frame) if first_frame else None
 
             # Resolve reference image paths for multi-image mode
             ref_paths: Optional[list[str]] = None
@@ -276,7 +306,7 @@ async def run_shot_pipeline(ctx: Dict[str, Any], project_id: str, actor: str) ->
 
                 ref_paths = _json.loads(shot.custom_reference_paths)
 
-            # Prepend previous shot's last frame when use_prev_last_frame is set
+            # Use previous shot's last frame as first_frame
             if shot.use_prev_last_frame and shot.shot_id > 1:
                 prev_result = await session.execute(
                     select(Shot).where(
@@ -286,14 +316,15 @@ async def run_shot_pipeline(ctx: Dict[str, Any], project_id: str, actor: str) ->
                 )
                 prev_shot = prev_result.scalar_one_or_none()
                 if prev_shot and prev_shot.last_frame_path:
-                    prev_path = prev_shot.last_frame_path
-                    if ref_paths:
-                        ref_paths = [prev_path] + ref_paths
-                    elif first_frame:
-                        ref_paths = [prev_path, str(first_frame)]
-                        first_frame = None
-                    else:
-                        first_frame = Path(prev_path)
+                    first_frame = Path(prev_shot.last_frame_path)
+                    ref_paths = None
+
+            # Resolve target tail frame for Veo last_frame param
+            last_frame = None
+            if shot.tf_confirmed and shot.target_last_frame_path:
+                tf_path = Path(shot.target_last_frame_path)
+                if tf_path.exists():
+                    last_frame = str(tf_path)
 
             # Generate video
             shot.status = ShotStatus.VIDEO_GENERATING.value
@@ -322,9 +353,22 @@ async def run_shot_pipeline(ctx: Dict[str, Any], project_id: str, actor: str) ->
                 spoken_text=shot.text,
                 reference_image_paths=ref_paths,
                 aspect_ratio=project.aspect_ratio,
+                last_frame_path=last_frame,
             )
             video_out.write_bytes(video_bytes)
             shot.video_path = str(video_out)
+
+            # Tail-frame alignment: auto-trim to the frame closest to the target
+            if shot.auto_trim and shot.tf_confirmed and shot.target_last_frame_path:
+                from app.agents.video_trimmer import auto_trim_to_tail_frame
+                trim_result = auto_trim_to_tail_frame(
+                    str(video_out), shot.target_last_frame_path,
+                )
+                if trim_result:
+                    logger.info(
+                        "Auto-trimmed shot %d to %d frames (tail frame alignment)",
+                        shot.shot_id, trim_result["trimmed_to_frame"],
+                    )
 
             # Extract last frame
             last_frame_out = s_dir / "last_frame.png"
@@ -427,7 +471,8 @@ async def _pick_first_frame(
     For connected shots: use previous shot's last frame.
     """
     # Multi-image reference mode → return None (caller uses reference_images)
-    if shot.custom_reference_paths:
+    # Only for disconnected shots; connected shots use custom refs for tail frame generation
+    if shot.custom_reference_paths and not shot.align_with_previous:
         return None
 
     # Single custom first frame
@@ -475,7 +520,171 @@ async def _get_first_character_ref(project_id: str, session: AsyncSession) -> Pa
     return path
 
 
-async def run_merger(ctx: Dict[str, Any], project_id: str, actor: str) -> None:
+async def _get_character_ref_paths(
+    project_id: str, session: AsyncSession
+) -> list[str]:
+    """Get all character reference image paths for a project."""
+    result = await session.execute(
+        select(ReferenceImage).where(
+            ReferenceImage.project_id == project_id,
+            ReferenceImage.kind == "character",
+        )
+    )
+    refs = result.scalars().all()
+    return [r.storage_path for r in refs if Path(r.storage_path).exists()]
+
+
+async def run_tail_frame_pipeline(
+    ctx: Dict[str, Any], project_id: str, shot_id: int, actor: str
+) -> None:
+    """Generate target tail frame for a shot: pick_first_frame + director + tail frame.
+
+    After completion, transitions back to SHOT_REVIEW so the user can
+    confirm the generated tail frame before video generation proceeds.
+
+    Args:
+        ctx: arq context
+        project_id: Project ID
+        shot_id: Shot sequence number
+        actor: Who triggered this
+    """
+    from app.services.tail_frame_generator import generate_tail_frame
+
+    worker_ctx = WorkerContext(ctx)
+    session_factory = worker_ctx.session_factory
+    redis = worker_ctx.redis
+
+    async with session_factory() as session:
+        result = await session.execute(select(Project).where(Project.id == project_id))
+        project = result.scalar_one_or_none()
+        if not project:
+            logger.error("Project %s not found", project_id)
+            return
+
+        result = await session.execute(
+            select(Shot).where(
+                Shot.project_id == project_id, Shot.shot_id == shot_id
+            )
+        )
+        shot = result.scalar_one_or_none()
+        if not shot:
+            logger.error("Shot %d not found in project %s", shot_id, project_id)
+            return
+
+        provider = get_provider()
+
+        await publish_event(
+            redis, project_id,
+            {"type": "tf_started", "data": {"shot_id": shot_id}},
+        )
+
+        try:
+            # 1. Pick first frame
+            first_frame = await _pick_first_frame(project_id, shot, session)
+            shot.first_frame_path = str(first_frame) if first_frame else None
+
+            # 2. Director → generate motion_prompt (skip if already exists)
+            if shot.motion_prompt:
+                motion_prompt = shot.motion_prompt
+                logger.info("Reusing existing motion_prompt for shot %d", shot_id)
+            else:
+                shot.status = ShotStatus.PROMPT_GENERATING.value
+                session.add(shot)
+                await session.commit()
+
+                motion_prompt = await run_director_agent(
+                    shot_id=shot.shot_id,
+                    shot_type=shot.shot_type,
+                    visual_description=shot.visual_description,
+                    text=shot.text,
+                    duration=shot.shot_duration,
+                    llm_provider=provider,
+                )
+                shot.motion_prompt = motion_prompt
+
+            # 3. Generate target tail frame
+            shot.tf_status = "generating"
+            session.add(shot)
+            await session.commit()
+
+            char_refs = await _get_character_ref_paths(project_id, session)
+
+            # Object reference images (from custom_reference_paths on connected shots)
+            obj_refs = None
+            if shot.custom_reference_paths:
+                obj_refs = json.loads(shot.custom_reference_paths)
+
+            ensure_shot_dir(project_id, shot.shot_id)
+            tf_output = str(shot_target_last_frame_path(project_id, shot.shot_id))
+
+            async def _on_cot_complete(end_pose: str) -> None:
+                await publish_event(
+                    redis, project_id,
+                    {
+                        "type": "tf_pose_analyzed",
+                        "data": {"shot_id": shot_id, "end_pose": end_pose},
+                    },
+                )
+
+            await generate_tail_frame(
+                character_ref_paths=char_refs,
+                first_frame_path=str(first_frame) if first_frame else None,
+                motion_prompt=motion_prompt,
+                output_path=tf_output,
+                object_ref_paths=obj_refs,
+                aspect_ratio=project.aspect_ratio,
+                on_cot_complete=_on_cot_complete,
+            )
+
+            shot.target_last_frame_path = tf_output
+            shot.tf_status = "done"
+            shot.tf_error_message = None
+            shot.tf_confirmed = False
+            shot.status = ShotStatus.PENDING.value
+            session.add(shot)
+            await session.commit()
+
+            await publish_event(
+                redis, project_id,
+                {
+                    "type": "tf_completed",
+                    "data": {
+                        "shot_id": shot_id,
+                        "target_last_frame_path": to_media_url(tf_output),
+                        "motion_prompt": motion_prompt,
+                    },
+                },
+            )
+            logger.info("Tail frame generated for shot %d in project %s", shot_id, project_id)
+
+        except Exception as e:
+            logger.error("Tail frame pipeline failed for shot %d: %s", shot_id, e, exc_info=True)
+            shot.tf_status = "failed"
+            shot.tf_error_message = str(e)
+            shot.status = ShotStatus.PENDING.value
+            session.add(shot)
+            await session.commit()
+
+            await publish_event(
+                redis, project_id,
+                {
+                    "type": "tf_failed",
+                    "data": {"shot_id": shot_id, "error_message": str(e)},
+                },
+            )
+
+        # Transition back to SHOT_REVIEW
+        await transition_project_status(
+            project, ProjectStatus.SHOT_REVIEW, "system:worker", session, redis
+        )
+
+
+async def run_merger(
+    ctx: Dict[str, Any],
+    project_id: str,
+    actor: str,
+    crossfade_duration: float | None = None,
+) -> None:
     """
     Merge all completed shots into final video.
 
@@ -483,6 +692,7 @@ async def run_merger(ctx: Dict[str, Any], project_id: str, actor: str) -> None:
         ctx: arq context
         project_id: Project ID
         actor: Who triggered this
+        crossfade_duration: Override for crossfade (None = use settings default)
     """
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory
@@ -516,7 +726,8 @@ async def run_merger(ctx: Dict[str, Any], project_id: str, actor: str) -> None:
         final_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            merge_shots(shot_paths, str(final_path))
+            cf = crossfade_duration if crossfade_duration is not None else settings.crossfade_duration
+            merge_shots_with_crossfade(shot_paths, str(final_path), crossfade_duration=cf)
 
             project.final_video_path = str(final_path)
             session.add(project)
@@ -613,6 +824,7 @@ async def _do_voice_convert_one(
             session.add(shot)
             await session.commit()
 
+            import time as _time
             await publish_event(
                 redis, project_id,
                 {
@@ -620,6 +832,7 @@ async def _do_voice_convert_one(
                     "data": {
                         "shot_id": shot_id,
                         "video_path": to_media_url(str(video_path)),
+                        "version": int(_time.time()),
                     },
                 },
             )
@@ -728,4 +941,150 @@ async def run_voice_convert_batch(
     logger.info(
         "Batch voice conversion for project %s: %d converted, %d failed",
         project_id, converted, failed,
+    )
+
+
+# ============== Character Calibration ==============
+
+
+async def _do_character_calibrate_one(
+    session_factory,
+    redis,
+    project_id: str,
+    shot_id: int,
+    ref_image_paths: list[str],
+) -> None:
+    """Calibrate face in a single shot's last frame using reference images."""
+    from app.services.face_calibration_client import calibrate_face
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(Shot).where(
+                Shot.project_id == project_id, Shot.shot_id == shot_id
+            )
+        )
+        shot = result.scalar_one_or_none()
+        if not shot or not shot.last_frame_path:
+            raise ValueError(f"Shot {shot_id} not found or has no last frame")
+
+        await publish_event(
+            redis, project_id,
+            {"type": "cc_started", "data": {"shot_id": shot_id}},
+        )
+
+        try:
+            import shutil
+            last_frame = Path(shot.last_frame_path)
+            pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
+
+            if pre_cc.exists():
+                # Restore original frame before re-calibrating
+                shutil.copy2(str(pre_cc), str(last_frame))
+            else:
+                # First time — backup the original
+                shutil.copy2(str(last_frame), str(pre_cc))
+
+            # Run face calibration (overwrites last_frame in place)
+            await calibrate_face(ref_image_paths, str(last_frame), str(last_frame))
+
+            # Update DB
+            shot.cc_status = "done"
+            shot.cc_error_message = None
+            session.add(shot)
+            await session.commit()
+
+            await publish_event(
+                redis, project_id,
+                {
+                    "type": "cc_completed",
+                    "data": {
+                        "shot_id": shot_id,
+                        "last_frame_path": to_media_url(str(last_frame)),
+                    },
+                },
+            )
+            logger.info("Character calibration completed for shot %d", shot_id)
+
+        except Exception as e:
+            logger.error("Character calibration failed for shot %d: %s", shot_id, e)
+            shot.cc_status = "failed"
+            shot.cc_error_message = str(e)
+            session.add(shot)
+            await session.commit()
+
+            await publish_event(
+                redis, project_id,
+                {
+                    "type": "cc_failed",
+                    "data": {"shot_id": shot_id, "error_message": str(e)},
+                },
+            )
+            raise
+
+
+async def run_character_calibrate(
+    ctx: Dict[str, Any], project_id: str, shot_id: int, actor: str
+) -> None:
+    """Character-calibrate a single shot's last frame."""
+    worker_ctx = WorkerContext(ctx)
+    session_factory = worker_ctx.session_factory
+    redis = worker_ctx.redis
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(ReferenceImage).where(
+                ReferenceImage.project_id == project_id,
+                ReferenceImage.kind == "character",
+            )
+        )
+        refs = result.scalars().all()
+        if not refs:
+            logger.error("Project %s has no character reference images", project_id)
+            return
+
+    ref_paths = [r.storage_path for r in refs]
+    await _do_character_calibrate_one(session_factory, redis, project_id, shot_id, ref_paths)
+
+
+async def run_character_calibrate_batch(
+    ctx: Dict[str, Any], project_id: str, shot_ids: list[int], actor: str
+) -> None:
+    """Character-calibrate multiple shots' last frames."""
+    worker_ctx = WorkerContext(ctx)
+    session_factory = worker_ctx.session_factory
+    redis = worker_ctx.redis
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(ReferenceImage).where(
+                ReferenceImage.project_id == project_id,
+                ReferenceImage.kind == "character",
+            )
+        )
+        refs = result.scalars().all()
+        if not refs:
+            logger.error("Project %s has no character reference images", project_id)
+            return
+
+    ref_paths = [r.storage_path for r in refs]
+
+    calibrated = 0
+    failed = 0
+    for sid in shot_ids:
+        try:
+            await _do_character_calibrate_one(session_factory, redis, project_id, sid, ref_paths)
+            calibrated += 1
+        except Exception:
+            failed += 1
+
+    await publish_event(
+        redis, project_id,
+        {
+            "type": "cc_batch_done",
+            "data": {"calibrated": calibrated, "failed": failed},
+        },
+    )
+    logger.info(
+        "Batch character calibration for project %s: %d calibrated, %d failed",
+        project_id, calibrated, failed,
     )

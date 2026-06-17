@@ -13,3 +13,7 @@ __pycache__/
 .pytest_cache/
 test-results/
 playwright-report/
+
+# leaked/disabled service-account keys (never commit SA JSON at repo root)
+tarot-493203-*.json
+*-google-account-*.json

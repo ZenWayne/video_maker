@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Loader2, ChevronLeft, ChevronRight, Play, Square } from 'lucide-react'
+import { Loader2, ChevronLeft, ChevronRight, Play, Square, Undo2, Crosshair } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -8,11 +8,12 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { api } from '@/lib/api'
-import type { Shot } from '@/lib/types'
+import type { AspectRatio, Shot } from '@/lib/types'
 
 interface TrimDialogProps {
   shot: Shot
   projectId: string
+  aspectRatio?: AspectRatio
   open: boolean
   onOpenChange: (open: boolean) => void
   onTrimmed: (updates: {
@@ -25,6 +26,7 @@ interface TrimDialogProps {
 export function TrimDialog({
   shot,
   projectId,
+  aspectRatio,
   open,
   onOpenChange,
   onTrimmed,
@@ -36,14 +38,27 @@ export function TrimDialog({
   const [endFrame, setEndFrame] = useState(0)
   const [isLoading, setIsLoading] = useState(true)
   const [isTrimming, setIsTrimming] = useState(false)
+  const [isRestoring, setIsRestoring] = useState(false)
+  const [isAligning, setIsAligning] = useState(false)
   const [isPreviewing, setIsPreviewing] = useState(false)
+  const [hasBackup, setHasBackup] = useState(false)
   const [error, setError] = useState('')
   const minFrames = 24
 
+  const rvfcRef = useRef<number>(0)
+  const endFrameRef = useRef(0)
+
   const stopPreview = useCallback(() => {
-    if (videoRef.current) {
-      videoRef.current.pause()
+    const v = videoRef.current
+    if (rvfcRef.current) {
+      if (v && 'cancelVideoFrameCallback' in v) {
+        ;(v as any).cancelVideoFrameCallback(rvfcRef.current)
+      } else {
+        cancelAnimationFrame(rvfcRef.current)
+      }
+      rvfcRef.current = 0
     }
+    v?.pause()
     setIsPreviewing(false)
   }, [])
 
@@ -52,20 +67,55 @@ export function TrimDialog({
       stopPreview()
       return
     }
-    if (!videoRef.current) return
-    videoRef.current.currentTime = 0
-    videoRef.current.play()
+    const v = videoRef.current
+    if (!v || fps <= 0) return
+    endFrameRef.current = endFrame
+    v.currentTime = 0
+    v.play()
     setIsPreviewing(true)
-  }, [isPreviewing, stopPreview])
 
-  const handleTimeUpdate = useCallback(() => {
-    if (!isPreviewing || !videoRef.current || fps <= 0) return
-    if (videoRef.current.currentTime >= endFrame / fps) {
-      videoRef.current.pause()
-      videoRef.current.currentTime = endFrame / fps
-      setIsPreviewing(false)
+    let framesShown = 0
+    const onFrame = () => {
+      framesShown++
+      if (!videoRef.current || framesShown >= endFrameRef.current) {
+        videoRef.current?.pause()
+        setIsPreviewing(false)
+        return
+      }
+      rvfcRef.current = (videoRef.current as any).requestVideoFrameCallback(onFrame)
     }
-  }, [isPreviewing, endFrame, fps])
+
+    if ('requestVideoFrameCallback' in v) {
+      rvfcRef.current = (v as any).requestVideoFrameCallback(onFrame)
+    } else {
+      // Fallback: use time-based check with half-frame offset to avoid overshoot
+      const endSec = (endFrame - 0.5) / fps
+      const checkEnd = () => {
+        if (!videoRef.current) return
+        if (videoRef.current.paused) return
+        if (videoRef.current.currentTime >= endSec) {
+          videoRef.current.pause()
+          setIsPreviewing(false)
+          return
+        }
+        rvfcRef.current = requestAnimationFrame(checkEnd)
+      }
+      rvfcRef.current = requestAnimationFrame(checkEnd)
+    }
+  }, [isPreviewing, stopPreview, endFrame, fps])
+
+  useEffect(() => {
+    return () => {
+      const v = videoRef.current
+      if (rvfcRef.current) {
+        if (v && 'cancelVideoFrameCallback' in v) {
+          ;(v as any).cancelVideoFrameCallback(rvfcRef.current)
+        } else {
+          cancelAnimationFrame(rvfcRef.current)
+        }
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (!open) return
@@ -76,6 +126,7 @@ export function TrimDialog({
       setTotalFrames(info.total_frames)
       setDuration(info.duration)
       setEndFrame(info.total_frames)
+      setHasBackup(info.has_backup)
       setIsLoading(false)
     }).catch((e) => {
       setError(e instanceof Error ? e.message : 'Failed to load video info')
@@ -123,13 +174,57 @@ export function TrimDialog({
     }
   }
 
+  const handleRestore = async () => {
+    setIsRestoring(true)
+    setError('')
+    try {
+      const result = await api.restoreTrim(projectId, shot.shot_id)
+      onTrimmed({
+        video_path: result.video_path,
+        last_frame_path: result.last_frame_path,
+        version: result.version,
+      })
+      setTotalFrames(result.total_frames)
+      setDuration(result.duration)
+      setEndFrame(result.total_frames)
+      setHasBackup(false)
+      onOpenChange(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Restore failed')
+    } finally {
+      setIsRestoring(false)
+    }
+  }
+
+  const handleAlignTailFrame = async () => {
+    setIsAligning(true)
+    setError('')
+    try {
+      const result = await api.alignTailFrame(projectId, shot.shot_id)
+      onTrimmed({
+        video_path: result.video_path,
+        last_frame_path: result.last_frame_path,
+        version: result.version,
+      })
+      setTotalFrames(result.total_frames)
+      setDuration(result.duration)
+      setEndFrame(result.total_frames)
+      setHasBackup(true)
+      onOpenChange(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Align failed')
+    } finally {
+      setIsAligning(false)
+    }
+  }
+
   const currentTime = fps > 0 ? (endFrame / fps).toFixed(2) : '0'
   const trimmedPercent = totalFrames > 0 ? (endFrame / totalFrames) * 100 : 100
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
+      <DialogContent className="max-w-2xl flex flex-col max-h-[90vh]">
+        <DialogHeader className="shrink-0">
           <DialogTitle>裁剪视频 — Shot #{shot.shot_id}</DialogTitle>
         </DialogHeader>
 
@@ -138,22 +233,21 @@ export function TrimDialog({
             <Loader2 className="w-6 h-6 animate-spin text-zinc-400" />
           </div>
         ) : (
-          <div className="space-y-4">
-            {/* Video preview */}
-            <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
+          <div className="flex flex-col gap-4 min-h-0">
+            {/* Video preview — fills remaining space */}
+            <div className="min-h-0 flex-1 flex items-center justify-center bg-black rounded-lg overflow-hidden">
               <video
                 ref={videoRef}
                 src={shot.video_path || undefined}
                 preload="auto"
-                className="w-full h-full"
+                className="max-w-full max-h-full object-contain"
                 onLoadedMetadata={() => seekToFrame(endFrame)}
-                onTimeUpdate={handleTimeUpdate}
                 onEnded={stopPreview}
               />
             </div>
 
             {/* Slider with trim indicator */}
-            <div className="space-y-1">
+            <div className="shrink-0 space-y-1">
               <div className="relative h-3 bg-zinc-200 rounded-full overflow-hidden">
                 <div
                   className="absolute inset-y-0 left-0 bg-blue-500 rounded-full"
@@ -176,7 +270,7 @@ export function TrimDialog({
             </div>
 
             {/* Frame info */}
-            <div className="flex items-center justify-between text-sm text-zinc-600">
+            <div className="shrink-0 flex items-center justify-between text-sm text-zinc-600">
               <span>
                 帧: {endFrame} / {totalFrames}
                 {endFrame < totalFrames && (
@@ -190,54 +284,85 @@ export function TrimDialog({
               </span>
             </div>
 
-            {/* Step buttons + actions */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1">
-                <Button
-                  variant={isPreviewing ? "default" : "outline"}
-                  size="sm"
-                  onClick={handlePreview}
-                >
-                  {isPreviewing ? (
-                    <><Square className="w-4 h-4 mr-1" />停止</>
-                  ) : (
-                    <><Play className="w-4 h-4 mr-1" />预览</>
-                  )}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleStep(-10)}
-                  disabled={isPreviewing || endFrame <= minFrames}
-                >
-                  <ChevronLeft className="w-4 h-4" />-10
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleStep(-1)}
-                  disabled={isPreviewing || endFrame <= minFrames}
-                >
-                  <ChevronLeft className="w-4 h-4" />-1
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleStep(1)}
-                  disabled={isPreviewing || endFrame >= totalFrames}
-                >
-                  +1<ChevronRight className="w-4 h-4" />
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleStep(10)}
-                  disabled={isPreviewing || endFrame >= totalFrames}
-                >
-                  +10<ChevronRight className="w-4 h-4" />
-                </Button>
-              </div>
+            {/* Preview + step buttons */}
+            <div className="shrink-0 flex items-center gap-1">
+              <Button
+                variant={isPreviewing ? "default" : "outline"}
+                size="sm"
+                onClick={handlePreview}
+              >
+                {isPreviewing ? (
+                  <><Square className="w-4 h-4 mr-1" />停止</>
+                ) : (
+                  <><Play className="w-4 h-4 mr-1" />预览</>
+                )}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleStep(-10)}
+                disabled={isPreviewing || endFrame <= minFrames}
+              >
+                <ChevronLeft className="w-4 h-4" />-10
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleStep(-1)}
+                disabled={isPreviewing || endFrame <= minFrames}
+              >
+                <ChevronLeft className="w-4 h-4" />-1
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleStep(1)}
+                disabled={isPreviewing || endFrame >= totalFrames}
+              >
+                +1<ChevronRight className="w-4 h-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleStep(10)}
+                disabled={isPreviewing || endFrame >= totalFrames}
+              >
+                +10<ChevronRight className="w-4 h-4" />
+              </Button>
+            </div>
 
+            {/* Actions */}
+            <div className="shrink-0 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {hasBackup && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleRestore}
+                    disabled={isRestoring || isTrimming || isAligning || isPreviewing}
+                  >
+                    {isRestoring ? (
+                      <><Loader2 className="w-4 h-4 mr-1 animate-spin" />还原中...</>
+                    ) : (
+                      <><Undo2 className="w-4 h-4 mr-1" />还原</>
+                    )}
+                  </Button>
+                )}
+                {shot.target_last_frame_path && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleAlignTailFrame}
+                    disabled={isAligning || isTrimming || isRestoring || isPreviewing}
+                  >
+                    {isAligning ? (
+                      <><Loader2 className="w-4 h-4 mr-1 animate-spin" />校准中...</>
+                    ) : (
+                      <><Crosshair className="w-4 h-4 mr-1" />智能校准</>
+                    )}
+                  </Button>
+                )}
+              </div>
               <div className="flex items-center gap-2">
                 <Button variant="outline" onClick={() => onOpenChange(false)}>
                   取消

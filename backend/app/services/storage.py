@@ -48,14 +48,25 @@ def shot_pre_vc_video_path(project_id: str, shot_id: int) -> Path:
     return shot_dir(project_id, shot_id) / "output_pre_vc.mp4"
 
 
-def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
-    """Get the original (un-VC'd) video to extract audio from.
+def shot_pre_cc_last_frame_path(project_id: str, shot_id: int) -> Path:
+    """Get the pre-character-calibration backup of last_frame.png for a shot."""
+    return shot_dir(project_id, shot_id) / "last_frame_pre_cc.png"
 
-    Priority: output_original.mp4 (trim backup) > output_pre_vc.mp4 (VC backup) > output.mp4
-    This ensures voice conversion always uses the original audio to prevent drift.
+
+def shot_target_last_frame_path(project_id: str, shot_id: int) -> Path:
+    """Get the AI-generated target tail frame path for a shot."""
+    return shot_dir(project_id, shot_id) / "target_last_frame.png"
+
+
+def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
+    """Get the un-VC'd video to extract audio from.
+
+    Priority: output_pre_vc.mp4 (VC backup, post-trim) > output.mp4 (current)
+    NOT output_original.mp4 — that is the pre-trim backup and has different
+    duration, which would cause lip sync mismatch after trimming.
     """
     s_dir = shot_dir(project_id, shot_id)
-    for name in ["output_original.mp4", "output_pre_vc.mp4", "output.mp4"]:
+    for name in ["output_pre_vc.mp4", "output.mp4"]:
         candidate = s_dir / name
         if candidate.exists():
             return candidate

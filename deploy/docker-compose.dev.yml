@@ -27,6 +27,7 @@ services:
     secrets:
       - gemini_api_key
       - veo_api_key
+      - kie_api_key
       - deepseek_api_key
     env_file:
       - path: ./config.env
@@ -36,7 +37,6 @@ services:
       REDIS_URL: redis://video-maker-redis-dev:6379
       DATABASE_URL: sqlite+aiosqlite:////app/data/dev.db
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-sa.json
-      COSYVOICE_URL: http://video-maker-cosyvoice-vc:9880
       HTTP_PROXY: http://host.containers.internal:10809
       HTTPS_PROXY: http://host.containers.internal:10809
       http_proxy: http://host.containers.internal:10809
@@ -44,6 +44,7 @@ services:
     command: >
       sh -c "export GEMINI_API_KEY=$(cat /run/secrets/gemini_api_key) &&
              export VEO_API_KEY=$(cat /run/secrets/veo_api_key) &&
+             export KIE_API_KEY=$(cat /run/secrets/kie_api_key) &&
              export DEEPSEEK_API_KEY=$(cat /run/secrets/deepseek_api_key) &&
              uv run --project . uvicorn app.main:app --host 0.0.0.0 --port 8002
              --reload --reload-dir /app/app --reload-dir /app/worker"
@@ -65,6 +66,7 @@ services:
     secrets:
       - gemini_api_key
       - veo_api_key
+      - kie_api_key
       - deepseek_api_key
     env_file:
       - path: ./config.env
@@ -74,7 +76,6 @@ services:
       REDIS_URL: redis://video-maker-redis-dev:6379
       DATABASE_URL: sqlite+aiosqlite:////app/data/dev.db
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-sa.json
-      COSYVOICE_URL: http://video-maker-cosyvoice-vc:9880
       HTTP_PROXY: http://host.containers.internal:10809
       HTTPS_PROXY: http://host.containers.internal:10809
       http_proxy: http://host.containers.internal:10809
@@ -82,8 +83,33 @@ services:
     command: >
       sh -c "export GEMINI_API_KEY=$(cat /run/secrets/gemini_api_key) &&
              export VEO_API_KEY=$(cat /run/secrets/veo_api_key) &&
+             export KIE_API_KEY=$(cat /run/secrets/kie_api_key) &&
              export DEEPSEEK_API_KEY=$(cat /run/secrets/deepseek_api_key) &&
              uv run --project . python -m arq worker.arq_worker.WorkerSettings"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  vc-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.vc-worker
+    image: video-maker-vc-worker-dev
+    container_name: video-maker-vc-worker-dev
+    volumes:
+      - ../backend:/app:z
+      - uv-cache:/root/.cache/uv
+      - backend-venv:/app/.venv
+    env_file:
+      - path: ./config.env
+        required: true
+    working_dir: /app
+    environment:
+      REDIS_URL: redis://video-maker-redis-dev:6379
+      DATABASE_URL: sqlite+aiosqlite:////app/data/dev.db
+      PYTHONPATH: /usr/local/lib/python3.12/site-packages
+    command: >
+      uv run --project . python -m arq worker.vc_arq_worker.VcWorkerSettings
     depends_on:
       - redis
     restart: unless-stopped
@@ -93,29 +119,6 @@ services:
     container_name: video-maker-playwright
     network_mode: host
     command: npx playwright@1.41.0 run-server --port 3003 --host 0.0.0.0
-    restart: unless-stopped
-
-  cosyvoice-vc:
-    build:
-      context: ../cosyvoice-vc
-      dockerfile: Dockerfile
-    image: video-maker-cosyvoice-vc
-    container_name: video-maker-cosyvoice-vc
-    ports:
-      - "9880:9880"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    environment:
-      COSYVOICE_MODEL_DIR: FunAudioLLM/Fun-CosyVoice3-0.5B-2512
-      HTTP_PROXY: http://host.containers.internal:10809
-      HTTPS_PROXY: http://host.containers.internal:10809
-      http_proxy: http://host.containers.internal:10809
-      https_proxy: http://host.containers.internal:10809
     restart: unless-stopped
 
   frontend:
@@ -143,5 +146,7 @@ secrets:
     file: ./secrets/gemini_api_key  # written by: make secrets
   veo_api_key:
     file: ./secrets/veo_api_key  # written by: make secrets
+  kie_api_key:
+    file: ./secrets/kie_api_key  # written by: make secrets
   deepseek_api_key:
     file: ./secrets/deepseek_api_key  # written by: make secrets

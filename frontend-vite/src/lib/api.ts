@@ -57,7 +57,7 @@ async function request<T>(
   const response = await fetch(url, options)
 
   if (!response.ok) {
-    let errorData: { error?: APIError }
+    let errorData: { error?: APIError; detail?: string }
     try {
       errorData = await response.json()
     } catch {
@@ -66,7 +66,10 @@ async function request<T>(
         message: `HTTP ${response.status}: ${response.statusText}`,
       })
     }
-    throw new APIErrorClass(errorData.error || { code: 'UNKNOWN_ERROR', message: 'Unknown error' })
+    const apiError: APIError = errorData.error
+      ?? (errorData.detail ? { code: 'API_ERROR', message: errorData.detail } : null)
+      ?? { code: 'UNKNOWN_ERROR', message: 'Unknown error' }
+    throw new APIErrorClass(apiError)
   }
 
   if (response.status === 204) {
@@ -198,7 +201,7 @@ export const api = {
   patchShot: (
     id: string,
     shotId: number,
-    data: { text?: string; visual_description?: string; motion_prompt?: string; align_with_previous?: boolean }
+    data: { text?: string; visual_description?: string; motion_prompt?: string; align_with_previous?: boolean; use_prev_last_frame?: boolean; shot_duration?: number; auto_trim?: boolean }
   ): Promise<void> => {
     return request('PATCH', `/api/projects/${id}/shots/${shotId}`, data)
   },
@@ -206,6 +209,23 @@ export const api = {
   // 导出视频
   exportVideo: (id: string): Promise<void> => {
     return request('POST', `/api/projects/${id}/export`)
+  },
+
+  // AI 编辑运镜提示词
+  aiEditPrompt: (
+    projectId: string,
+    shotId: number,
+    instruction: string
+  ): Promise<{ motion_prompt: string }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/ai-edit-prompt`, { instruction })
+  },
+
+  // 重写运镜提示词（Director 重新生成）
+  rewritePrompt: (
+    projectId: string,
+    shotId: number,
+  ): Promise<{ motion_prompt: string }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/rewrite-prompt`)
   },
 
   // AI 编辑分镜
@@ -277,7 +297,7 @@ export const api = {
   },
 
   // 视频元信息
-  getVideoInfo: (projectId: string, shotId: number): Promise<{ fps: number; total_frames: number; duration: number }> => {
+  getVideoInfo: (projectId: string, shotId: number): Promise<{ fps: number; total_frames: number; duration: number; has_backup: boolean }> => {
     return request('GET', `/api/projects/${projectId}/shots/${shotId}/video-info`)
   },
 
@@ -288,6 +308,22 @@ export const api = {
     endFrame: number
   ): Promise<{ video_path: string; last_frame_path: string; version: number; fps: number; total_frames: number; duration: number }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/trim`, { end_frame: endFrame })
+  },
+
+  // 还原裁剪
+  restoreTrim: (
+    projectId: string,
+    shotId: number
+  ): Promise<{ video_path: string; last_frame_path: string; version: number; fps: number; total_frames: number; duration: number }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/restore-trim`)
+  },
+
+  // 智能尾帧校准
+  alignTailFrame: (
+    projectId: string,
+    shotId: number
+  ): Promise<{ video_path: string; last_frame_path: string; version: number; fps: number; total_frames: number; duration: number; aligned_to_frame: number }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/align-tail-frame`)
   },
 
   // 设置基准音色
@@ -311,8 +347,38 @@ export const api = {
   },
 
   // 还原音色
-  voiceRevert: (projectId: string, shotId: number): Promise<{ video_path: string }> => {
+  voiceRevert: (projectId: string, shotId: number): Promise<{ video_path: string; version: number }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/voice-revert`)
+  },
+
+  // 单个 shot 人物校准
+  characterCalibrate: (projectId: string, shotId: number): Promise<void> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/character-calibrate`)
+  },
+
+  // 批量人物校准
+  characterCalibrateAll: (projectId: string): Promise<{ shot_ids: number[] }> => {
+    return request('POST', `/api/projects/${projectId}/character-calibrate-all`)
+  },
+
+  // 生成目标尾帧
+  generateTailFrame: (projectId: string, shotId: number): Promise<void> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/generate-tail-frame`)
+  },
+
+  // 从视频提取尾帧
+  extractTailFrame: (projectId: string, shotId: number): Promise<{ target_last_frame_path: string }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/extract-tail-frame`)
+  },
+
+  // 确认尾帧
+  confirmTailFrame: (projectId: string, shotId: number): Promise<{ tf_confirmed: boolean; target_last_frame_path: string }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/confirm-tail-frame`)
+  },
+
+  // 还原人物校准
+  characterCalibrateRevert: (projectId: string, shotId: number): Promise<{ last_frame_path: string; version: number }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/character-calibrate-revert`)
   },
 
   // 资源 URL

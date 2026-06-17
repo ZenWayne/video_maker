@@ -18,11 +18,12 @@ class GeminiProvider:
     LLM calls go through the native SDK (proxied via HTTPS_PROXY env var).
     """
 
-    def __init__(self, api_key: str, vertexai_api_key: str = "", **kwargs):
-        if vertexai_api_key:
-            self.client = genai.Client(vertexai=True, api_key=vertexai_api_key)
-        else:
-            self.client = genai.Client(api_key=api_key)
+    def __init__(self, project: str = "", location: str = "", **kwargs):
+        self.client = genai.Client(
+            vertexai=True,
+            project=project,
+            location=location,
+        )
 
     async def generate_json(
         self,

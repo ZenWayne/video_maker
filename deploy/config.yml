@@ -16,8 +16,9 @@ VEO_MAX_WAIT_SECONDS: "300"
 # Worker
 WORKER_POOL_SIZE: "4"
 
-# CosyVoice VC service
-COSYVOICE_URL: "http://video-maker-cosyvoice-vc:9880"
+# Voice conversion (in-process vc2.VoiceConverter)
+MODEL_DIR: "/workspace/exported_vc2"
+VC_NUM_THREADS: "4"
 
 # CORS — include both Vite dev and production origins
 CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000,http://127.0.0.1:4000"

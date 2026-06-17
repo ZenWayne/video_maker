@@ -13,6 +13,7 @@ import {
   Loader2,
   XCircle,
   Mic,
+  User,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -80,6 +81,8 @@ export default function ShotsPage() {
   const [isCancelling, setIsCancelling] = useState(false)
   const [referenceVoiceShotId, setReferenceVoiceShotId] = useState<number | null>(null)
   const [isVcConverting, setIsVcConverting] = useState(false)
+  const [isCcCalibrating, setIsCcCalibrating] = useState(false)
+  const [hasCharacterRefs, setHasCharacterRefs] = useState(false)
 
   const updateShot = useStore((s) => s.updateShot)
 
@@ -95,21 +98,17 @@ export default function ShotsPage() {
       setShots(scriptData.storyboard.shots)
       setStatus('script_review')
     }
-    // Voice cloning SSE events
-    if (type === 'vc_started') {
-      const d = data as { shot_id: number }
-      updateShot(d.shot_id, { vc_status: 'converting' })
-    }
-    if (type === 'vc_completed') {
-      const d = data as { shot_id: number; video_path: string }
-      updateShot(d.shot_id, { vc_status: 'done', video_path: d.video_path })
-    }
-    if (type === 'vc_failed') {
-      const d = data as { shot_id: number; error_message: string }
-      updateShot(d.shot_id, { vc_status: 'failed', vc_error_message: d.error_message })
-    }
+    // VC/CC batch completion — reset loading states
+    // (individual shot updates are handled by ProgressStream directly)
     if (type === 'vc_batch_done') {
       setIsVcConverting(false)
+    }
+    if (type === 'cc_batch_done') {
+      setIsCcCalibrating(false)
+    }
+    // Tail frame completion — ensure page returns to shot_review
+    if (type === 'tf_completed') {
+      setStatus('shot_review')
     }
   }, [setShots, updateShot])
 
@@ -125,6 +124,7 @@ export default function ShotsPage() {
         setSceneOverview(project.scene_overview || '')
         setShots(project.shots || [])
         setReferenceVoiceShotId(project.reference_voice_shot_id ?? null)
+        setHasCharacterRefs(project.reference_images?.some((r) => r.kind === 'character') ?? false)
       } catch (error) {
         addToast({
           type: 'error',
@@ -179,7 +179,14 @@ export default function ShotsPage() {
 
     setIsRegenerating(true)
     try {
-      await api.regenerateShots(projectId, Array.from(selectedShotIds))
+      const ids = Array.from(selectedShotIds)
+      await api.regenerateShots(projectId, ids)
+      // Clear stale video so the old clip doesn't keep showing
+      setShots(shots.map((s) =>
+        ids.includes(s.shot_id)
+          ? { ...s, status: 'pending', video_path: undefined, last_frame_path: undefined }
+          : s
+      ))
       clearSelection()
       setStatus('shot_generating')
       addToast({ type: 'success', message: '开始重新生成选中的分镜' })
@@ -250,7 +257,7 @@ export default function ShotsPage() {
     try {
       await api.approveScript(projectId)
       setStatus('shot_generating')
-      addToast({ type: 'success', message: '开始生成视频' })
+      addToast({ type: 'success', message: '开始生成尾帧' })
     } catch (error) {
       addToast({
         type: 'error',
@@ -289,9 +296,11 @@ export default function ShotsPage() {
       setStatus('shot_generating')
       addToast({ type: 'success', message: '开始生成下一个镜头' })
     } catch (error) {
+      const msg = error instanceof Error ? error.message : '操作失败'
+      const isValidation = msg.includes('尾帧')
       addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : '操作失败',
+        type: isValidation ? 'warning' : 'error',
+        message: msg,
       })
     } finally {
       setIsContinuing(false)
@@ -321,6 +330,12 @@ export default function ShotsPage() {
     if (!projectId) return
     try {
       await api.regenerateShots(projectId, [shotId])
+      // Clear stale video so the old clip doesn't keep showing
+      setShots(shots.map((s) =>
+        s.shot_id === shotId
+          ? { ...s, status: 'pending', video_path: undefined, last_frame_path: undefined }
+          : s
+      ))
       setStatus('shot_generating')
       addToast({ type: 'success', message: `开始重新生成镜头 #${shotId}` })
     } catch (error) {
@@ -376,7 +391,7 @@ export default function ShotsPage() {
     if (!projectId) return
     try {
       const result = await api.voiceRevert(projectId, shotId)
-      updateShot(shotId, { vc_status: null, vc_error_message: null, video_path: result.video_path })
+      updateShot(shotId, { vc_status: null, vc_error_message: null, video_path: `${result.video_path}?v=${result.version}` })
       addToast({ type: 'success', message: '已还原原始音色' })
     } catch (error) {
       addToast({
@@ -398,6 +413,100 @@ export default function ShotsPage() {
       addToast({
         type: 'error',
         message: error instanceof Error ? error.message : '操作失败',
+      })
+    }
+  }
+
+  // 单个 shot 人物校准
+  const handleCharacterCalibrate = async (shotId: number) => {
+    if (!projectId) return
+    try {
+      await api.characterCalibrate(projectId, shotId)
+      updateShot(shotId, { cc_status: 'calibrating' })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '校准失败',
+      })
+    }
+  }
+
+  // 还原人物校准
+  const handleCharacterCalibrateRevert = async (shotId: number) => {
+    if (!projectId) return
+    try {
+      const result = await api.characterCalibrateRevert(projectId, shotId)
+      updateShot(shotId, { cc_status: null, cc_error_message: null, last_frame_path: `${result.last_frame_path}?v=${result.version}` })
+      addToast({ type: 'success', message: '已还原末帧' })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '还原失败',
+      })
+    }
+  }
+
+  // 一键人物校准
+  const handleCharacterCalibrateAll = async () => {
+    if (!projectId) return
+    setIsCcCalibrating(true)
+    try {
+      await api.characterCalibrateAll(projectId)
+      addToast({ type: 'success', message: '开始批量人物校准' })
+    } catch (error) {
+      setIsCcCalibrating(false)
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '操作失败',
+      })
+    }
+  }
+
+  // 生成尾帧
+  const handleGenerateTailFrame = async (shotId: number) => {
+    if (!projectId) return
+    try {
+      await api.generateTailFrame(projectId, shotId)
+      updateShot(shotId, { tf_status: 'generating', tf_confirmed: false })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '尾帧生成失败',
+      })
+    }
+  }
+
+  // 确认尾帧并生成视频
+  const handleConfirmTailFrame = async (shotId: number) => {
+    if (!projectId) return
+    try {
+      await api.confirmTailFrame(projectId, shotId)
+      updateShot(shotId, { tf_confirmed: true })
+      setStatus('shot_generating')
+      addToast({ type: 'success', message: `镜头 #${shotId} 尾帧已确认，开始生成视频` })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '确认失败',
+      })
+    }
+  }
+
+  // 从视频提取尾帧
+  const handleExtractTailFrame = async (shotId: number) => {
+    if (!projectId) return
+    try {
+      const result = await api.extractTailFrame(projectId, shotId)
+      updateShot(shotId, {
+        target_last_frame_path: `${result.target_last_frame_path}?t=${Date.now()}`,
+        tf_status: 'done' as const,
+        tf_confirmed: false,
+      })
+      addToast({ type: 'success', message: `镜头 #${shotId} 视频尾帧已提取为目标尾帧` })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '提取失败',
       })
     }
   }
@@ -465,9 +574,10 @@ export default function ShotsPage() {
             />
           )}
 
-          <div data-testid="shots-list" className="mt-8 space-y-3">
-            {shots.map((shot) => {
+          <div data-testid="shots-list" className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-4">
+            {shots.map((shot, idx) => {
               const isActive = shot.status === 'prompt_generating' || shot.status === 'video_generating'
+              const prevShot = idx > 0 ? shots[idx - 1] : null
               return isActive ? (
                 <ShotCard key={shot.id} shot={shot} variant="generating" />
               ) : (
@@ -476,9 +586,21 @@ export default function ShotsPage() {
                   shot={shot}
                   variant="review"
                   projectId={projectId!}
+                  aspectRatio={currentProject?.aspect_ratio}
+                  prevLastFramePath={prevShot?.last_frame_path}
+                  isReferenceVoice={referenceVoiceShotId === shot.shot_id}
+                  hasReferenceVoice={referenceVoiceShotId != null}
                   onEditPrompt={handleEditPrompt}
                   onRedraw={handleRedrawShot}
                   onShotUpdated={handleShotUpdated}
+                  onSetReferenceVoice={handleSetReferenceVoice}
+                  onVoiceConvert={handleVoiceConvert}
+                  onVoiceRevert={handleVoiceRevert}
+                  onCharacterCalibrate={handleCharacterCalibrate}
+                  onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
+                  onGenerateTailFrame={handleGenerateTailFrame}
+                  onConfirmTailFrame={handleConfirmTailFrame}
+                  onExtractTailFrame={handleExtractTailFrame}
                 />
               )
             })}
@@ -548,6 +670,13 @@ export default function ShotsPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-6">
+        {/* SSE subscription for tail frame and other async events */}
+        {projectId && status === 'shot_review' && (
+          <div className={shots.some(s => s.tf_status === 'generating' || s.vc_status === 'converting' || s.cc_status === 'calibrating') ? '' : 'hidden'}>
+            <ProgressStream projectId={projectId} onEvent={handleSSEEvent} />
+          </div>
+        )}
+
         {/* Scene Overview */}
         {sceneOverview !== undefined && (
           <div data-testid="script-content" className="mb-6">
@@ -610,6 +739,7 @@ export default function ShotsPage() {
                 shot={shot}
                 variant="review"
                 projectId={projectId}
+                aspectRatio={currentProject?.aspect_ratio}
                 selected={selectedShotIds.has(shot.shot_id)}
                 prevLastFramePath={prevShot?.last_frame_path}
                 isReferenceVoice={referenceVoiceShotId === shot.shot_id}
@@ -621,6 +751,11 @@ export default function ShotsPage() {
                 onSetReferenceVoice={status !== 'script_review' ? handleSetReferenceVoice : undefined}
                 onVoiceConvert={status !== 'script_review' ? handleVoiceConvert : undefined}
                 onVoiceRevert={status !== 'script_review' ? handleVoiceRevert : undefined}
+                onCharacterCalibrate={status !== 'script_review' ? handleCharacterCalibrate : undefined}
+                onCharacterCalibrateRevert={status !== 'script_review' ? handleCharacterCalibrateRevert : undefined}
+                onGenerateTailFrame={status !== 'script_review' ? handleGenerateTailFrame : undefined}
+                onConfirmTailFrame={status !== 'script_review' ? handleConfirmTailFrame : undefined}
+                onExtractTailFrame={status !== 'script_review' ? handleExtractTailFrame : undefined}
               />
             )
           })}
@@ -655,7 +790,7 @@ export default function ShotsPage() {
                 ) : (
                   <>
                     <CheckCircle className="w-4 h-4 mr-2" />
-                    通过，开始生成视频
+                    通过，开始生成尾帧
                   </>
                 )}
               </Button>
@@ -705,6 +840,19 @@ export default function ShotsPage() {
                   )}
                 </Tooltip>
 
+                <Button
+                  variant="outline"
+                  onClick={handleCharacterCalibrateAll}
+                  disabled={isCcCalibrating || !hasCharacterRefs}
+                >
+                  {isCcCalibrating ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <User className="w-4 h-4 mr-2" />
+                  )}
+                  全部人物校准
+                </Button>
+
                 {hasPendingShots ? (
                   <Button
                     onClick={handleContinueGeneration}
@@ -715,7 +863,7 @@ export default function ShotsPage() {
                     ) : (
                       <>
                         <CheckCircle className="w-4 h-4 mr-2" />
-                        通过，继续生成下一个（{completedCount}/{shots.length}）
+                        继续下一个（{completedCount}/{shots.length}）
                       </>
                     )}
                   </Button>
