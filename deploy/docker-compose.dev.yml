@@ -29,6 +29,8 @@ services:
       - veo_api_key
       - kie_api_key
       - deepseek_api_key
+      - langfuse_public_key
+      - langfuse_secret_key
     env_file:
       - path: ./config.env
         required: true
@@ -46,6 +48,8 @@ services:
              export VEO_API_KEY=$(cat /run/secrets/veo_api_key) &&
              export KIE_API_KEY=$(cat /run/secrets/kie_api_key) &&
              export DEEPSEEK_API_KEY=$(cat /run/secrets/deepseek_api_key) &&
+             export LANGFUSE_PUBLIC_KEY=$(cat /run/secrets/langfuse_public_key) &&
+             export LANGFUSE_SECRET_KEY=$(cat /run/secrets/langfuse_secret_key) &&
              uv run --project . uvicorn app.main:app --host 0.0.0.0 --port 8002
              --reload --reload-dir /app/app --reload-dir /app/worker"
     depends_on:
@@ -68,6 +72,8 @@ services:
       - veo_api_key
       - kie_api_key
       - deepseek_api_key
+      - langfuse_public_key
+      - langfuse_secret_key
     env_file:
       - path: ./config.env
         required: true
@@ -85,6 +91,8 @@ services:
              export VEO_API_KEY=$(cat /run/secrets/veo_api_key) &&
              export KIE_API_KEY=$(cat /run/secrets/kie_api_key) &&
              export DEEPSEEK_API_KEY=$(cat /run/secrets/deepseek_api_key) &&
+             export LANGFUSE_PUBLIC_KEY=$(cat /run/secrets/langfuse_public_key) &&
+             export LANGFUSE_SECRET_KEY=$(cat /run/secrets/langfuse_secret_key) &&
              uv run --project . python -m arq worker.arq_worker.WorkerSettings"
     depends_on:
       - redis
@@ -150,3 +158,7 @@ secrets:
     file: ./secrets/kie_api_key  # written by: make secrets
   deepseek_api_key:
     file: ./secrets/deepseek_api_key  # written by: make secrets
+  langfuse_public_key:
+    file: ./secrets/langfuse_public_key  # written by: make secrets
+  langfuse_secret_key:
+    file: ./secrets/langfuse_secret_key  # written by: make secrets

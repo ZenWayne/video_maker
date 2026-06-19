@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
+from app import observability
 from app.models.project import Project, Shot, ReferenceImage
 from app.services.state_machine import (
     ProjectStatus,
@@ -68,6 +69,7 @@ def get_prompts_dir() -> Path:
     return Path(__file__).parent.parent / "prompts"
 
 
+@observability.traced_job("worker-screenwriter-run", tags=["screenwriter"])
 async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> None:
     """
     Run screenwriter agent to generate storyboard.
@@ -188,6 +190,7 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
         logger.info(f"Screenwriter completed for project {project_id}")
 
 
+@observability.traced_job("worker-shot-pipeline-run", tags=["shot-pipeline"])
 async def run_shot_pipeline(
     ctx: Dict[str, Any], project_id: str, actor: str, shot_id: int | None = None,
 ) -> None:
@@ -345,18 +348,42 @@ async def run_shot_pipeline(
             s_dir = shot_dir(project_id, shot.shot_id)
             video_out = s_dir / "output.mp4"
 
-            video_bytes = await generate_video(
-                client=genai_client,
-                motion_prompt=motion_prompt,
-                first_frame_path=str(first_frame) if first_frame else None,
-                shot_duration=shot.shot_duration,
-                spoken_text=shot.text,
-                reference_image_paths=ref_paths,
-                aspect_ratio=project.aspect_ratio,
-                last_frame_path=last_frame,
+            video_model = (
+                settings.kie_veo_model
+                if settings.video_provider == "kie"
+                else settings.veo_model
             )
-            video_out.write_bytes(video_bytes)
-            shot.video_path = str(video_out)
+            with observability.generation(
+                name="services-video-generate",
+                model=f"{settings.video_provider}/{video_model}",
+                input={
+                    "motion_prompt": motion_prompt,
+                    "first_frame_path": str(first_frame) if first_frame else None,
+                    "last_frame_path": last_frame,
+                    "reference_image_paths": ref_paths,
+                    "shot_duration": shot.shot_duration,
+                    "aspect_ratio": project.aspect_ratio,
+                },
+            ) as vid_gen:
+                video_bytes = await generate_video(
+                    client=genai_client,
+                    motion_prompt=motion_prompt,
+                    first_frame_path=str(first_frame) if first_frame else None,
+                    shot_duration=shot.shot_duration,
+                    spoken_text=shot.text,
+                    reference_image_paths=ref_paths,
+                    aspect_ratio=project.aspect_ratio,
+                    last_frame_path=last_frame,
+                )
+                video_out.write_bytes(video_bytes)
+                shot.video_path = str(video_out)
+                observability.update_span(
+                    vid_gen,
+                    output={
+                        "video_path": to_media_url(str(video_out)),
+                        "size_bytes": len(video_bytes),
+                    },
+                )
 
             # Tail-frame alignment: auto-trim to the frame closest to the target
             if shot.auto_trim and shot.tf_confirmed and shot.target_last_frame_path:
@@ -534,6 +561,7 @@ async def _get_character_ref_paths(
     return [r.storage_path for r in refs if Path(r.storage_path).exists()]
 
 
+@observability.traced_job("worker-tail-frame-pipeline-run", tags=["tail-frame"])
 async def run_tail_frame_pipeline(
     ctx: Dict[str, Any], project_id: str, shot_id: int, actor: str
 ) -> None:
@@ -1022,6 +1050,7 @@ async def _do_character_calibrate_one(
             raise
 
 
+@observability.traced_job("worker-character-calibrate-run", tags=["character-calibrate"])
 async def run_character_calibrate(
     ctx: Dict[str, Any], project_id: str, shot_id: int, actor: str
 ) -> None:
@@ -1046,6 +1075,7 @@ async def run_character_calibrate(
     await _do_character_calibrate_one(session_factory, redis, project_id, shot_id, ref_paths)
 
 
+@observability.traced_job("worker-character-calibrate-batch-run", tags=["character-calibrate"])
 async def run_character_calibrate_batch(
     ctx: Dict[str, Any], project_id: str, shot_ids: list[int], actor: str
 ) -> None:

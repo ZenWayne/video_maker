@@ -142,6 +142,7 @@ async def run_screenwriter(
         user_parts=user_parts,
         response_schema=Storyboard,
         temperature=0.7,
+        operation="agents-screenwriter-generate-storyboard",
     )
 
     # Validate word counts and mark warnings

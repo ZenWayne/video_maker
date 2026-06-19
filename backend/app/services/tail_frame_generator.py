@@ -19,6 +19,7 @@ from google.genai import types
 
 from app.agents.frame_porter import center_crop_to_aspect
 from app.config import settings
+from app import observability
 
 logger = logging.getLogger(__name__)
 
@@ -133,18 +134,28 @@ async def generate_tail_frame(
     cot_prompt = settings.tf_cot_prompt.format(motion_prompt=motion_prompt)
     cot_parts = cot_image_parts + [types.Part(text=cot_prompt)]
 
-    try:
-        cot_response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=settings.tf_cot_model,
-                contents=[types.Content(role="user", parts=cot_parts)],
-                config=types.GenerateContentConfig(temperature=0.3),
-            ),
-            timeout=120,
-        )
-    except asyncio.TimeoutError:
-        raise RuntimeError("TF CoT API call timed out after 120s (network issue)")
-    end_pose = _extract_text(cot_response)
+    with observability.generation(
+        name="services-tail-frame-cot-analysis",
+        model=settings.tf_cot_model,
+        input={"motion_prompt": motion_prompt},
+        model_parameters={"temperature": 0.3},
+    ) as cot_gen:
+        try:
+            cot_response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=settings.tf_cot_model,
+                    contents=[types.Content(role="user", parts=cot_parts)],
+                    config=types.GenerateContentConfig(temperature=0.3),
+                ),
+                timeout=120,
+            )
+        except asyncio.TimeoutError:
+            observability.update_span(
+                cot_gen, level="ERROR", status_message="TF CoT timed out after 120s"
+            )
+            raise RuntimeError("TF CoT API call timed out after 120s (network issue)")
+        end_pose = _extract_text(cot_response)
+        observability.update_span(cot_gen, output=end_pose)
     logger.info("TF CoT end pose: %s", end_pose[:500])
 
     # Retry once with a stronger differentiation instruction if the CoT produced
@@ -188,54 +199,72 @@ async def generate_tail_frame(
     )
     img_parts = img_image_parts + [types.Part(text=img_prompt)]
 
-    try:
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=model,
-                contents=[types.Content(role="user", parts=img_parts)],
-                config=types.GenerateContentConfig(
-                    response_modalities=["IMAGE"],
-                    temperature=1.0,
+    with observability.generation(
+        name="services-tail-frame-generate-image",
+        model=model,
+        input={"end_pose": end_pose},
+        model_parameters={"temperature": 1.0, "response_modalities": ["IMAGE"]},
+    ) as img_gen:
+        try:
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=model,
+                    contents=[types.Content(role="user", parts=img_parts)],
+                    config=types.GenerateContentConfig(
+                        response_modalities=["IMAGE"],
+                        temperature=1.0,
+                    ),
                 ),
-            ),
-            timeout=120,
-        )
-    except asyncio.TimeoutError:
-        raise RuntimeError("TF image generation timed out after 120s (network issue)")
+                timeout=120,
+            )
+        except asyncio.TimeoutError:
+            observability.update_span(
+                img_gen, level="ERROR", status_message="TF image generation timed out after 120s"
+            )
+            raise RuntimeError("TF image generation timed out after 120s (network issue)")
 
-    # Extract the generated image
-    saved = False
-    parts = response.parts or []
+        # Extract the generated image
+        saved = False
+        parts = response.parts or []
 
-    if not parts:
-        # Log block reason for debugging (safety filter, empty response, etc.)
-        block_reason = getattr(response, "prompt_feedback", None)
-        candidates = getattr(response, "candidates", None)
-        finish_reason = None
-        if candidates:
-            finish_reason = getattr(candidates[0], "finish_reason", None)
-        logger.error(
-            "TF image generation returned no parts. "
-            "block_reason=%s  finish_reason=%s  candidates=%s",
-            block_reason, finish_reason, candidates,
-        )
-        raise RuntimeError(
-            f"Gemini returned empty response (blocked or filtered). "
-            f"block_reason={block_reason}, finish_reason={finish_reason}"
-        )
+        if not parts:
+            # Log block reason for debugging (safety filter, empty response, etc.)
+            block_reason = getattr(response, "prompt_feedback", None)
+            candidates = getattr(response, "candidates", None)
+            finish_reason = None
+            if candidates:
+                finish_reason = getattr(candidates[0], "finish_reason", None)
+            logger.error(
+                "TF image generation returned no parts. "
+                "block_reason=%s  finish_reason=%s  candidates=%s",
+                block_reason, finish_reason, candidates,
+            )
+            observability.update_span(
+                img_gen, level="ERROR",
+                status_message=f"empty response block_reason={block_reason} finish_reason={finish_reason}",
+            )
+            raise RuntimeError(
+                f"Gemini returned empty response (blocked or filtered). "
+                f"block_reason={block_reason}, finish_reason={finish_reason}"
+            )
 
-    for part in parts:
-        if part.inline_data is not None:
-            Path(output_path).write_bytes(part.inline_data.data)
-            saved = True
-            logger.info("TF done: saved %s", output_path)
-            break
+        for part in parts:
+            if part.inline_data is not None:
+                Path(output_path).write_bytes(part.inline_data.data)
+                saved = True
+                logger.info("TF done: saved %s", output_path)
+                break
 
-    if not saved:
-        raise RuntimeError(
-            "Gemini did not return an image. "
-            f"Response parts: {[type(p).__name__ for p in parts]}"
-        )
+        if not saved:
+            observability.update_span(
+                img_gen, level="ERROR", status_message="Gemini did not return an image"
+            )
+            raise RuntimeError(
+                "Gemini did not return an image. "
+                f"Response parts: {[type(p).__name__ for p in parts]}"
+            )
+
+        observability.update_span(img_gen, output={"output_path": output_path})
 
     # Gemini doesn't guarantee exact aspect ratios — center-crop to match project AR
     center_crop_to_aspect(output_path, aspect_ratio)

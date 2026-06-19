@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header, UploadFile, File
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import observability
 from app.config import settings
 from app.db import get_session
 from app.main import get_redis
@@ -512,7 +513,8 @@ async def ai_edit_shot(
     # Session released here — now safe to do the long LLM call
     # Provider is selected inside run_shot_editor (DeepSeek if key set, else Gemini)
     try:
-        result = await run_shot_editor(**editor_kwargs)
+        async with observability.project_context(project_id, "api-shot-editor-edit"):
+            result = await run_shot_editor(**editor_kwargs)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI generation failed: {e}")
 
@@ -572,12 +574,14 @@ async def ai_edit_motion_prompt(
     )
 
     try:
-        new_prompt = await provider.generate_text(
-            model=settings.gemini_director_model,
-            system_prompt=system,
-            user_message=user_msg,
-            temperature=0.7,
-        )
+        async with observability.project_context(project_id, "api-regenerate-motion"):
+            new_prompt = await provider.generate_text(
+                model=settings.gemini_director_model,
+                system_prompt=system,
+                user_message=user_msg,
+                temperature=0.7,
+                operation="api-pipeline-regenerate-motion",
+            )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI generation failed: {e}")
 
@@ -614,14 +618,15 @@ async def rewrite_motion_prompt(
     )
 
     try:
-        new_prompt = await run_director_agent(
-            shot_id=shot_id,
-            shot_type=shot_type,
-            visual_description=visual_description,
-            text=text,
-            duration=duration,
-            llm_provider=provider,
-        )
+        async with observability.project_context(project_id, "api-rewrite-motion"):
+            new_prompt = await run_director_agent(
+                shot_id=shot_id,
+                shot_type=shot_type,
+                visual_description=visual_description,
+                text=text,
+                duration=duration,
+                llm_provider=provider,
+            )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Director agent failed: {e}")
 
