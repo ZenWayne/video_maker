@@ -254,21 +254,46 @@ def generation(
 
 
 @asynccontextmanager
-async def project_context(project_id: str, name: str) -> AsyncIterator[Optional[str]]:
-    """Open a per-project root span for an API request.
+async def _project_root(
+    project_id: str,
+    name: str,
+    *,
+    tags: Optional[List[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    input: Any = None,
+) -> AsyncIterator[Any]:
+    """The single place a project's session + root trace are bound together.
 
-    Resolves the project's session id + deterministic trace id and binds both, so
-    API-triggered generations (regenerate, edit, rewrite) join the very same
-    trace and session as the project's worker jobs. No-op when disabled.
+    Resolves the project's stable session id and deterministic trace id, binds
+    the session (so it propagates to every child observation) and opens the root
+    span. BOTH entry points — :func:`project_context` (API) and
+    :func:`traced_job` (worker) — go through here, so all of a project's work
+    chains into the same session and trace. Yields ``(span, trace_id)``, or
+    ``(None, None)`` when tracing is disabled.
     """
     if get_langfuse() is None:
-        yield None
+        yield None, None
         return
     session_id = await resolve_session_for(project_id)
     trace_id = make_trace_id(project_id)
-    with session(session_id, metadata={"project_id": project_id}), trace(
-        name, trace_id=trace_id, input={"project_id": project_id}
-    ):
+    meta = {"project_id": project_id, **(metadata or {})}
+    with session(session_id, tags=tags, metadata=meta), trace(
+        name, trace_id=trace_id, input=input
+    ) as span:
+        yield span, trace_id
+
+
+@asynccontextmanager
+async def project_context(project_id: str, name: str) -> AsyncIterator[Optional[str]]:
+    """Per-project root span for an API request (regenerate, edit, rewrite).
+
+    Thin wrapper over :func:`_project_root`; API-triggered generations opened
+    inside it join the very same trace and session as the project's worker jobs.
+    Yields the project trace id (``None`` when disabled).
+    """
+    async with _project_root(
+        project_id, name, input={"project_id": project_id}
+    ) as (_span, trace_id):
         yield trace_id
 
 
@@ -283,13 +308,13 @@ def update_span(span: Any, **kwargs: Any) -> None:
 
 
 def traced_job(name: str, tags: Optional[List[str]] = None) -> Callable:
-    """Decorator for arq worker tasks: wrap the whole job in a root trace.
+    """Decorator for arq worker tasks: wrap the whole job in a project root trace.
 
-    The task signature is ``(ctx, project_id, ...)``. The per-project session id
-    (see :func:`make_session_id`) is bound for the whole job so every nested
-    generation chains into the same session; later kwargs (``shot_id``,
-    ``actor``) land in trace metadata. Buffered events are flushed when the job
-    returns. No-op when tracing is disabled.
+    The task signature is ``(ctx, project_id, ...)``. Delegates session + trace
+    binding to :func:`_project_root` (so every nested generation chains into the
+    project's session); kwargs (``shot_id``, ``actor``) land in trace metadata,
+    the return value / errors are recorded on the root span, and buffered events
+    are flushed when the job returns. No-op when tracing is disabled.
     """
 
     def decorator(func: Callable) -> Callable:
@@ -297,17 +322,14 @@ def traced_job(name: str, tags: Optional[List[str]] = None) -> Callable:
         async def wrapper(ctx: Dict[str, Any], project_id: str, *args: Any, **kwargs: Any):
             if get_langfuse() is None:
                 return await func(ctx, project_id, *args, **kwargs)
-            session_id = await resolve_session_for(project_id)
-            trace_id = make_trace_id(project_id)
-            meta = {"project_id": project_id, **{k: v for k, v in kwargs.items()}}
             try:
-                with session(
-                    session_id, tags=(tags or []) + ["worker"], metadata=meta
-                ), trace(
+                async with _project_root(
+                    project_id,
                     name,
-                    trace_id=trace_id,
+                    tags=(tags or []) + ["worker"],
+                    metadata=kwargs,
                     input={"project_id": project_id, "args": list(args), **kwargs},
-                ) as span:
+                ) as (span, _trace_id):
                     try:
                         result = await func(ctx, project_id, *args, **kwargs)
                     except Exception as exc:
