@@ -159,6 +159,42 @@ async def test_regenerate_shots_success(client, project_in_shot_review):
     client.arq.enqueue_job.assert_called_once()
 
 
+async def test_regenerate_shots_preserves_director_inputs(client, db_session_factory):
+    """Regenerate must KEEP the cached motion_prompt / first_frame so the
+    re-run reuses the existing director take and first frame instead of
+    regenerating them. A confirmed tail frame is kept only when its file
+    still exists on disk."""
+    from sqlalchemy import select
+    from app.models.project import Shot
+
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _add_shots(db_session_factory, pid, count=1, status="completed")
+
+    async with db_session_factory() as s:
+        shot = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalar_one()
+        shot.motion_prompt = "old camera pan"
+        shot.first_frame_path = "/tmp/does/not/matter/first.png"
+        shot.target_last_frame_path = "/tmp/does/not/exist/tail.png"  # missing on disk
+        shot.tf_confirmed = True
+        s.add(shot)
+        await s.commit()
+
+    r = await client.post(
+        f"/api/projects/{pid}/regenerate-shots",
+        json={"shot_ids": [1]},
+        headers=HEADERS,
+    )
+    assert r.status_code == 202
+
+    async with db_session_factory() as s:
+        shot = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalar_one()
+        assert shot.motion_prompt == "old camera pan"            # reused, not regenerated
+        assert shot.first_frame_path == "/tmp/does/not/matter/first.png"  # reused
+        # tail-frame file is missing -> not preserved, confirmation dropped
+        assert shot.target_last_frame_path is None
+        assert shot.tf_confirmed is False
+
+
 async def test_regenerate_shots_invalid_transition(client, db_session_factory):
     # SCRIPTING cannot transition to SHOT_GENERATING
     pid = await _make_project(db_session_factory, status="scripting")
