@@ -20,6 +20,7 @@ from google import genai
 from google.genai import types
 
 from app.config import settings
+from app import observability
 
 logger = logging.getLogger(__name__)
 
@@ -91,30 +92,38 @@ async def calibrate_face(
         source_frame_path,
     )
 
-    response = await client.aio.models.generate_content(
+    with observability.generation(
+        name="services-face-calibration-generate-image",
         model=model,
-        contents=[types.Content(role="user", parts=contents)],
-        config=types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
-        ),
-    )
-
-    # Extract the generated image from response
-    saved = False
-    parts = response.parts or []
-    for part in parts:
-        if part.inline_data is not None:
-            Path(output_frame_path).write_bytes(part.inline_data.data)
-            saved = True
-            logger.info("CC done: saved %s", output_frame_path)
-            break
-        if part.text is not None:
-            logger.info("CC text response: %s", part.text[:200])
-
-    if not saved:
-        raise RuntimeError(
-            "Gemini did not return an image. "
-            f"Response parts: {[type(p).__name__ for p in parts]}"
+        input={"source_frame": source_frame_path, "num_refs": len(reference_image_paths)},
+        model_parameters={"response_modalities": ["IMAGE"]},
+    ) as gen:
+        response = await client.aio.models.generate_content(
+            model=model,
+            contents=[types.Content(role="user", parts=contents)],
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+            ),
         )
+
+        # Extract the generated image from response
+        saved = False
+        parts = response.parts or []
+        for part in parts:
+            if part.inline_data is not None:
+                Path(output_frame_path).write_bytes(part.inline_data.data)
+                saved = True
+                logger.info("CC done: saved %s", output_frame_path)
+                break
+            if part.text is not None:
+                logger.info("CC text response: %s", part.text[:200])
+
+        if not saved:
+            raise RuntimeError(
+                "Gemini did not return an image. "
+                f"Response parts: {[type(p).__name__ for p in parts]}"
+            )
+
+        observability.update_span(gen, output={"output_path": output_frame_path})
 
     return output_frame_path

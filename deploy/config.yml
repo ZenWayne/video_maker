@@ -22,3 +22,10 @@ VC_NUM_THREADS: "4"
 
 # CORS — include both Vite dev and production origins
 CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000,http://127.0.0.1:4000"
+
+# Langfuse (LLM observability)
+# Keys are secrets (langfuse_public_key / langfuse_secret_key). Host + enabled
+# flag are non-secret. Set LANGFUSE_ENABLED=true once keys are in secrets.yml.
+# Host points at the self-hosted Langfuse running on the host machine.
+LANGFUSE_ENABLED: "true"
+LANGFUSE_HOST: "https://us.cloud.langfuse.com"

@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     # Worker settings (from config.yml / config.env)
     worker_pool_size: int = 4
 
+    # Langfuse observability (LLM tracing)
+    # Keys come from secrets (langfuse_public_key / langfuse_secret_key);
+    # host + enabled flag come from config.yml. Tracing degrades to a no-op
+    # when disabled or when keys are missing.
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://us.cloud.langfuse.com"
+
     # Video provider selection: "vertex" (Veo via Vertex AI) or "kie" (kie.ai REST)
     video_provider: str = "vertex"
 

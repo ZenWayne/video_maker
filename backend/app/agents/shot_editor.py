@@ -97,6 +97,7 @@ async def run_shot_editor(
             user_message=user_message,
             response_schema=ShotEditResult,
             temperature=0.7,
+            operation="agents-shot-editor-edit-shot",
         )
     else:
         result = await llm_provider.generate_json(
@@ -105,6 +106,7 @@ async def run_shot_editor(
             user_parts=[{"type": "text", "data": user_message}],
             response_schema=ShotEditResult,
             temperature=0.7,
+            operation="agents-shot-editor-edit-shot",
         )
 
     return result

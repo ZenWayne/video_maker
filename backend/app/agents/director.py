@@ -109,6 +109,7 @@ async def run_director(
         system_prompt=system_prompt,
         user_message=user_prompt,
         temperature=0.7,
+        operation="agents-director-generate-motion",
     )
 
     # Post-process to ensure text is included
