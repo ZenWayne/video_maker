@@ -88,6 +88,11 @@ async def _run_migrations(conn):
         if not await _has_column("shots", col):
             await conn.execute(sa.text(f"ALTER TABLE shots ADD COLUMN {col} {typ}"))
 
+    if not await _has_column("shots", "skip_tail_frame"):
+        await conn.execute(
+            sa.text("ALTER TABLE shots ADD COLUMN skip_tail_frame BOOLEAN NOT NULL DEFAULT 0")
+        )
+
     if not await _has_column("shots", "auto_trim"):
         await conn.execute(
             sa.text("ALTER TABLE shots ADD COLUMN auto_trim BOOLEAN NOT NULL DEFAULT 1")
