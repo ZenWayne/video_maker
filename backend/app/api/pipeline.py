@@ -48,6 +48,19 @@ def _shot_needs_tail_frame(shot: Shot) -> bool:
     return shot.shot_id == 1 or shot.align_with_previous
 
 
+def _reset_tail_frame(shot: Shot, *, skip: bool) -> None:
+    """Clear a shot's tail-frame state in one place.
+
+    ``skip=True``  → 中性删除：清空尾帧，不再自动走尾帧流程（仅用首帧出视频）。
+    ``skip=False`` → 重新启用尾帧流程（重新生成）。
+    """
+    shot.tf_status = None
+    shot.tf_confirmed = False
+    shot.target_last_frame_path = None
+    shot.tf_error_message = None
+    shot.skip_tail_frame = skip
+
+
 async def _enqueue_next_shot_task(
     project_id: str, session: AsyncSession, arq, user: str
 ) -> str:
@@ -786,11 +799,8 @@ async def generate_tail_frame(
     except InvalidTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
+    _reset_tail_frame(shot, skip=False)  # re-enable tail frame flow on re-generate
     shot.tf_status = "generating"
-    shot.tf_error_message = None
-    shot.tf_confirmed = False
-    shot.skip_tail_frame = False  # User is re-generating, re-enable tail frame flow
-    shot.target_last_frame_path = None
     session.add(shot)
     await session.commit()
 
@@ -877,12 +887,8 @@ async def delete_tail_frame(
             detail="Tail frame is currently being generated; wait for it to complete",
         )
 
-    # Clear all tail-frame state
-    shot.skip_tail_frame = True
-    shot.tf_status = None
-    shot.tf_confirmed = False
-    shot.target_last_frame_path = None
-    shot.tf_error_message = None
+    # Clear all tail-frame state; skip=True keeps the shot on first-frame-only video
+    _reset_tail_frame(shot, skip=True)
     session.add(shot)
     await session.commit()
 
