@@ -72,6 +72,20 @@ def _extract_text(response) -> str:
     return out
 
 
+async def _call_with_timeout(coro_factory: Callable[[], Awaitable], *, label: str, timeout: int = 120):
+    """Await a model call with a hard timeout, turning a timeout into a clear error.
+
+    ``coro_factory`` is called to produce the awaitable (so it is created inside
+    ``wait_for``). On timeout it raises ``RuntimeError`` — when invoked inside an
+    ``observability.generation(...)`` context the span auto-records the failure,
+    so callers need no manual error bookkeeping.
+    """
+    try:
+        return await asyncio.wait_for(coro_factory(), timeout=timeout)
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"{label} timed out after {timeout}s (network issue)")
+
+
 async def generate_tail_frame(
     character_ref_paths: List[str],
     first_frame_path: Optional[str],
@@ -140,20 +154,14 @@ async def generate_tail_frame(
         input={"motion_prompt": motion_prompt},
         model_parameters={"temperature": 0.3},
     ) as cot_gen:
-        try:
-            cot_response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=settings.tf_cot_model,
-                    contents=[types.Content(role="user", parts=cot_parts)],
-                    config=types.GenerateContentConfig(temperature=0.3),
-                ),
-                timeout=120,
-            )
-        except asyncio.TimeoutError:
-            observability.update_span(
-                cot_gen, level="ERROR", status_message="TF CoT timed out after 120s"
-            )
-            raise RuntimeError("TF CoT API call timed out after 120s (network issue)")
+        cot_response = await _call_with_timeout(
+            lambda: client.aio.models.generate_content(
+                model=settings.tf_cot_model,
+                contents=[types.Content(role="user", parts=cot_parts)],
+                config=types.GenerateContentConfig(temperature=0.3),
+            ),
+            label="TF CoT API call",
+        )
         end_pose = _extract_text(cot_response)
         observability.update_span(cot_gen, output=end_pose)
     logger.info("TF CoT end pose: %s", end_pose[:500])
@@ -205,23 +213,17 @@ async def generate_tail_frame(
         input={"end_pose": end_pose},
         model_parameters={"temperature": 1.0, "response_modalities": ["IMAGE"]},
     ) as img_gen:
-        try:
-            response = await asyncio.wait_for(
-                client.aio.models.generate_content(
-                    model=model,
-                    contents=[types.Content(role="user", parts=img_parts)],
-                    config=types.GenerateContentConfig(
-                        response_modalities=["IMAGE"],
-                        temperature=1.0,
-                    ),
+        response = await _call_with_timeout(
+            lambda: client.aio.models.generate_content(
+                model=model,
+                contents=[types.Content(role="user", parts=img_parts)],
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE"],
+                    temperature=1.0,
                 ),
-                timeout=120,
-            )
-        except asyncio.TimeoutError:
-            observability.update_span(
-                img_gen, level="ERROR", status_message="TF image generation timed out after 120s"
-            )
-            raise RuntimeError("TF image generation timed out after 120s (network issue)")
+            ),
+            label="TF image generation",
+        )
 
         # Extract the generated image
         saved = False
@@ -239,10 +241,6 @@ async def generate_tail_frame(
                 "block_reason=%s  finish_reason=%s  candidates=%s",
                 block_reason, finish_reason, candidates,
             )
-            observability.update_span(
-                img_gen, level="ERROR",
-                status_message=f"empty response block_reason={block_reason} finish_reason={finish_reason}",
-            )
             raise RuntimeError(
                 f"Gemini returned empty response (blocked or filtered). "
                 f"block_reason={block_reason}, finish_reason={finish_reason}"
@@ -256,9 +254,6 @@ async def generate_tail_frame(
                 break
 
         if not saved:
-            observability.update_span(
-                img_gen, level="ERROR", status_message="Gemini did not return an image"
-            )
             raise RuntimeError(
                 "Gemini did not return an image. "
                 f"Response parts: {[type(p).__name__ for p in parts]}"

@@ -119,9 +119,6 @@ async def calibrate_face(
                 logger.info("CC text response: %s", part.text[:200])
 
         if not saved:
-            observability.update_span(
-                gen, level="ERROR", status_message="Gemini did not return an image"
-            )
             raise RuntimeError(
                 "Gemini did not return an image. "
                 f"Response parts: {[type(p).__name__ for p in parts]}"

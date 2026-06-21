@@ -59,6 +59,36 @@ class WorkerContext:
         return self.ctx["redis"]
 
 
+async def _mark_shot_failed(
+    session: AsyncSession,
+    redis,
+    project_id: str,
+    shot: Shot,
+    exc: Exception,
+    *,
+    status_field: str,
+    status_value: str,
+    error_field: str,
+    event_type: str,
+    shot_id: int,
+) -> None:
+    """Persist a shot failure (status + message), commit, and publish the failed event.
+
+    Shared by the per-shot job error paths (generation / voice-convert / calibrate),
+    which differ only in the status/error column names and the event type. Callers
+    keep their own logging and control flow (``raise`` vs continue).
+    """
+    setattr(shot, status_field, status_value)
+    setattr(shot, error_field, str(exc))
+    session.add(shot)
+    await session.commit()
+    await publish_event(
+        redis,
+        project_id,
+        {"type": event_type, "data": {"shot_id": shot_id, "error_message": str(exc)}},
+    )
+
+
 def get_provider() -> GeminiProvider:
     """Create Gemini provider from settings."""
     return GeminiProvider(project=settings.gemini_project, location=settings.gemini_location)
@@ -422,19 +452,12 @@ async def run_shot_pipeline(
 
         except Exception as e:
             logger.error(f"Shot {shot.shot_id} failed: {e}")
-            shot.status = ShotStatus.FAILED.value
-            shot.error_message = str(e)
-            session.add(shot)
-            await session.commit()
             has_failures = True
-
-            await publish_event(
-                redis,
-                project_id,
-                {
-                    "type": "shot_failed",
-                    "data": {"shot_id": shot.shot_id, "error_message": str(e)},
-                },
+            await _mark_shot_failed(
+                session, redis, project_id, shot, e,
+                status_field="status", status_value=ShotStatus.FAILED.value,
+                error_field="error_message", event_type="shot_failed",
+                shot_id=shot.shot_id,
             )
 
         # Count remaining pending/failed shots
@@ -868,17 +891,11 @@ async def _do_voice_convert_one(
 
         except Exception as e:
             logger.error("Voice conversion failed for shot %d: %s", shot_id, e)
-            shot.vc_status = "failed"
-            shot.vc_error_message = str(e)
-            session.add(shot)
-            await session.commit()
-
-            await publish_event(
-                redis, project_id,
-                {
-                    "type": "vc_failed",
-                    "data": {"shot_id": shot_id, "error_message": str(e)},
-                },
+            await _mark_shot_failed(
+                session, redis, project_id, shot, e,
+                status_field="vc_status", status_value="failed",
+                error_field="vc_error_message", event_type="vc_failed",
+                shot_id=shot_id,
             )
             raise
 
@@ -1035,17 +1052,11 @@ async def _do_character_calibrate_one(
 
         except Exception as e:
             logger.error("Character calibration failed for shot %d: %s", shot_id, e)
-            shot.cc_status = "failed"
-            shot.cc_error_message = str(e)
-            session.add(shot)
-            await session.commit()
-
-            await publish_event(
-                redis, project_id,
-                {
-                    "type": "cc_failed",
-                    "data": {"shot_id": shot_id, "error_message": str(e)},
-                },
+            await _mark_shot_failed(
+                session, redis, project_id, shot, e,
+                status_field="cc_status", status_value="failed",
+                error_field="cc_error_message", event_type="cc_failed",
+                shot_id=shot_id,
             )
             raise
 

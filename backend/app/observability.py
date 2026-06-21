@@ -193,9 +193,16 @@ def _safe_observe(make_cm: Callable[[], Any], fallback: Any, what: str) -> Itera
         return
     try:
         yield obj
-    except BaseException:
-        # Body raised: let Langfuse record the failed exit, then re-raise the
-        # ORIGINAL error regardless of what __exit__ returns or raises.
+    except BaseException as exc:
+        # Body raised: mark the span ERROR with the exception message (so callers
+        # never need a manual update_span on the failure path), let Langfuse
+        # record the failed exit, then re-raise the ORIGINAL error regardless of
+        # what __exit__ returns or raises.
+        try:
+            if obj is not None and hasattr(obj, "update"):
+                obj.update(level="ERROR", status_message=str(exc))
+        except Exception:  # pragma: no cover - defensive (Langfuse update)
+            pass
         try:
             cm.__exit__(*sys.exc_info())
         except Exception:  # pragma: no cover - defensive (Langfuse exit)

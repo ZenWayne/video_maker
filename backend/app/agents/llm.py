@@ -70,13 +70,12 @@ class GeminiProvider:
                     temperature=temperature,
                 ),
             )
-            if response.text:
-                result = json.loads(response.text)
-                validated = response_schema(**result)
-                observability.update_span(gen, output=result)
-                return validated.model_dump()
-            observability.update_span(gen, level="ERROR", status_message="Empty response from Gemini")
-        raise ValueError("Empty response from Gemini")
+            if not response.text:
+                raise ValueError("Empty response from Gemini")
+            result = json.loads(response.text)
+            validated = response_schema(**result)
+            observability.update_span(gen, output=result)
+            return validated.model_dump()
 
     async def generate_text(
         self,
@@ -100,12 +99,11 @@ class GeminiProvider:
                     temperature=temperature,
                 ),
             )
-            if response.text:
-                text = response.text.strip()
-                observability.update_span(gen, output=text)
-                return text
-            observability.update_span(gen, level="ERROR", status_message="Empty response from Gemini")
-        raise ValueError("Empty response from Gemini")
+            if not response.text:
+                raise ValueError("Empty response from Gemini")
+            text = response.text.strip()
+            observability.update_span(gen, output=text)
+            return text
 
     @staticmethod
     def _build_contents(parts: List[Dict[str, Any]]) -> list:
