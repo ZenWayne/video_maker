@@ -307,9 +307,8 @@ async def regenerate_shots(
         raise HTTPException(status_code=409, detail=str(e))
 
     # Reset specified shots to PENDING and clear post-processing state.
-    # Always clear motion_prompt / first_frame_path so the re-run re-invokes the
-    # director for a genuinely fresh take (otherwise run_shot_pipeline's reuse
-    # branch pins identical inputs and the model returns near-identical output).
+    # Keep motion_prompt / first_frame_path so the re-run reuses the existing
+    # director take and first frame instead of regenerating them.
     # The confirmed target tail frame is kept when its file still exists so
     # "连续" shots still converge on the same endpoint.
     result = await session.execute(
@@ -327,9 +326,6 @@ async def regenerate_shots(
         shot.vc_error_message = None
         shot.cc_status = None
         shot.cc_error_message = None
-        # Force a fresh director pass + first-frame re-pick on every regenerate.
-        shot.motion_prompt = None
-        shot.first_frame_path = None
 
         has_valid_tail_frame = (
             shot.target_last_frame_path
@@ -343,13 +339,11 @@ async def regenerate_shots(
             has_valid_tail_frame,
         )
         if has_valid_tail_frame:
-            # Keep the confirmed target tail frame for continuity; motion_prompt
-            # was already cleared above so the director re-runs.
+            # Keep the confirmed target tail frame for continuity.
             shot.tf_status = "done"
             shot.tf_error_message = None
             shot.tf_confirmed = True
         else:
-            shot.motion_prompt = None
             shot.tf_status = None
             shot.tf_error_message = None
             shot.tf_confirmed = False

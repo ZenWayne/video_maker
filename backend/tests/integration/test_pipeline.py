@@ -159,11 +159,11 @@ async def test_regenerate_shots_success(client, project_in_shot_review):
     client.arq.enqueue_job.assert_called_once()
 
 
-async def test_regenerate_shots_clears_stale_inputs(client, db_session_factory):
-    """Regenerate must drop the cached motion_prompt / first_frame so the
-    director re-runs and the output is genuinely new (not a near-identical
-    rerun pinned to old materials). A confirmed tail frame is kept only when
-    its file still exists on disk."""
+async def test_regenerate_shots_preserves_director_inputs(client, db_session_factory):
+    """Regenerate must KEEP the cached motion_prompt / first_frame so the
+    re-run reuses the existing director take and first frame instead of
+    regenerating them. A confirmed tail frame is kept only when its file
+    still exists on disk."""
     from sqlalchemy import select
     from app.models.project import Shot
 
@@ -188,8 +188,8 @@ async def test_regenerate_shots_clears_stale_inputs(client, db_session_factory):
 
     async with db_session_factory() as s:
         shot = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalar_one()
-        assert shot.motion_prompt is None       # director will re-run
-        assert shot.first_frame_path is None     # first frame re-picked
+        assert shot.motion_prompt == "old camera pan"            # reused, not regenerated
+        assert shot.first_frame_path == "/tmp/does/not/matter/first.png"  # reused
         # tail-frame file is missing -> not preserved, confirmation dropped
         assert shot.target_last_frame_path is None
         assert shot.tf_confirmed is False
