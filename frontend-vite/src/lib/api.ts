@@ -211,6 +211,16 @@ export const api = {
     return request('POST', `/api/projects/${id}/export`)
   },
 
+  // 临时拼接选中镜头，用于检测连贯性
+  joinPreview: (
+    id: string,
+    shotIds: number[]
+  ): Promise<{ preview_url: string }> => {
+    return request('POST', `/api/projects/${id}/join-preview`, {
+      shot_ids: shotIds,
+    })
+  },
+
   // AI 编辑运镜提示词
   aiEditPrompt: (
     projectId: string,
