@@ -53,6 +53,12 @@ test.describe('连贯性预览', () => {
     await page.route('**/api/projects/*/export', async (route) => {
       await route.fulfill({ status: 202, body: JSON.stringify({ status: 'queued' }) })
     })
+    await page.route('**/api/projects/*/shots/*/generate-tail-frame', async (route) => {
+      await route.fulfill({ status: 202, body: JSON.stringify({ status: 'queued' }) })
+    })
+    await page.route('**/api/projects/*/shots/*/confirm-tail-frame', async (route) => {
+      await route.fulfill({ status: 202, body: JSON.stringify({ status: 'queued' }) })
+    })
   })
 
   test('选中 <2 个镜头时按钮禁用', async ({ page }) => {
@@ -81,19 +87,11 @@ test.describe('连贯性预览', () => {
     await expect(btn).toBeVisible()
     await expect(btn).toBeDisabled()
 
-    // Select both shots via their checkboxes
+    // Select both shots via their checkboxes (mock project has exactly 2)
     const checkboxes = page.locator('[data-testid^="shot-select-"]')
-    const count = await checkboxes.count()
-    if (count >= 2) {
-      await checkboxes.nth(0).click()
-      await checkboxes.nth(1).click()
-    } else {
-      // Fallback: use select-all button if individual checkboxes aren't found
-      const selectAllBtn = page.getByTestId('select-all-button')
-      if (await selectAllBtn.isVisible()) {
-        await selectAllBtn.click()
-      }
-    }
+    await expect(checkboxes).toHaveCount(2)
+    await checkboxes.nth(0).click()
+    await checkboxes.nth(1).click()
 
     // Button should now be enabled (≥2 selected)
     await expect(btn).toBeEnabled()
@@ -112,20 +110,15 @@ test.describe('连贯性预览', () => {
     await page.goto('/projects/e2e-join-id/shots')
     await expect(page.getByTestId('shots-list')).toBeVisible({ timeout: 10_000 })
 
-    // Select both shots
+    // Select both shots (mock project has exactly 2)
     const checkboxes = page.locator('[data-testid^="shot-select-"]')
-    const count = await checkboxes.count()
-    if (count >= 2) {
-      await checkboxes.nth(0).click()
-      await checkboxes.nth(1).click()
-    } else {
-      const selectAllBtn = page.getByTestId('select-all-button')
-      if (await selectAllBtn.isVisible()) {
-        await selectAllBtn.click()
-      }
-    }
+    await expect(checkboxes).toHaveCount(2)
+    await checkboxes.nth(0).click()
+    await checkboxes.nth(1).click()
 
-    await page.getByTestId('join-preview-button').click()
+    const btn = page.getByTestId('join-preview-button')
+    await expect(btn).toBeEnabled()
+    await btn.click()
     await expect(page.getByTestId('join-preview-modal')).toBeVisible({ timeout: 5_000 })
 
     // Click the close button inside the modal
