@@ -736,8 +736,8 @@ async def join_preview(
         raise HTTPException(status_code=500, detail=f"拼接失败: {e}")
 
     media_url = to_media_url(output_path)
-    # cache-busting：用输出文件大小，避免浏览器/video 缓存旧预览
-    bust = Path(output_path).stat().st_size
+    # cache-busting：用输出文件修改时间(纳秒)，避免浏览器/video 缓存旧预览
+    bust = Path(output_path).stat().st_mtime_ns
     return {"preview_url": f"{media_url}?t={bust}"}
 
 

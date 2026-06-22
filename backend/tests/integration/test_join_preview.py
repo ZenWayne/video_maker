@@ -101,7 +101,7 @@ async def test_join_preview_rejects_missing_video_file(client, db_session_factor
     await _add_shot_with_video(db_session_factory, pid, 1)
     # shot 2: completed shot but video_path points to a non-existent file
     await _add_shot(db_session_factory, pid, 2, status="completed")
-    # Set video_path to a non-existent file
+    # Set video_path to a non-existent file (sibling to the shot dir)
     async with db_session_factory() as s:
         from sqlalchemy import select
         from app.models.project import Shot
@@ -112,7 +112,7 @@ async def test_join_preview_rejects_missing_video_file(client, db_session_factor
                 )
             )
         ).scalar_one()
-        row.video_path = str(Path(shot_output_path(pid, 2)) / "nonexistent.mp4")
+        row.video_path = str(Path(shot_output_path(pid, 2)).parent / "nonexistent.mp4")
         await s.commit()
 
     r = await client.post(
