@@ -2,53 +2,67 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from app.config import settings
+from app.models.project import Shot
 from app.services.storage import shot_output_path
 from tests.integration.conftest import HEADERS, _make_project, _add_shot
 
 
-def _make_tiny_mp4(path: Path) -> None:
+@pytest.fixture
+def make_tiny_mp4():
     """生成一个 0.5s 的合法小 mp4（带音视频流），供 concat copy 使用。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=0.5",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-shortest",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    def _make(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=0.5",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    return _make
 
 
-async def _add_shot_with_video(db_session_factory, project_id, shot_id):
-    """新增一个 completed shot，并生成真实 fixture 视频、写入 video_path。"""
-    await _add_shot(db_session_factory, project_id, shot_id, status="completed")
-    out = Path(shot_output_path(project_id, shot_id))
-    _make_tiny_mp4(out)
-    async with db_session_factory() as s:
-        from sqlalchemy import select
-        from app.models.project import Shot
-        row = (
-            await s.execute(
-                select(Shot).where(
-                    Shot.project_id == project_id, Shot.shot_id == shot_id
+@pytest.fixture
+def set_shot_video_path(db_session_factory):
+    """覆盖某个 shot 的 video_path（用真实路径或故意指向不存在的文件）。"""
+    async def _set(project_id: str, shot_id: int, video_path) -> None:
+        async with db_session_factory() as s:
+            row = (
+                await s.execute(
+                    select(Shot).where(
+                        Shot.project_id == project_id, Shot.shot_id == shot_id
+                    )
                 )
-            )
-        ).scalar_one()
-        row.video_path = str(out)
-        await s.commit()
+            ).scalar_one()
+            row.video_path = str(video_path)
+            await s.commit()
+    return _set
+
+
+@pytest.fixture
+def add_shot_with_video(db_session_factory, make_tiny_mp4, set_shot_video_path):
+    """新增一个 completed shot，生成真实 fixture 视频并写入 video_path。"""
+    async def _add(project_id: str, shot_id: int) -> None:
+        await _add_shot(db_session_factory, project_id, shot_id, status="completed")
+        out = Path(shot_output_path(project_id, shot_id))
+        make_tiny_mp4(out)
+        await set_shot_video_path(project_id, shot_id, out)
+    return _add
 
 
 @pytest.mark.asyncio
-async def test_join_preview_success(client, db_session_factory):
+async def test_join_preview_success(client, db_session_factory, add_shot_with_video):
     pid = await _make_project(db_session_factory, status="shot_review")
     for i in (1, 2, 3):
-        await _add_shot_with_video(db_session_factory, pid, i)
+        await add_shot_with_video(pid, i)
 
     r = await client.post(
         f"/api/projects/{pid}/join-preview",
@@ -66,9 +80,9 @@ async def test_join_preview_success(client, db_session_factory):
 
 
 @pytest.mark.asyncio
-async def test_join_preview_requires_two_shots(client, db_session_factory):
+async def test_join_preview_requires_two_shots(client, db_session_factory, add_shot_with_video):
     pid = await _make_project(db_session_factory, status="shot_review")
-    await _add_shot_with_video(db_session_factory, pid, 1)
+    await add_shot_with_video(pid, 1)
 
     r = await client.post(
         f"/api/projects/{pid}/join-preview",
@@ -79,9 +93,9 @@ async def test_join_preview_requires_two_shots(client, db_session_factory):
 
 
 @pytest.mark.asyncio
-async def test_join_preview_rejects_incomplete_shot(client, db_session_factory):
+async def test_join_preview_rejects_incomplete_shot(client, db_session_factory, add_shot_with_video):
     pid = await _make_project(db_session_factory, status="shot_review")
-    await _add_shot_with_video(db_session_factory, pid, 1)
+    await add_shot_with_video(pid, 1)
     # shot 2 是 pending、无 video_path
     await _add_shot(db_session_factory, pid, 2, status="pending")
 
@@ -95,25 +109,15 @@ async def test_join_preview_rejects_incomplete_shot(client, db_session_factory):
 
 
 @pytest.mark.asyncio
-async def test_join_preview_rejects_missing_video_file(client, db_session_factory):
+async def test_join_preview_rejects_missing_video_file(
+    client, db_session_factory, add_shot_with_video, set_shot_video_path
+):
     pid = await _make_project(db_session_factory, status="shot_review")
-    # shot 1: normal completed shot with real fixture video
-    await _add_shot_with_video(db_session_factory, pid, 1)
-    # shot 2: completed shot but video_path points to a non-existent file
+    # shot 1: 正常的 completed shot，带真实 fixture 视频
+    await add_shot_with_video(pid, 1)
+    # shot 2: completed 但 video_path 指向不存在的文件
     await _add_shot(db_session_factory, pid, 2, status="completed")
-    # Set video_path to a non-existent file (sibling to the shot dir)
-    async with db_session_factory() as s:
-        from sqlalchemy import select
-        from app.models.project import Shot
-        row = (
-            await s.execute(
-                select(Shot).where(
-                    Shot.project_id == pid, Shot.shot_id == 2
-                )
-            )
-        ).scalar_one()
-        row.video_path = str(Path(shot_output_path(pid, 2)).parent / "nonexistent.mp4")
-        await s.commit()
+    await set_shot_video_path(pid, 2, Path(shot_output_path(pid, 2)).parent / "nonexistent.mp4")
 
     r = await client.post(
         f"/api/projects/{pid}/join-preview",
