@@ -78,6 +78,7 @@ export interface Shot {
   tf_status: TfStatus | null
   tf_error_message: string | null
   tf_confirmed: boolean
+  skip_tail_frame: boolean
   auto_trim: boolean
 }
 

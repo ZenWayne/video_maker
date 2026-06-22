@@ -3,7 +3,7 @@
 'use client'
 
 import { useState, useRef } from 'react'
-import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Play, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User } from 'lucide-react'
+import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Play, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -43,6 +43,7 @@ interface ShotCardProps {
   onGenerateTailFrame?: (shotId: number) => void
   onConfirmTailFrame?: (shotId: number) => void
   onExtractTailFrame?: (shotId: number) => void
+  onDeleteTailFrame?: (shotId: number) => void
 }
 
 const shotTypeLabels: Record<string, string> = {
@@ -91,6 +92,7 @@ export function ShotCard({
   onGenerateTailFrame,
   onConfirmTailFrame,
   onExtractTailFrame,
+  onDeleteTailFrame,
 }: ShotCardProps) {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isPromptDialogOpen, setIsPromptDialogOpen] = useState(false)
@@ -707,6 +709,16 @@ export function ShotCard({
                         <RefreshCw className="w-3 h-3 mr-1" />重新生成
                       </Button>
                     )}
+                    {onDeleteTailFrame && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-red-600 hover:text-red-700"
+                        onClick={() => onDeleteTailFrame(shot.shot_id)}
+                      >
+                        <Trash2 className="w-3 h-3 mr-1" />删除尾帧
+                      </Button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -723,16 +735,28 @@ export function ShotCard({
                 />
                 <span>尾帧已确认</span>
               </div>
-              {onGenerateTailFrame && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-2 text-xs text-indigo-600 hover:text-indigo-800"
-                  onClick={() => onGenerateTailFrame(shot.shot_id)}
-                >
-                  <RefreshCw className="w-3 h-3 mr-1" />重新生成尾帧
-                </Button>
-              )}
+              <div className="flex items-center gap-1">
+                {onGenerateTailFrame && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs text-indigo-600 hover:text-indigo-800"
+                    onClick={() => onGenerateTailFrame(shot.shot_id)}
+                  >
+                    <RefreshCw className="w-3 h-3 mr-1" />重新生成尾帧
+                  </Button>
+                )}
+                {onDeleteTailFrame && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs text-red-600 hover:text-red-700"
+                    onClick={() => onDeleteTailFrame(shot.shot_id)}
+                  >
+                    <Trash2 className="w-3 h-3 mr-1" />删除尾帧
+                  </Button>
+                )}
+              </div>
             </div>
           )}
           {shot.tf_status === 'failed' && (
@@ -744,16 +768,28 @@ export function ShotCard({
               {shot.tf_error_message && (
                 <p className="text-xs text-red-500">{shot.tf_error_message}</p>
               )}
-              {onGenerateTailFrame && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-2 text-xs"
-                  onClick={() => onGenerateTailFrame(shot.shot_id)}
-                >
-                  <RefreshCw className="w-3 h-3 mr-1" />重试
-                </Button>
-              )}
+              <div className="flex items-center gap-2">
+                {onGenerateTailFrame && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => onGenerateTailFrame(shot.shot_id)}
+                  >
+                    <RefreshCw className="w-3 h-3 mr-1" />重试
+                  </Button>
+                )}
+                {onDeleteTailFrame && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs text-red-600 hover:text-red-700"
+                    onClick={() => onDeleteTailFrame(shot.shot_id)}
+                  >
+                    <Trash2 className="w-3 h-3 mr-1" />删除尾帧
+                  </Button>
+                )}
+              </div>
             </div>
           )}
 

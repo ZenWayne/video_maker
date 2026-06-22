@@ -358,10 +358,13 @@ async def regenerate_shots(
             shot.tf_error_message = None
             shot.tf_confirmed = True
         else:
+            # No confirmed tail frame: 生成分镜 generates video directly,
+            # skipping tail-frame generation (skip=True routes to run_shot_pipeline).
             shot.tf_status = None
             shot.tf_error_message = None
             shot.tf_confirmed = False
             shot.target_last_frame_path = None
+            shot.skip_tail_frame = True
 
         session.add(shot)
     await session.commit()
@@ -856,22 +859,23 @@ async def confirm_tail_frame(
     }
 
 
-@router.post("/projects/{project_id}/shots/{shot_id}/delete-tail-frame", status_code=202)
+@router.post("/projects/{project_id}/shots/{shot_id}/delete-tail-frame")
 async def delete_tail_frame(
     project_id: str,
     shot_id: int,
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
-    redis=Depends(get_redis),
 ):
-    """Delete the confirmed tail frame for a shot and generate video using only the first frame.
+    """Delete a shot's target tail frame, returning it to a neutral state.
 
-    Clears all tail frame state and sets ``skip_tail_frame = True`` so the shot
-    proceeds to video generation with first-frame-only (image-to-video or text-to-video).
-    Character calibration (CC) is unaffected — the extracted last frame of the generated
-    video can still be calibrated afterward.
+    Clears all tail frame state, sets ``skip_tail_frame = True`` (so a later video
+    generation uses first-frame-only), and removes the ``target_last_frame.png`` file.
+    Does NOT transition the project or enqueue video generation — the shot simply
+    returns to a state where the user can re-generate a tail frame or proceed.
+    The "生成尾帧" entry re-appears (``tf_status`` is cleared) and re-generating
+    overwrites via ``skip_tail_frame = False``.
     """
-    project = await _get_project_or_404(project_id, session)
+    await _get_project_or_404(project_id, session)
 
     result = await session.execute(
         select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
@@ -892,21 +896,14 @@ async def delete_tail_frame(
     session.add(shot)
     await session.commit()
 
-    # Transition to SHOT_GENERATING and enqueue video generation (first-frame only)
-    try:
-        await transition_project_status(
-            project, ProjectStatus.SHOT_GENERATING, f"user:{user}", session, redis
-        )
-    except InvalidTransitionError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-    arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}", shot_id)
+    # Remove the physical tail-frame file (deterministic canonical path)
+    from app.services.storage import shot_target_last_frame_path
+    shot_target_last_frame_path(project_id, shot_id).unlink(missing_ok=True)
 
     return {
         "shot_id": shot_id,
         "skip_tail_frame": True,
-        "message": "Tail frame deleted, generating video with first frame only",
+        "tf_status": None,
     }
 
 

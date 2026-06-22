@@ -193,6 +193,7 @@ async def create_project(
                 "tf_status": s.tf_status,
                 "tf_error_message": s.tf_error_message,
                 "tf_confirmed": bool(s.tf_confirmed),
+                "skip_tail_frame": bool(s.skip_tail_frame),
                 "created_at": s.created_at,
                 "updated_at": s.updated_at,
             }
@@ -284,6 +285,7 @@ async def get_project(
                 "tf_status": s.tf_status,
                 "tf_error_message": s.tf_error_message,
                 "tf_confirmed": bool(s.tf_confirmed),
+                "skip_tail_frame": bool(s.skip_tail_frame),
                 "created_at": s.created_at,
                 "updated_at": s.updated_at,
             }

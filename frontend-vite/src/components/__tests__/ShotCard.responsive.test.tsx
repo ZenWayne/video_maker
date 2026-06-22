@@ -36,6 +36,7 @@ const baseShot: Shot = {
   tf_status: null,
   tf_error_message: null,
   tf_confirmed: false,
+  skip_tail_frame: false,
   auto_trim: true,
 }
 

@@ -376,6 +376,11 @@ export const api = {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/confirm-tail-frame`)
   },
 
+  // 删除尾帧（清空尾帧状态，不自动生成视频）
+  deleteTailFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; skip_tail_frame: boolean; tf_status: null }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/delete-tail-frame`)
+  },
+
   // 还原人物校准
   characterCalibrateRevert: (projectId: string, shotId: number): Promise<{ last_frame_path: string; version: number }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/character-calibrate-revert`)
