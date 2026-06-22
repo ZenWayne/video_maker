@@ -108,6 +108,13 @@ def final_video_path(project_id: str) -> Path:
     return final_dir(project_id) / "merged.mp4"
 
 
+def join_preview_path(project_id: str) -> Path:
+    """临时连贯性预览视频的固定输出路径（每次覆盖）。"""
+    previews_dir = project_dir(project_id) / "previews"
+    previews_dir.mkdir(parents=True, exist_ok=True)
+    return previews_dir / "join_preview.mp4"
+
+
 def reference_image_path(project_id: str, image_id: str, filename: str) -> Path:
     """Get the storage path for a reference image."""
     return reference_images_dir(project_id) / f"{image_id}_{filename}"
