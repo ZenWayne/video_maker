@@ -59,6 +59,7 @@ async def test_join_preview_success(client, db_session_factory):
     assert r.status_code == 200, r.text
     url = r.json()["preview_url"]
     assert "/api/media/" in url and "join_preview.mp4" in url
+    assert "?t=" in url
     # 实际输出文件已生成
     out = Path(settings.storage_root) / "projects" / pid / "previews" / "join_preview.mp4"
     assert out.is_file() and out.stat().st_size > 0
@@ -83,6 +84,36 @@ async def test_join_preview_rejects_incomplete_shot(client, db_session_factory):
     await _add_shot_with_video(db_session_factory, pid, 1)
     # shot 2 是 pending、无 video_path
     await _add_shot(db_session_factory, pid, 2, status="pending")
+
+    r = await client.post(
+        f"/api/projects/{pid}/join-preview",
+        json={"shot_ids": [1, 2]},
+        headers=HEADERS,
+    )
+    assert r.status_code == 400
+    assert "2" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_join_preview_rejects_missing_video_file(client, db_session_factory):
+    pid = await _make_project(db_session_factory, status="shot_review")
+    # shot 1: normal completed shot with real fixture video
+    await _add_shot_with_video(db_session_factory, pid, 1)
+    # shot 2: completed shot but video_path points to a non-existent file
+    await _add_shot(db_session_factory, pid, 2, status="completed")
+    # Set video_path to a non-existent file
+    async with db_session_factory() as s:
+        from sqlalchemy import select
+        from app.models.project import Shot
+        row = (
+            await s.execute(
+                select(Shot).where(
+                    Shot.project_id == pid, Shot.shot_id == 2
+                )
+            )
+        ).scalar_one()
+        row.video_path = str(Path(shot_output_path(pid, 2)) / "nonexistent.mp4")
+        await s.commit()
 
     r = await client.post(
         f"/api/projects/{pid}/join-preview",
