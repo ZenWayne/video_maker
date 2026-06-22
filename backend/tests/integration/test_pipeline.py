@@ -458,3 +458,80 @@ async def test_download_final_success(client, db_session_factory, tmp_path):
     r = await client.get(f"/api/projects/{pid}/final.mp4")
     assert r.status_code == 200
     assert r.headers["content-type"] == "video/mp4"
+
+
+# ── POST /projects/{id}/shots/{shot_id}/delete-tail-frame ──────────────────────
+
+async def _give_tail_frame(sf, pid, shot_id, *, tf_status="done", tf_confirmed=True):
+    """Give a shot a generated tail frame backed by a real file on disk."""
+    from sqlalchemy import select
+    from app.models.project import Shot
+    from app.services.storage import shot_target_last_frame_path
+
+    path = shot_target_last_frame_path(pid, shot_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"fake-png")
+    async with sf() as s:
+        result = await s.execute(
+            select(Shot).where(Shot.project_id == pid, Shot.shot_id == shot_id)
+        )
+        shot = result.scalar_one()
+        shot.tf_status = tf_status
+        shot.tf_confirmed = tf_confirmed
+        shot.target_last_frame_path = str(path)
+        await s.commit()
+    return path
+
+
+async def test_delete_tail_frame_clears_state_without_generating_video(
+    client, db_session_factory, project_in_shot_review
+):
+    pid = project_in_shot_review
+    path = await _give_tail_frame(db_session_factory, pid, 1)
+    client.arq.enqueue_job.reset_mock()
+
+    r = await client.post(
+        f"/api/projects/{pid}/shots/1/delete-tail-frame", headers=HEADERS
+    )
+    assert r.status_code in (200, 202)
+    body = r.json()
+    assert body["skip_tail_frame"] is True
+    assert body["tf_status"] is None
+
+    # Must NOT auto-generate video
+    client.arq.enqueue_job.assert_not_called()
+
+    # Project stays in shot_review (not advanced to shot_generating)
+    p = (await client.get(f"/api/projects/{pid}")).json()
+    assert p["status"] == "shot_review"
+
+    # Shot tail-frame state fully cleared, skip flag set
+    shot = next(s for s in p["shots"] if s["shot_id"] == 1)
+    assert shot["tf_status"] is None
+    assert shot["tf_confirmed"] is False
+    assert shot["target_last_frame_path"] is None
+    assert shot["skip_tail_frame"] is True
+
+    # Physical tail-frame file removed
+    assert not path.exists()
+
+
+async def test_delete_tail_frame_rejected_while_generating(
+    client, db_session_factory, project_in_shot_review
+):
+    pid = project_in_shot_review
+    await _give_tail_frame(
+        db_session_factory, pid, 1, tf_status="generating", tf_confirmed=False
+    )
+    r = await client.post(
+        f"/api/projects/{pid}/shots/1/delete-tail-frame", headers=HEADERS
+    )
+    assert r.status_code == 409
+
+
+async def test_delete_tail_frame_shot_not_found(client, project_in_shot_review):
+    pid = project_in_shot_review
+    r = await client.post(
+        f"/api/projects/{pid}/shots/999/delete-tail-frame", headers=HEADERS
+    )
+    assert r.status_code == 404

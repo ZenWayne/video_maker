@@ -511,6 +511,27 @@ export default function ShotsPage() {
     }
   }
 
+  // 删除尾帧（清空尾帧状态，不自动生成视频）
+  const handleDeleteTailFrame = async (shotId: number) => {
+    if (!projectId) return
+    if (!confirm('确定删除该镜头的目标尾帧？删除后需重新生成。')) return
+    try {
+      await api.deleteTailFrame(projectId, shotId)
+      updateShot(shotId, {
+        tf_status: null,
+        tf_confirmed: false,
+        target_last_frame_path: null,
+        skip_tail_frame: true,
+      })
+      addToast({ type: 'success', message: `镜头 #${shotId} 尾帧已删除` })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '删除失败',
+      })
+    }
+  }
+
   // 保存 scene_overview
   const handleSaveOverview = async () => {
     if (!projectId) return
@@ -601,6 +622,7 @@ export default function ShotsPage() {
                   onGenerateTailFrame={handleGenerateTailFrame}
                   onConfirmTailFrame={handleConfirmTailFrame}
                   onExtractTailFrame={handleExtractTailFrame}
+                  onDeleteTailFrame={handleDeleteTailFrame}
                 />
               )
             })}
@@ -756,6 +778,7 @@ export default function ShotsPage() {
                 onGenerateTailFrame={status !== 'script_review' ? handleGenerateTailFrame : undefined}
                 onConfirmTailFrame={status !== 'script_review' ? handleConfirmTailFrame : undefined}
                 onExtractTailFrame={status !== 'script_review' ? handleExtractTailFrame : undefined}
+                onDeleteTailFrame={status !== 'script_review' ? handleDeleteTailFrame : undefined}
               />
             )
           })}
