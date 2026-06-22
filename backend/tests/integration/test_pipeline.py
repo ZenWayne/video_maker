@@ -195,6 +195,37 @@ async def test_regenerate_shots_preserves_director_inputs(client, db_session_fac
         assert shot.tf_confirmed is False
 
 
+async def test_regenerate_shots_skips_tail_frame_generation(
+    client, db_session_factory, project_in_shot_review
+):
+    """生成分镜 (regenerate) generates video directly, skipping tail-frame
+    generation for shots without a confirmed tail frame."""
+    from sqlalchemy import select
+    from app.models.project import Shot
+
+    pid = project_in_shot_review  # shot 1 disconnected, no tail frame yet
+    client.arq.enqueue_job.reset_mock()
+
+    r = await client.post(
+        f"/api/projects/{pid}/regenerate-shots",
+        json={"shot_ids": [1]},
+        headers=HEADERS,
+    )
+    assert r.status_code == 202
+
+    # Straight to video generation, NOT tail-frame generation
+    client.arq.enqueue_job.assert_called_once_with(
+        "run_shot_pipeline", pid, f"user:{USER}"
+    )
+    async with db_session_factory() as s:
+        shot = (
+            await s.execute(
+                select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
+            )
+        ).scalar_one()
+        assert shot.skip_tail_frame is True
+
+
 async def test_regenerate_shots_invalid_transition(client, db_session_factory):
     # SCRIPTING cannot transition to SHOT_GENERATING
     pid = await _make_project(db_session_factory, status="scripting")

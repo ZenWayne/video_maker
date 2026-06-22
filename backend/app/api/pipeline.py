@@ -358,10 +358,13 @@ async def regenerate_shots(
             shot.tf_error_message = None
             shot.tf_confirmed = True
         else:
+            # No confirmed tail frame: 生成分镜 generates video directly,
+            # skipping tail-frame generation (skip=True routes to run_shot_pipeline).
             shot.tf_status = None
             shot.tf_error_message = None
             shot.tf_confirmed = False
             shot.target_last_frame_path = None
+            shot.skip_tail_frame = True
 
         session.add(shot)
     await session.commit()
