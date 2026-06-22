@@ -184,6 +184,10 @@ class ExportRequest(BaseModel):
     crossfade_duration: Optional[float] = Field(default=None, ge=0, le=2.0)
 
 
+class JoinPreviewRequest(BaseModel):
+    shot_ids: list[int]
+
+
 class PipelineActionResponse(BaseModel):
     success: bool
     message: str
