@@ -192,9 +192,11 @@ class _FakeResponse:
 class _FakeAsyncClient:
     """Routes kie.ai endpoints to canned responses; records the calls."""
 
-    def __init__(self, record, success_flag=1, **kwargs):
+    def __init__(self, record, success_flag=1, flags=None, **kwargs):
         self.record = record
         self.success_flag = success_flag
+        # Optional sequence of successFlag values consumed one per poll (last repeats).
+        self.flags = list(flags) if flags is not None else None
 
     async def __aenter__(self):
         return self
@@ -209,17 +211,22 @@ class _FakeAsyncClient:
             return _FakeResponse({"success": True, "data": {"downloadUrl": f"https://h/up{n}.png"}})
         if "/veo/generate" in url:
             self.record["generate"] = json
+            self.record["generate_calls"] = self.record.get("generate_calls", 0) + 1
             return _FakeResponse({"code": 200, "msg": "success", "data": {"taskId": "task_1"}})
         raise AssertionError(f"unexpected POST {url}")
 
     async def get(self, url, params=None):
         if "/veo/record-info" in url:
             self.record["polled"] = params
+            if self.flags is not None:
+                flag = self.flags.pop(0) if len(self.flags) > 1 else self.flags[0]
+            else:
+                flag = self.success_flag
             return _FakeResponse({
                 "data": {
-                    "successFlag": self.success_flag,
+                    "successFlag": flag,
                     "errorCode": 500,
-                    "errorMessage": "boom" if self.success_flag != 1 else "",
+                    "errorMessage": "boom" if flag != 1 else "",
                     "response": {"resultUrls": ["https://h/result.mp4"]},
                 }
             })
@@ -233,13 +240,14 @@ def kie_env(monkeypatch):
     monkeypatch.setattr(vg.settings, "video_provider", "kie")
     monkeypatch.setattr(vg.settings, "kie_api_key", "test-key")
     monkeypatch.setattr(vg.settings, "kie_poll_interval_seconds", 0)
+    monkeypatch.setattr(vg.settings, "kie_retry_backoff_seconds", 0)
     # crop is a no-op so we don't need real images on disk for the prompt path
     monkeypatch.setattr(vg, "center_crop_to_aspect", lambda p, *a, **k: p)
 
 
-def _patch_httpx(record, success_flag=1):
+def _patch_httpx(record, success_flag=1, flags=None):
     def factory(*args, **kwargs):
-        return _FakeAsyncClient(record, success_flag=success_flag, **kwargs)
+        return _FakeAsyncClient(record, success_flag=success_flag, flags=flags, **kwargs)
     return patch("app.agents.video_generator.httpx.AsyncClient", side_effect=factory)
 
 
@@ -323,6 +331,42 @@ async def test_kie_failure_flag_raises(kie_env, tmp_path):
                 shot_duration=8,
                 spoken_text="",
             )
+
+
+@pytest.mark.asyncio
+async def test_kie_retries_once_on_flag3_then_succeeds(kie_env):
+    """successFlag=3 (transient upstream failure) → re-submit once, then succeed."""
+    record = {"uploads": []}
+    with _patch_httpx(record, flags=[3, 1]):
+        out = await generate_video(
+            motion_prompt="x", first_frame_path=None, shot_duration=8, spoken_text="",
+        )
+    assert out == b"MP4DATA"
+    assert record["generate_calls"] == 2  # original + 1 retry
+
+
+@pytest.mark.asyncio
+async def test_kie_flag3_exhausts_single_retry_and_raises(kie_env):
+    """successFlag=3 on both attempts → fail after exactly one retry (2 attempts)."""
+    record = {"uploads": []}
+    with _patch_httpx(record, flags=[3, 3]):
+        with pytest.raises(VideoGenerationError, match="flag=3"):
+            await generate_video(
+                motion_prompt="x", first_frame_path=None, shot_duration=8, spoken_text="",
+            )
+    assert record["generate_calls"] == 2  # only one retry
+
+
+@pytest.mark.asyncio
+async def test_kie_flag2_is_not_retried(kie_env):
+    """successFlag=2 (genuine task failure) is permanent — no retry."""
+    record = {"uploads": []}
+    with _patch_httpx(record, flags=[2, 1]):
+        with pytest.raises(VideoGenerationError, match="boom"):
+            await generate_video(
+                motion_prompt="x", first_frame_path=None, shot_duration=8, spoken_text="",
+            )
+    assert record["generate_calls"] == 1  # not retried
 
 
 @pytest.mark.asyncio
