@@ -221,6 +221,23 @@ def find_best_tail_frame(
         return best_global + 1
 
 
+def _backup_and_trim(video_path: str, num_frames: int) -> dict:
+    """Back up the original (once) then trim the video in-place to *num_frames*."""
+    vp = Path(video_path)
+    backup = vp.with_name("output_original.mp4")
+    if not backup.exists():
+        shutil.copy2(str(vp), str(backup))
+    tmp_out = vp.with_suffix(".trimmed.mp4")
+    try:
+        trim_video(video_path, str(tmp_out), num_frames)
+        shutil.move(str(tmp_out), str(vp))
+    finally:
+        if tmp_out.exists():
+            tmp_out.unlink()
+
+    return {"trimmed_to_frame": num_frames, **get_video_info(video_path)}
+
+
 def auto_trim_to_tail_frame(
     video_path: str,
     target_frame_path: str,
@@ -235,17 +252,23 @@ def auto_trim_to_tail_frame(
     best_frames = find_best_tail_frame(video_path, target_frame_path, search_frames)
     if best_frames is None:
         return None
+    return _backup_and_trim(video_path, best_frames)
 
-    vp = Path(video_path)
-    backup = vp.with_name("output_original.mp4")
-    if not backup.exists():
-        shutil.copy2(str(vp), str(backup))
-    tmp_out = vp.with_suffix(".trimmed.mp4")
-    try:
-        trim_video(video_path, str(tmp_out), best_frames)
-        shutil.move(str(tmp_out), str(vp))
-    finally:
-        if tmp_out.exists():
-            tmp_out.unlink()
 
-    return {"trimmed_to_frame": best_frames, **get_video_info(video_path)}
+def auto_trim_to_speech_end(video_path: str, tail_window: float = 0.1) -> dict | None:
+    """Trim the trailing (often frozen) tail by cutting shortly after speech ends.
+
+    Fallback used when there is no target tail frame to align to (e.g. videos
+    generated without a tail-frame constraint). Keeps frames up to the speech-end
+    boundary plus a small *tail_window*, dropping the trailing silence + frozen
+    padding. Returns ``None`` when there's nothing to trim (no dialogue / no
+    trailing silence, or speech runs to the end of the clip).
+    """
+    speech_end = detect_speech_end(video_path)
+    if speech_end is None:
+        return None
+    info = get_video_info(video_path)
+    keep_frames = int(speech_end * info["fps"]) + max(int(tail_window * info["fps"]), 1)
+    if keep_frames >= info["total_frames"]:
+        return None
+    return _backup_and_trim(video_path, keep_frames)
