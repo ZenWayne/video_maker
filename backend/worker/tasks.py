@@ -416,15 +416,25 @@ async def run_shot_pipeline(
                 )
 
             # Tail-frame alignment: auto-trim to the frame closest to the target
-            if shot.auto_trim and shot.tf_confirmed and shot.target_last_frame_path:
-                from app.agents.video_trimmer import auto_trim_to_tail_frame
-                trim_result = auto_trim_to_tail_frame(
-                    str(video_out), shot.target_last_frame_path,
+            if shot.auto_trim:
+                from app.agents.video_trimmer import (
+                    auto_trim_to_tail_frame,
+                    auto_trim_to_speech_end,
                 )
+                if shot.tf_confirmed and shot.target_last_frame_path:
+                    # Align-and-trim to the confirmed target tail frame (SSIM).
+                    trim_result = auto_trim_to_tail_frame(
+                        str(video_out), shot.target_last_frame_path,
+                    )
+                    trim_mode = "tail frame alignment"
+                else:
+                    # No tail-frame constraint: trim the trailing silence/frozen tail.
+                    trim_result = auto_trim_to_speech_end(str(video_out))
+                    trim_mode = "speech-end"
                 if trim_result:
                     logger.info(
-                        "Auto-trimmed shot %d to %d frames (tail frame alignment)",
-                        shot.shot_id, trim_result["trimmed_to_frame"],
+                        "Auto-trimmed shot %d to %d frames (%s)",
+                        shot.shot_id, trim_result["trimmed_to_frame"], trim_mode,
                     )
 
             # Extract last frame

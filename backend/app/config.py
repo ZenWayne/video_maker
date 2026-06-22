@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     kie_resolution: str = "1080p"  # 720p | 1080p | 4k
     kie_poll_interval_seconds: int = 10
     kie_max_wait_seconds: int = 600
+    # Retry once on transient upstream failure (successFlag=3, "upstream gen failed").
+    kie_max_retries: int = 1
+    kie_retry_backoff_seconds: int = 15
 
     # Voice conversion (in-process vc2.VoiceConverter)
     model_dir: str = "/workspace/exported_vc2"

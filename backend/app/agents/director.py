@@ -23,7 +23,7 @@ def load_system_prompt() -> str:
 Your task is to create detailed motion prompts for Veo 3 video generation.
 
 Given shot information, generate an English motion prompt that describes:
-1. Camera movement (pan, tilt, dolly, etc.)
+1. A fixed, locked-off camera — NO camera movement (no pan, tilt, dolly, zoom, or push-in)
 2. Subject motion and actions
 3. Lighting and atmosphere changes
 4. Any other dynamic elements

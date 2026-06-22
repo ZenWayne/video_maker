@@ -37,6 +37,11 @@ class VideoGenerationError(Exception):
     pass
 
 
+class KieTransientError(VideoGenerationError):
+    """kie.ai transient upstream failure (successFlag=3) — safe to re-submit."""
+    pass
+
+
 class VideoGenerationTimeout(Exception):
     """Raised when video generation times out."""
     pass
@@ -385,11 +390,16 @@ class KieVeoProvider(VideoProvider):
                     )
                 return urls[0]
             if flag in (2, 3):
-                raise VideoGenerationError(
+                msg = (
                     f"kie.ai task {task_id} failed "
                     f"(flag={flag}, code={data.get('errorCode')}): "
                     f"{data.get('errorMessage')}"
                 )
+                # flag=3 ("upstream gen failed") is a transient infra error — retryable.
+                # flag=2 ("failed") is a genuine task failure — not retryable.
+                if flag == 3:
+                    raise KieTransientError(msg)
+                raise VideoGenerationError(msg)
 
             if elapsed >= max_wait:
                 raise VideoGenerationTimeout(
@@ -398,6 +408,29 @@ class KieVeoProvider(VideoProvider):
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
             logger.debug("Polling kie.ai task %s... elapsed=%ds", task_id, elapsed)
+
+    async def _create_and_poll(
+        self, http: httpx.AsyncClient, prompt: str, generation_type: str,
+        image_urls: list[str], model: str, duration: int, aspect_ratio: str,
+    ) -> str:
+        """Create a task and poll for the result, retrying once on a transient
+        upstream failure (successFlag=3). Each retry re-submits a fresh task."""
+        for attempt in range(settings.kie_max_retries + 1):
+            task_id = await self._create_task(
+                http, prompt, generation_type, image_urls, model, duration, aspect_ratio,
+            )
+            try:
+                return await self._poll_result(http, task_id)
+            except KieTransientError as e:
+                if attempt >= settings.kie_max_retries:
+                    raise
+                logger.warning(
+                    "kie.ai transient failure (attempt %d/%d), re-submitting in %ds: %s",
+                    attempt + 1, settings.kie_max_retries + 1,
+                    settings.kie_retry_backoff_seconds, e,
+                )
+                await asyncio.sleep(settings.kie_retry_backoff_seconds)
+        raise AssertionError("unreachable")  # loop always returns or raises
 
     async def generate_video(
         self,
@@ -430,11 +463,10 @@ class KieVeoProvider(VideoProvider):
             timeout = httpx.Timeout(api_timeout)
             async with httpx.AsyncClient(headers=self._headers(), timeout=timeout) as http:
                 image_urls = [await self._upload_image(http, p) for p in image_paths]
-                task_id = await self._create_task(
+                result_url = await self._create_and_poll(
                     http, prompt, generation_type, image_urls, model,
                     duration, aspect_ratio,
                 )
-                result_url = await self._poll_result(http, task_id)
 
                 logger.info("Downloading kie.ai result: %s", result_url)
                 # Result URL is public — no auth header needed
