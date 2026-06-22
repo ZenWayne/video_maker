@@ -22,7 +22,7 @@ from app.models.project import Project, Shot, ReferenceImage
 from app.models.schemas import (
     ProjectResponse, StoryboardUpdate, ShotUpdate, ShotAiEditRequest,
     ShotTrimRequest, RegenerateShotsRequest, PipelineActionResponse,
-    ReferenceVoiceRequest, ExportRequest,
+    ReferenceVoiceRequest, ExportRequest, JoinPreviewRequest,
 )
 from app.services.state_machine import (
     ProjectStatus, ShotStatus,
@@ -31,7 +31,7 @@ from app.services.state_machine import (
 from app.services.storage import (
     storyboard_path, archived_storyboard_path, shot_custom_frames_dir, to_media_url,
     shot_pre_vc_video_path, shot_audio_original_path, shot_audio_vc_path,
-    shot_pre_cc_last_frame_path,
+    shot_pre_cc_last_frame_path, join_preview_path,
 )
 from app.services.events import publish_event
 
@@ -687,6 +687,58 @@ async def export_project(
     await arq.enqueue_job("run_merger", project_id, f"user:{user}", body.crossfade_duration)
 
     return {"status": "queued", "message": "Export queued"}
+
+
+@router.post("/projects/{project_id}/join-preview")
+async def join_preview(
+    project_id: str,
+    body: JoinPreviewRequest,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """临时把选中的 shot 纯拼接成一条预览视频，用于检测连贯性。同步执行。"""
+    from app.agents.merger import merge_shots
+
+    await _get_project_or_404(project_id, session)
+
+    if len(body.shot_ids) < 2:
+        raise HTTPException(
+            status_code=400, detail="至少选择 2 个镜头才能拼接预览"
+        )
+
+    result = await session.execute(
+        select(Shot).where(
+            Shot.project_id == project_id,
+            Shot.shot_id.in_(body.shot_ids),
+        )
+    )
+    shots_by_id = {s.shot_id: s for s in result.scalars().all()}
+
+    ordered_paths: list[str] = []
+    for sid in body.shot_ids:
+        shot = shots_by_id.get(sid)
+        if shot is None:
+            raise HTTPException(status_code=400, detail=f"镜头 {sid} 不存在")
+        if shot.status != ShotStatus.COMPLETED.value:
+            raise HTTPException(
+                status_code=400, detail=f"镜头 {sid} 尚未完成，无法预览"
+            )
+        if not shot.video_path or not Path(shot.video_path).exists():
+            raise HTTPException(
+                status_code=400, detail=f"镜头 {sid} 缺少视频文件"
+            )
+        ordered_paths.append(shot.video_path)
+
+    output_path = str(join_preview_path(project_id))
+    try:
+        merge_shots(ordered_paths, output_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"拼接失败: {e}")
+
+    media_url = to_media_url(output_path)
+    # cache-busting：用输出文件修改时间(纳秒)，避免浏览器/video 缓存旧预览
+    bust = Path(output_path).stat().st_mtime_ns
+    return {"preview_url": f"{media_url}?t={bust}"}
 
 
 @router.post("/projects/{project_id}/cancel-generation", status_code=202)

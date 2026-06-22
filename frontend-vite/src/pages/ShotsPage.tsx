@@ -14,6 +14,7 @@ import {
   XCircle,
   Mic,
   User,
+  Film,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -83,6 +84,8 @@ export default function ShotsPage() {
   const [isVcConverting, setIsVcConverting] = useState(false)
   const [isCcCalibrating, setIsCcCalibrating] = useState(false)
   const [hasCharacterRefs, setHasCharacterRefs] = useState(false)
+  const [joinPreviewUrl, setJoinPreviewUrl] = useState<string | null>(null)
+  const [isJoining, setIsJoining] = useState(false)
 
   const updateShot = useStore((s) => s.updateShot)
 
@@ -167,6 +170,24 @@ export default function ShotsPage() {
         toggleShotSelection(id)
       }
     })
+  }
+
+  // 连贯性预览：临时拼接选中镜头
+  const handleJoinPreview = async () => {
+    if (!projectId || selectedShotIds.size < 2) return
+    setIsJoining(true)
+    try {
+      const ids = Array.from(selectedShotIds).sort((a, b) => a - b)
+      const { preview_url } = await api.joinPreview(projectId, ids)
+      setJoinPreviewUrl(preview_url)
+    } catch (e) {
+      addToast({
+        type: 'error',
+        message: e instanceof Error ? e.message : '拼接预览失败',
+      })
+    } finally {
+      setIsJoining(false)
+    }
   }
 
   // 重新生成选中的 shots
@@ -828,6 +849,20 @@ export default function ShotsPage() {
               <div className="flex gap-3">
                 <Button
                   variant="outline"
+                  data-testid="join-preview-button"
+                  onClick={handleJoinPreview}
+                  disabled={selectedShotIds.size < 2 || isJoining}
+                >
+                  {isJoining ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <Film className="w-4 h-4 mr-2" />
+                  )}
+                  连贯性预览
+                </Button>
+
+                <Button
+                  variant="outline"
                   onClick={handleRegenerate}
                   disabled={selectedShotIds.size === 0 || isRegenerating}
                 >
@@ -923,6 +958,36 @@ export default function ShotsPage() {
           )}
         </div>
       </main>
+
+      {joinPreviewUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          onClick={() => setJoinPreviewUrl(null)}
+          data-testid="join-preview-modal"
+        >
+          <div
+            className="relative bg-zinc-900 rounded-lg p-4 max-w-3xl w-full mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-sm text-zinc-300">连贯性预览（临时拼接）</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setJoinPreviewUrl(null)}
+              >
+                关闭
+              </Button>
+            </div>
+            <video
+              src={joinPreviewUrl}
+              controls
+              autoPlay
+              className="w-full rounded"
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }
