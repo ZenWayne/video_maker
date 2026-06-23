@@ -22,6 +22,7 @@ import { Card } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { ShotCard } from '@/components/ShotCard'
 import { ProgressStream } from '@/components/ProgressStream'
+import { VoiceCalibrationPanel } from '@/components/VoiceCalibrationPanel'
 import {
   Tooltip,
   TooltipContent,
@@ -81,6 +82,8 @@ export default function ShotsPage() {
   const [isRegeneratingScript, setIsRegeneratingScript] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
   const [referenceVoiceShotId, setReferenceVoiceShotId] = useState<number | null>(null)
+  const [referenceVoicePath, setReferenceVoicePath] = useState<string | null>(null)
+  const [autoVoiceCalibrate, setAutoVoiceCalibrate] = useState(false)
   const [isVcConverting, setIsVcConverting] = useState(false)
   const [isCcCalibrating, setIsCcCalibrating] = useState(false)
   const [hasCharacterRefs, setHasCharacterRefs] = useState(false)
@@ -127,6 +130,8 @@ export default function ShotsPage() {
         setSceneOverview(project.scene_overview || '')
         setShots(project.shots || [])
         setReferenceVoiceShotId(project.reference_voice_shot_id ?? null)
+        setReferenceVoicePath(project.reference_voice_path ?? null)
+        setAutoVoiceCalibrate(project.auto_voice_calibrate ?? false)
         setHasCharacterRefs(project.reference_images?.some((r) => r.kind === 'character') ?? false)
       } catch (error) {
         addToast({
@@ -420,6 +425,30 @@ export default function ShotsPage() {
         message: error instanceof Error ? error.message : '还原失败',
       })
     }
+  }
+
+  // 上传基准音色文件
+  const handleUploadReferenceVoice = async (file: File) => {
+    if (!projectId) return
+    const res = await api.uploadReferenceVoice(projectId, file)
+    setReferenceVoiceShotId(null)
+    setReferenceVoicePath(res.reference_voice_path)
+  }
+
+  // 移除基准音色
+  const handleRemoveReferenceVoice = async () => {
+    if (!projectId) return
+    await api.clearReferenceVoice(projectId)
+    setReferenceVoiceShotId(null)
+    setReferenceVoicePath(null)
+    setAutoVoiceCalibrate(false)
+  }
+
+  // 切换自动音色校准
+  const handleToggleAutoCalibrate = async (enabled: boolean) => {
+    if (!projectId) return
+    const res = await api.setAutoVoiceCalibrate(projectId, enabled)
+    setAutoVoiceCalibrate(res.auto_voice_calibrate)
   }
 
   // 一键统一音色
@@ -804,6 +833,19 @@ export default function ShotsPage() {
             )
           })}
         </div>
+
+        {/* Voice Calibration Panel */}
+        {status === 'shot_review' && (
+          <VoiceCalibrationPanel
+            referenceVoicePath={referenceVoicePath}
+            referenceVoiceShotId={referenceVoiceShotId}
+            autoVoiceCalibrate={autoVoiceCalibrate}
+            onUpload={handleUploadReferenceVoice}
+            onRemove={handleRemoveReferenceVoice}
+            onToggleAuto={handleToggleAutoCalibrate}
+            onCalibrateAll={handleVoiceConvertAll}
+          />
+        )}
 
         {/* Actions */}
         <div className="flex flex-wrap items-center justify-between gap-4 mt-8 pt-6 border-t sticky bottom-0 bg-zinc-50 py-4">
