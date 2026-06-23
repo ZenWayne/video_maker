@@ -837,6 +837,7 @@ export default function ShotsPage() {
                 prevLastFramePath={prevShot?.last_frame_path}
                 isReferenceVoice={referenceVoiceShotId === shot.shot_id}
                 hasReferenceVoice={referenceVoiceShotId != null}
+                autoVoiceCalibrate={autoVoiceCalibrate}
                 onSelect={status !== 'script_review' ? toggleShotSelection : undefined}
                 onEditPrompt={handleEditPrompt}
                 onRedraw={handleRedrawShot}
