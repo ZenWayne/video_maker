@@ -460,6 +460,10 @@ async def run_shot_pipeline(
                 },
             )
 
+            # Auto voice-calibration hook (retroactive=(a): only future completions)
+            from worker.auto_vc import maybe_enqueue_auto_vc
+            await maybe_enqueue_auto_vc(redis, session, project_id, project, shot)
+
         except Exception as e:
             logger.error(f"Shot {shot.shot_id} failed: {e}")
             has_failures = True
