@@ -430,25 +430,46 @@ export default function ShotsPage() {
   // 上传基准音色文件
   const handleUploadReferenceVoice = async (file: File) => {
     if (!projectId) return
-    const res = await api.uploadReferenceVoice(projectId, file)
-    setReferenceVoiceShotId(null)
-    setReferenceVoicePath(res.reference_voice_path)
+    try {
+      const res = await api.uploadReferenceVoice(projectId, file)
+      setReferenceVoiceShotId(null)
+      setReferenceVoicePath(res.reference_voice_path)
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '上传音色文件失败',
+      })
+    }
   }
 
   // 移除基准音色
   const handleRemoveReferenceVoice = async () => {
     if (!projectId) return
-    await api.clearReferenceVoice(projectId)
-    setReferenceVoiceShotId(null)
-    setReferenceVoicePath(null)
-    setAutoVoiceCalibrate(false)
+    try {
+      await api.clearReferenceVoice(projectId)
+      setReferenceVoiceShotId(null)
+      setReferenceVoicePath(null)
+      setAutoVoiceCalibrate(false)
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '移除音色失败',
+      })
+    }
   }
 
   // 切换自动音色校准
   const handleToggleAutoCalibrate = async (enabled: boolean) => {
     if (!projectId) return
-    const res = await api.setAutoVoiceCalibrate(projectId, enabled)
-    setAutoVoiceCalibrate(res.auto_voice_calibrate)
+    try {
+      const res = await api.setAutoVoiceCalibrate(projectId, enabled)
+      setAutoVoiceCalibrate(res.auto_voice_calibrate)
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '设置自动音色校准失败',
+      })
+    }
   }
 
   // 一键统一音色
