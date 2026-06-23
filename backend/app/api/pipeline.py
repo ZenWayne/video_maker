@@ -22,7 +22,7 @@ from app.models.project import Project, Shot, ReferenceImage
 from app.models.schemas import (
     ProjectResponse, StoryboardUpdate, ShotUpdate, ShotAiEditRequest,
     ShotTrimRequest, RegenerateShotsRequest, PipelineActionResponse,
-    ReferenceVoiceRequest, ExportRequest, JoinPreviewRequest,
+    ReferenceVoiceRequest, AutoVoiceCalibrateRequest, ExportRequest, JoinPreviewRequest,
 )
 from app.services.state_machine import (
     ProjectStatus, ShotStatus,
@@ -1405,11 +1405,12 @@ async def set_reference_voice(
         raise HTTPException(status_code=400, detail="Shot has no video")
 
     project.reference_voice_shot_id = body.shot_id
+    project.reference_voice_path = None  # mutual exclusivity
     project.updated_at = datetime.utcnow()
     session.add(project)
     await session.commit()
 
-    return {"reference_voice_shot_id": body.shot_id}
+    return {"reference_voice_shot_id": body.shot_id, "reference_voice_path": None}
 
 
 @router.delete("/projects/{project_id}/reference-voice")
@@ -1422,11 +1423,84 @@ async def clear_reference_voice(
     project = await _get_project_or_404(project_id, session)
 
     project.reference_voice_shot_id = None
+    project.reference_voice_path = None
+    project.auto_voice_calibrate = False  # no base voice ⇒ auto cannot run
     project.updated_at = datetime.utcnow()
     session.add(project)
     await session.commit()
 
-    return {"reference_voice_shot_id": None}
+    return {"reference_voice_shot_id": None, "reference_voice_path": None,
+            "auto_voice_calibrate": False}
+
+
+@router.post("/projects/{project_id}/reference-voice/upload")
+async def upload_reference_voice(
+    project_id: str,
+    file: UploadFile = File(...),
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Upload mp4/m4a/wav as the project base voice; normalize to prompt.wav."""
+    import subprocess
+    from pathlib import Path
+    from app.services.reference_voice import (
+        reference_voice_dir, reference_voice_prompt_path,
+        has_audio_stream, normalize_reference_voice,
+    )
+
+    project = await _get_project_or_404(project_id, session)
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in {".mp4", ".m4a", ".wav"}:
+        raise HTTPException(status_code=400, detail="Unsupported file type (use mp4/m4a/wav)")
+
+    data = await file.read()
+    if len(data) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+
+    reference_voice_dir(project_id).mkdir(parents=True, exist_ok=True)
+    tmp_in = reference_voice_dir(project_id) / f"upload{ext}"
+    tmp_in.write_bytes(data)
+    out = reference_voice_prompt_path(project_id)
+    try:
+        if not has_audio_stream(str(tmp_in)):
+            raise HTTPException(status_code=400, detail="File has no audio stream")
+        normalize_reference_voice(str(tmp_in), str(out))
+    except subprocess.CalledProcessError:
+        raise HTTPException(status_code=400, detail="Failed to decode audio from file")
+    finally:
+        if tmp_in.exists():
+            tmp_in.unlink()
+
+    project.reference_voice_path = str(out)
+    project.reference_voice_shot_id = None  # mutual exclusivity
+    project.updated_at = datetime.utcnow()
+    session.add(project)
+    await session.commit()
+
+    return {"reference_voice_path": to_media_url(str(out)), "reference_voice_shot_id": None}
+
+
+@router.post("/projects/{project_id}/auto-voice-calibrate")
+async def set_auto_voice_calibrate(
+    project_id: str,
+    body: AutoVoiceCalibrateRequest,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Toggle the project-level auto voice-calibration switch."""
+    from app.services.reference_voice import resolve_reference_prompt_wav
+
+    project = await _get_project_or_404(project_id, session)
+    if body.enabled and resolve_reference_prompt_wav(project_id, project) is None:
+        raise HTTPException(status_code=409, detail="Set a base voice before enabling auto calibration")
+
+    project.auto_voice_calibrate = body.enabled
+    project.updated_at = datetime.utcnow()
+    session.add(project)
+    await session.commit()
+
+    return {"auto_voice_calibrate": body.enabled}
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/voice-convert", status_code=202)

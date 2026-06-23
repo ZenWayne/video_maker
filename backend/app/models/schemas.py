@@ -125,6 +125,10 @@ class ReferenceVoiceRequest(BaseModel):
     shot_id: int
 
 
+class AutoVoiceCalibrateRequest(BaseModel):
+    enabled: bool
+
+
 class ProjectResponse(BaseModel):
     id: str
     title: str
@@ -137,6 +141,8 @@ class ProjectResponse(BaseModel):
     final_video_path: Optional[str] = None
     error_message: Optional[str] = None
     reference_voice_shot_id: Optional[int] = None
+    reference_voice_path: Optional[str] = None
+    auto_voice_calibrate: bool = False
     created_at: datetime
     updated_at: datetime
     reference_images: List[ReferenceImageResponse] = []
