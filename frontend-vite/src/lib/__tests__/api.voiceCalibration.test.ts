@@ -20,7 +20,8 @@ describe('voice calibration api', () => {
   it('setAutoVoiceCalibrate posts enabled flag', async () => {
     const res = await api.setAutoVoiceCalibrate('p1', true)
     expect(res.auto_voice_calibrate).toBe(true)
-    const [, opts] = (global.fetch as any).mock.calls[0]
+    const [url, opts] = (global.fetch as any).mock.calls[0]
+    expect(url).toContain('/api/projects/p1/auto-voice-calibrate')
     expect(JSON.parse(opts.body)).toEqual({ enabled: true })
   })
 
@@ -33,5 +34,6 @@ describe('voice calibration api', () => {
     const [url, opts] = (global.fetch as any).mock.calls[0]
     expect(url).toContain('/api/projects/p1/reference-voice/upload')
     expect(opts.body instanceof FormData).toBe(true)
+    expect(opts.headers['X-User-Name']).toBe('testuser')
   })
 })
