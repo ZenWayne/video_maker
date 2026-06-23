@@ -921,8 +921,6 @@ async def run_voice_convert(
         shot_id: Shot ID to convert
         actor: Who triggered this
     """
-    from app.agents.audio_extractor import extract_audio_wav
-
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory
     redis = worker_ctx.redis
@@ -930,19 +928,16 @@ async def run_voice_convert(
     async with session_factory() as session:
         result = await session.execute(select(Project).where(Project.id == project_id))
         project = result.scalar_one_or_none()
-        if not project or not project.reference_voice_shot_id:
-            logger.error("Project %s not found or no reference voice set", project_id)
+        if not project:
+            logger.error("Project %s not found", project_id)
+            return
+        from app.services.reference_voice import resolve_reference_prompt_wav
+        ref_audio = resolve_reference_prompt_wav(project_id, project)
+        if ref_audio is None:
+            logger.error("Project %s has no reference voice set", project_id)
             return
 
-        ref_shot_id = project.reference_voice_shot_id
-
-    # Extract reference audio
-    ref_audio = str(shot_audio_original_path(project_id, ref_shot_id))
-    if not Path(ref_audio).exists():
-        ref_video = get_original_video_for_audio(project_id, ref_shot_id)
-        extract_audio_wav(str(ref_video), ref_audio)
-
-    await _do_voice_convert_one(session_factory, redis, project_id, shot_id, ref_audio)
+    await _do_voice_convert_one(session_factory, redis, project_id, shot_id, str(ref_audio))
 
 
 async def run_voice_convert_batch(
@@ -956,8 +951,6 @@ async def run_voice_convert_batch(
         shot_ids: List of shot IDs to convert
         actor: Who triggered this
     """
-    from app.agents.audio_extractor import extract_audio_wav
-
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory
     redis = worker_ctx.redis
@@ -965,17 +958,15 @@ async def run_voice_convert_batch(
     async with session_factory() as session:
         result = await session.execute(select(Project).where(Project.id == project_id))
         project = result.scalar_one_or_none()
-        if not project or not project.reference_voice_shot_id:
-            logger.error("Project %s not found or no reference voice set", project_id)
+        if not project:
+            logger.error("Project %s not found", project_id)
             return
-
-        ref_shot_id = project.reference_voice_shot_id
-
-    # Extract reference audio once
-    ref_audio = str(shot_audio_original_path(project_id, ref_shot_id))
-    if not Path(ref_audio).exists():
-        ref_video = get_original_video_for_audio(project_id, ref_shot_id)
-        extract_audio_wav(str(ref_video), ref_audio)
+        from app.services.reference_voice import resolve_reference_prompt_wav
+        ref_audio_path = resolve_reference_prompt_wav(project_id, project)
+        if ref_audio_path is None:
+            logger.error("Project %s has no reference voice set", project_id)
+            return
+    ref_audio = str(ref_audio_path)
 
     converted = 0
     failed = 0

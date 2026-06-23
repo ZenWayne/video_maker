@@ -38,3 +38,23 @@ def normalize_reference_voice(input_path: str, out_wav: str) -> str:
         check=True, capture_output=True,
     )
     return out_wav
+
+
+def resolve_reference_prompt_wav(project_id: str, project) -> Path | None:
+    """The single source of truth for which prompt wav VC should use.
+
+    Uploaded file wins (mutual exclusivity guarantees only one is set). For a
+    shot source, lazily extract audio_original.wav from the reference shot.
+    """
+    if project.reference_voice_path:
+        p = Path(project.reference_voice_path)
+        return p if p.exists() else None
+    if project.reference_voice_shot_id:
+        ref_sid = project.reference_voice_shot_id
+        ref_audio = shot_audio_original_path(project_id, ref_sid)
+        if not ref_audio.exists():
+            from app.agents.audio_extractor import extract_audio_wav
+            ref_video = get_original_video_for_audio(project_id, ref_sid)
+            extract_audio_wav(str(ref_video), str(ref_audio))
+        return ref_audio
+    return None
