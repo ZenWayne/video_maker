@@ -770,6 +770,21 @@ export default function ShotsPage() {
           </div>
         )}
 
+        {/* Voice Calibration Panel (top of page) */}
+        {status === 'shot_review' && (
+          <div className="mb-6">
+            <VoiceCalibrationPanel
+              referenceVoicePath={referenceVoicePath}
+              referenceVoiceShotId={referenceVoiceShotId}
+              autoVoiceCalibrate={autoVoiceCalibrate}
+              onUpload={handleUploadReferenceVoice}
+              onRemove={handleRemoveReferenceVoice}
+              onToggleAuto={handleToggleAutoCalibrate}
+              onCalibrateAll={handleVoiceConvertAll}
+            />
+          </div>
+        )}
+
         {/* Scene Overview */}
         {sceneOverview !== undefined && (
           <div data-testid="script-content" className="mb-6">
@@ -855,19 +870,6 @@ export default function ShotsPage() {
             )
           })}
         </div>
-
-        {/* Voice Calibration Panel */}
-        {status === 'shot_review' && (
-          <VoiceCalibrationPanel
-            referenceVoicePath={referenceVoicePath}
-            referenceVoiceShotId={referenceVoiceShotId}
-            autoVoiceCalibrate={autoVoiceCalibrate}
-            onUpload={handleUploadReferenceVoice}
-            onRemove={handleRemoveReferenceVoice}
-            onToggleAuto={handleToggleAutoCalibrate}
-            onCalibrateAll={handleVoiceConvertAll}
-          />
-        )}
 
         {/* Actions */}
         <div className="flex flex-wrap items-center justify-between gap-4 mt-8 pt-6 border-t sticky bottom-0 bg-zinc-50 py-4">
