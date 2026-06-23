@@ -63,6 +63,14 @@ async def _run_migrations(conn):
         await conn.execute(
             sa.text("ALTER TABLE projects ADD COLUMN reference_voice_shot_id INTEGER")
         )
+    if not await _has_column("projects", "reference_voice_path"):
+        await conn.execute(
+            sa.text("ALTER TABLE projects ADD COLUMN reference_voice_path TEXT")
+        )
+    if not await _has_column("projects", "auto_voice_calibrate"):
+        await conn.execute(
+            sa.text("ALTER TABLE projects ADD COLUMN auto_voice_calibrate BOOLEAN NOT NULL DEFAULT 0")
+        )
     if not await _has_column("shots", "vc_status"):
         await conn.execute(
             sa.text("ALTER TABLE shots ADD COLUMN vc_status VARCHAR(20)")
