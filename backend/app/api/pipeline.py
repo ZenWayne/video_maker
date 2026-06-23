@@ -1512,9 +1512,11 @@ async def voice_convert_shot(
     redis=Depends(get_redis),
 ):
     """Convert a shot's voice to match the reference voice."""
+    from app.services.reference_voice import resolve_reference_prompt_wav
+
     project = await _get_project_or_404(project_id, session)
 
-    if not project.reference_voice_shot_id:
+    if resolve_reference_prompt_wav(project_id, project) is None:
         raise HTTPException(status_code=400, detail="No reference voice set")
 
     if shot_id == project.reference_voice_shot_id:
@@ -1553,19 +1555,22 @@ async def voice_convert_all(
     redis=Depends(get_redis),
 ):
     """Convert all non-reference completed shots to match the reference voice."""
+    from app.services.reference_voice import resolve_reference_prompt_wav
+
     project = await _get_project_or_404(project_id, session)
 
-    if not project.reference_voice_shot_id:
+    if resolve_reference_prompt_wav(project_id, project) is None:
         raise HTTPException(status_code=400, detail="No reference voice set")
 
-    # Find all completed shots except the reference
-    result = await session.execute(
-        select(Shot).where(
-            Shot.project_id == project_id,
-            Shot.status == ShotStatus.COMPLETED.value,
-            Shot.shot_id != project.reference_voice_shot_id,
-        )
-    )
+    # Find all completed shots except the reference shot (if a shot is the source)
+    filters = [
+        Shot.project_id == project_id,
+        Shot.status == ShotStatus.COMPLETED.value,
+    ]
+    if project.reference_voice_shot_id is not None:
+        filters.append(Shot.shot_id != project.reference_voice_shot_id)
+
+    result = await session.execute(select(Shot).where(*filters))
     shots = result.scalars().all()
 
     if not shots:

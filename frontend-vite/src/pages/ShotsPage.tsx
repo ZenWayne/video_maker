@@ -943,7 +943,7 @@ export default function ShotsPage() {
                     <Button
                       variant="outline"
                       onClick={handleVoiceConvertAll}
-                      disabled={!referenceVoiceShotId || isVcConverting}
+                      disabled={(!referenceVoiceShotId && !referenceVoicePath) || isVcConverting}
                     >
                       {isVcConverting ? (
                         <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -955,7 +955,7 @@ export default function ShotsPage() {
                         : '统一音色'}
                     </Button>
                   </TooltipTrigger>
-                  {!referenceVoiceShotId && (
+                  {!referenceVoiceShotId && !referenceVoicePath && (
                     <TooltipContent>
                       <p>请先在镜头卡片上设置基准音色</p>
                     </TooltipContent>
