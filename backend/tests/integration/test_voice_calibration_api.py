@@ -1,5 +1,7 @@
 import subprocess
 import pytest
+from sqlalchemy import select
+from app.models.project import Project
 from tests.integration.conftest import HEADERS
 
 
@@ -12,17 +14,31 @@ def _wav_bytes(tmp_path):
     return p.read_bytes()
 
 
-async def test_upload_sets_file_clears_shot(client, make_project, tmp_path):
+async def test_upload_sets_file_clears_shot(client, make_project, db_session_factory, tmp_path):
     proj = await make_project()
     pid = proj["id"]
-    # pre-set a shot reference to prove it gets cleared
+
+    # Seed a non-null reference_voice_shot_id directly in the DB so the upload
+    # actually has something to clear (otherwise the assert trivially passes on a
+    # fresh project that already has null).
+    async with db_session_factory() as s:
+        proj_row = (await s.execute(select(Project).where(Project.id == pid))).scalar_one()
+        proj_row.reference_voice_shot_id = 1
+        await s.commit()
+
     files = {"file": ("base.wav", _wav_bytes(tmp_path), "audio/wav")}
     r = await client.post(f"/api/projects/{pid}/reference-voice/upload",
                           files=files, headers=HEADERS)
     assert r.status_code == 200
     body = r.json()
+    # Upload response must clear the shot reference and set the file path.
     assert body["reference_voice_path"] is not None
     assert body["reference_voice_shot_id"] is None
+
+    # Verify the clearing also persisted to the DB.
+    got = (await client.get(f"/api/projects/{pid}", headers=HEADERS)).json()
+    assert got["reference_voice_shot_id"] is None
+    assert got["reference_voice_path"] is not None
 
 
 async def test_upload_rejects_bad_extension(client, make_project):
