@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Loader2, ChevronLeft, ChevronRight, Play, Square, Undo2, Crosshair } from 'lucide-react'
+import { Loader2, ChevronLeft, ChevronRight, Play, Square, Undo2, Crosshair, AudioLines } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -40,6 +40,8 @@ export function TrimDialog({
   const [isTrimming, setIsTrimming] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
   const [isAligning, setIsAligning] = useState(false)
+  const [isDetectingSilence, setIsDetectingSilence] = useState(false)
+  const [notice, setNotice] = useState('')
   const [isPreviewing, setIsPreviewing] = useState(false)
   const [hasBackup, setHasBackup] = useState(false)
   const [error, setError] = useState('')
@@ -218,6 +220,25 @@ export function TrimDialog({
     }
   }
 
+  const handleDetectSilence = async () => {
+    setIsDetectingSilence(true)
+    setError('')
+    setNotice('')
+    try {
+      const result = await api.detectSilence(projectId, shot.shot_id)
+      if (result.has_silence && result.suggested_end_frame != null) {
+        setEndFrame(result.suggested_end_frame)
+        seekToFrame(result.suggested_end_frame)
+      } else {
+        setNotice('无尾部静音可裁剪')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Silence detect failed')
+    } finally {
+      setIsDetectingSilence(false)
+    }
+  }
+
   const currentTime = fps > 0 ? (endFrame / fps).toFixed(2) : '0'
   const trimmedPercent = totalFrames > 0 ? (endFrame / totalFrames) * 100 : 100
 
@@ -362,6 +383,18 @@ export function TrimDialog({
                     )}
                   </Button>
                 )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDetectSilence}
+                  disabled={isDetectingSilence || isTrimming || isAligning || isRestoring || isPreviewing}
+                >
+                  {isDetectingSilence ? (
+                    <><Loader2 className="w-4 h-4 mr-1 animate-spin" />检测中...</>
+                  ) : (
+                    <><AudioLines className="w-4 h-4 mr-1" />静音裁剪</>
+                  )}
+                </Button>
               </div>
               <div className="flex items-center gap-2">
                 <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -382,6 +415,9 @@ export function TrimDialog({
 
             {error && (
               <p className="text-sm text-red-500">{error}</p>
+            )}
+            {notice && !error && (
+              <p className="text-sm text-zinc-500">{notice}</p>
             )}
           </div>
         )}
