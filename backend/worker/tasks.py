@@ -3,6 +3,7 @@
 import json
 import asyncio
 import logging
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -376,7 +377,15 @@ async def run_shot_pipeline(
             # Ensure shot directory
             ensure_shot_dir(project_id, shot.shot_id)
             s_dir = shot_dir(project_id, shot.shot_id)
-            video_out = s_dir / "output.mp4"
+            # Name the generated video uniquely (timestamp + uuid) so a regenerated
+            # video is always a new URL — the browser can never replay a cached copy
+            # of an overwritten-in-place file. Remove the prior current video first
+            # (legacy output.mp4 or an earlier unique file); keep the trim/VC backups,
+            # which the regenerate / voice-convert flows manage separately.
+            for _old in s_dir.glob("output*.mp4"):
+                if _old.name not in ("output_original.mp4", "output_pre_vc.mp4"):
+                    _old.unlink(missing_ok=True)
+            video_out = s_dir / f"output_{int(datetime.utcnow().timestamp())}_{uuid.uuid4().hex[:8]}.mp4"
 
             video_model = (
                 settings.kie_veo_model

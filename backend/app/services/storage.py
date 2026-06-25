@@ -61,15 +61,21 @@ def shot_target_last_frame_path(project_id: str, shot_id: int) -> Path:
 def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
     """Get the un-VC'd video to extract audio from.
 
-    Priority: output_pre_vc.mp4 (VC backup, post-trim) > output.mp4 (current)
+    Priority: output_pre_vc.mp4 (VC backup, post-trim) > newest
+    output_<ts>_<uuid>.mp4 (current, uniquely-named).
     NOT output_original.mp4 — that is the pre-trim backup and has different
     duration, which would cause lip sync mismatch after trimming.
     """
     s_dir = shot_dir(project_id, shot_id)
-    for name in ["output_pre_vc.mp4", "output.mp4"]:
-        candidate = s_dir / name
-        if candidate.exists():
-            return candidate
+    pre_vc = s_dir / "output_pre_vc.mp4"
+    if pre_vc.exists():
+        return pre_vc
+    uniques = [
+        p for p in s_dir.glob("output_*.mp4")
+        if p.name not in ("output_original.mp4", "output_pre_vc.mp4")
+    ]
+    if uniques:
+        return max(uniques, key=lambda p: p.stat().st_mtime)
     raise FileNotFoundError(f"No video found in {s_dir}")
 
 
@@ -175,16 +181,3 @@ def validate_safe_path(path: str) -> bool:
         return str(resolved).startswith(str(storage_root))
     except (ValueError, RuntimeError):
         return False
-
-
-def list_shot_video_paths(project_id: str, shot_count: int) -> list[str]:
-    """
-    List video paths for completed shots.
-    Returns paths for shots 1 to shot_count if they exist.
-    """
-    paths = []
-    for shot_id in range(1, shot_count + 1):
-        video_path = shot_output_path(project_id, shot_id)
-        if video_path.exists():
-            paths.append(str(video_path))
-    return paths
