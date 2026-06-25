@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/state'
+import { versionShotMedia } from '@/lib/media'
 import type { ProjectStatus, Shot } from '@/lib/types'
 
 // 计算断层警告
@@ -128,7 +129,7 @@ export default function ShotsPage() {
         setCurrentProject(project)
         setStatus(project.status as ProjectStatus)
         setSceneOverview(project.scene_overview || '')
-        setShots(project.shots || [])
+        setShots((project.shots || []).map(versionShotMedia))
         setReferenceVoiceShotId(project.reference_voice_shot_id ?? null)
         setReferenceVoicePath(project.reference_voice_path ?? null)
         setAutoVoiceCalibrate(project.auto_voice_calibrate ?? false)
