@@ -12,6 +12,10 @@ from ffmpeg import FFmpeg
 
 logger = logging.getLogger(__name__)
 
+# Tail silence trim — suggest-only (preview before confirm)
+SILENCE_TAIL_PADDING_FRAMES = 3   # keep this many frames after speech ends (呼吸感)
+MIN_TRIM_FRAMES = 24              # floor; mirrors TrimDialog minFrames
+
 
 def detect_speech_end(
     video_path: str,
@@ -272,3 +276,34 @@ def auto_trim_to_speech_end(video_path: str, tail_window: float = 0.1) -> dict |
     if keep_frames >= info["total_frames"]:
         return None
     return _backup_and_trim(video_path, keep_frames)
+
+
+def suggest_silence_trim(
+    video_path: str,
+    padding_frames: int = SILENCE_TAIL_PADDING_FRAMES,
+) -> dict | None:
+    """Suggest a tail-trim point based on trailing silence — read-only.
+
+    Mirrors ``auto_trim_to_speech_end`` but does NOT touch any file: it only
+    computes the frame count to keep so the frontend can move the slider and
+    let the user preview before confirming via the normal trim endpoint.
+
+    Returns a dict with ``suggested_end_frame``, ``silence_start_time`` and
+    video info, or ``None`` when there is no trailing silence / nothing to trim.
+    """
+    speech_end = detect_speech_end(video_path)
+    if speech_end is None:
+        return None
+
+    info = get_video_info(video_path)
+    suggested = round(speech_end * info["fps"]) + padding_frames
+    if suggested < MIN_TRIM_FRAMES:
+        suggested = MIN_TRIM_FRAMES
+    if suggested >= info["total_frames"]:
+        return None
+
+    return {
+        "suggested_end_frame": suggested,
+        "silence_start_time": speech_end,
+        **info,
+    }
