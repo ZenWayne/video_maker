@@ -108,7 +108,7 @@ test.describe('Auto silence trim (suggest-only)', () => {
     // Slider (input[type=range]) should now read the suggested frame.
     await expect(page.locator('input[type="range"]')).toHaveValue('120')
     // Frame readout reflects the suggestion.
-    await expect(page.getByText('帧: 120 / 200')).toBeVisible()
+    await expect(page.getByText(/帧:\s*120\s*\/\s*200/)).toBeVisible()
     // Dialog stays open (suggest-only, not applied): 确认裁剪 still present.
     await expect(page.getByRole('button', { name: '确认裁剪' })).toBeVisible()
   })

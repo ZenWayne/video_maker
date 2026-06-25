@@ -123,6 +123,7 @@ export function TrimDialog({
     if (!open) return
     setIsLoading(true)
     setError('')
+    setNotice('')
     api.getVideoInfo(projectId, shot.shot_id).then((info) => {
       setFps(info.fps)
       setTotalFrames(info.total_frames)
@@ -360,7 +361,7 @@ export function TrimDialog({
                     variant="outline"
                     size="sm"
                     onClick={handleRestore}
-                    disabled={isRestoring || isTrimming || isAligning || isPreviewing}
+                    disabled={isRestoring || isTrimming || isAligning || isPreviewing || isDetectingSilence}
                   >
                     {isRestoring ? (
                       <><Loader2 className="w-4 h-4 mr-1 animate-spin" />还原中...</>
@@ -374,7 +375,7 @@ export function TrimDialog({
                     variant="outline"
                     size="sm"
                     onClick={handleAlignTailFrame}
-                    disabled={isAligning || isTrimming || isRestoring || isPreviewing}
+                    disabled={isAligning || isTrimming || isRestoring || isPreviewing || isDetectingSilence}
                   >
                     {isAligning ? (
                       <><Loader2 className="w-4 h-4 mr-1 animate-spin" />校准中...</>
@@ -402,7 +403,7 @@ export function TrimDialog({
                 </Button>
                 <Button
                   onClick={handleTrim}
-                  disabled={isTrimming || endFrame >= totalFrames}
+                  disabled={isTrimming || isDetectingSilence || endFrame >= totalFrames}
                 >
                   {isTrimming ? (
                     <><Loader2 className="w-4 h-4 mr-1 animate-spin" />裁剪中...</>
