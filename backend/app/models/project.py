@@ -59,6 +59,8 @@ class Project(Base):
     final_video_path = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
     reference_voice_shot_id = Column(Integer, nullable=True)  # shot_id of reference voice
+    reference_voice_path = Column(Text, nullable=True)  # uploaded base-voice prompt.wav (file source)
+    auto_voice_calibrate = Column(Boolean, nullable=False, default=False)  # auto-run VC after video gen
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
