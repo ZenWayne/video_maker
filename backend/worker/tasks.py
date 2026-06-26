@@ -33,6 +33,7 @@ from app.services.storage import (
     shot_pre_cc_last_frame_path,
     shot_target_last_frame_path,
     get_original_video_for_audio,
+    ts_uuid_name,
 )
 from app.services.events import publish_event
 from app.agents.llm import GeminiProvider
@@ -460,8 +461,13 @@ async def run_shot_pipeline(
                         shot.shot_id, trim_result["trimmed_to_frame"], trim_mode,
                     )
 
-            # Extract last frame
-            last_frame_out = s_dir / "last_frame.png"
+            # Extract last frame to a UNIQUE name so its URL changes on every
+            # (re)generation — a stable last_frame.png would be replayed from the
+            # browser cache (stale poster + stale next-shot first frame).
+            for _old in s_dir.glob("last_frame*.png"):
+                if _old.name != "last_frame_pre_cc.png":
+                    _old.unlink(missing_ok=True)
+            last_frame_out = s_dir / f"last_frame_{ts_uuid_name('.png')}"
             extract_last_frame(str(video_out), str(last_frame_out))
             shot.last_frame_path = str(last_frame_out)
             # Eagerly propagate last frame to next shot's first frame for frontend visibility.
@@ -645,14 +651,15 @@ async def _init_shot1_first_frame(
 async def _propagate_first_frame_to_next(
     project_id: str, shot: Shot, last_frame_path: str, session: AsyncSession
 ) -> None:
-    """Eagerly populate the NEXT shot's custom_first_frame_path after shot N generates.
+    """Eagerly point the NEXT shot's custom_first_frame_path at this shot's last frame.
 
-    Write-only-when-empty: preserves a user-uploaded/extracted first frame.
-    Predicate: next shot (shot_id + 1) must exist AND use_prev_last_frame=True AND
-    custom_first_frame_path is empty.
+    Predicate: next shot (shot_id + 1) must exist AND use_prev_last_frame=True.
 
-    Because last_frame.png is overwritten in place on every (re)generation at a stable
-    canonical path, a previously-written value is never stale — no refresh needed.
+    Last frames now use unique filenames (last_frame_<ts>_<hex>.png), so the value
+    must be RE-POINTED on every (re)generation/trim — a previously auto-propagated
+    path would otherwise reference a deleted, stale file. We preserve a genuine user
+    override (a frame uploaded/extracted into custom_frames/) and only re-point when
+    the existing value is empty or itself an auto-propagated last frame.
     """
     result = await session.execute(
         select(Shot).where(
@@ -661,11 +668,11 @@ async def _propagate_first_frame_to_next(
         )
     )
     next_shot = result.scalar_one_or_none()
-    if (
-        next_shot is not None
-        and next_shot.use_prev_last_frame
-        and not next_shot.custom_first_frame_path
-    ):
+    if next_shot is None or not next_shot.use_prev_last_frame:
+        return
+    existing = next_shot.custom_first_frame_path
+    is_user_override = bool(existing) and "custom_frames" in existing
+    if not is_user_override and existing != last_frame_path:
         next_shot.custom_first_frame_path = last_frame_path
         session.add(next_shot)
 
@@ -966,8 +973,14 @@ async def _do_voice_convert_one(
                 import shutil
                 shutil.copy2(str(video_path), str(pre_vc))
 
-            # 4. Remux: video stream from backup + converted audio → output.mp4
-            remux_video_with_audio(str(pre_vc), vc_audio, str(video_path))
+            # 4. Remux video stream from backup + converted audio → a NEW unique
+            #    output so the URL changes (browser can't replay a stale copy).
+            #    Drop the old current file; keep the output_pre_vc.mp4 backup.
+            vc_out = shot_dir(project_id, shot_id) / f"output_{ts_uuid_name('.mp4')}"
+            remux_video_with_audio(str(pre_vc), vc_audio, str(vc_out))
+            if video_path.name not in ("output_original.mp4", "output_pre_vc.mp4"):
+                video_path.unlink(missing_ok=True)
+            shot.video_path = str(vc_out)
 
             # 5. Update DB
             shot.vc_status = "done"

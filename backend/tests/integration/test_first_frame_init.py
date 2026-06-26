@@ -143,7 +143,7 @@ async def test_continuity_preserves_user_override(db_session_factory):
     """Continuity helper must NOT overwrite an existing custom_first_frame_path."""
     pid = "proj-ff-4"
     last_frame = f"/fake/{pid}/shots/1/last_frame.png"
-    user_override = f"/fake/{pid}/shots/2/1234567890_abcd1234.png"
+    user_override = f"/fake/{pid}/shots/2/custom_frames/1234567890_abcd1234.png"
 
     await _seed_project(db_session_factory, pid)
     await _seed_shot(db_session_factory, pid, shot_id=1, last_frame_path=last_frame)
@@ -163,6 +163,33 @@ async def test_continuity_preserves_user_override(db_session_factory):
     shot2_after = await _get_shot(db_session_factory, pid, shot_id=2)
     # Override must be preserved
     assert shot2_after.custom_first_frame_path == user_override
+
+
+@pytest.mark.asyncio
+async def test_continuity_repoints_stale_auto_frame(db_session_factory):
+    """A previously auto-propagated last frame must be RE-POINTED to the new last
+    frame — with unique filenames the old path references a deleted/stale file."""
+    pid = "proj-ff-6"
+    old_lf = f"/fake/{pid}/shots/1/last_frame_111_aaaaaaaa.png"
+    new_lf = f"/fake/{pid}/shots/1/last_frame_222_bbbbbbbb.png"
+
+    await _seed_project(db_session_factory, pid)
+    await _seed_shot(db_session_factory, pid, shot_id=1, last_frame_path=new_lf)
+    await _seed_shot(
+        db_session_factory, pid, shot_id=2,
+        use_prev_last_frame=True,
+        custom_first_frame_path=old_lf,  # auto-propagated by an earlier generation
+    )
+
+    async with db_session_factory() as session:
+        shot1 = (await session.execute(
+            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
+        )).scalar_one()
+        await tasks._propagate_first_frame_to_next(pid, shot1, new_lf, session)
+        await session.commit()
+
+    shot2_after = await _get_shot(db_session_factory, pid, shot_id=2)
+    assert shot2_after.custom_first_frame_path == new_lf
 
 
 @pytest.mark.asyncio
