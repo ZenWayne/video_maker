@@ -354,6 +354,30 @@ export const api = {
     return request('DELETE', `/api/projects/${projectId}/reference-voice`)
   },
 
+  // 上传基准音色文件 (mp4/m4a/wav)
+  uploadReferenceVoice: async (
+    projectId: string,
+    file: File,
+  ): Promise<{ reference_voice_path: string | null; reference_voice_shot_id: number | null }> => {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch(`${BASE}/api/projects/${projectId}/reference-voice/upload`, {
+      method: 'POST',
+      headers: { 'X-User-Name': getUserName() },
+      body: form,
+    })
+    if (!res.ok) throw new Error(`Upload failed: ${res.status}`)
+    return res.json()
+  },
+
+  // 自动音色校准开关
+  setAutoVoiceCalibrate: (
+    projectId: string,
+    enabled: boolean,
+  ): Promise<{ auto_voice_calibrate: boolean }> => {
+    return request('POST', `/api/projects/${projectId}/auto-voice-calibrate`, { enabled })
+  },
+
   // 单个 shot 音色转换
   voiceConvert: (projectId: string, shotId: number): Promise<void> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/voice-convert`)

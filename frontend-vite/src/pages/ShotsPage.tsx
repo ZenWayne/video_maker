@@ -22,6 +22,7 @@ import { Card } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
 import { ShotCard } from '@/components/ShotCard'
 import { ProgressStream } from '@/components/ProgressStream'
+import { VoiceCalibrationPanel } from '@/components/VoiceCalibrationPanel'
 import {
   Tooltip,
   TooltipContent,
@@ -29,6 +30,7 @@ import {
 } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/state'
+import { versionShotMedia } from '@/lib/media'
 import type { ProjectStatus, Shot } from '@/lib/types'
 
 // 计算断层警告
@@ -81,6 +83,8 @@ export default function ShotsPage() {
   const [isRegeneratingScript, setIsRegeneratingScript] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
   const [referenceVoiceShotId, setReferenceVoiceShotId] = useState<number | null>(null)
+  const [referenceVoicePath, setReferenceVoicePath] = useState<string | null>(null)
+  const [autoVoiceCalibrate, setAutoVoiceCalibrate] = useState(false)
   const [isVcConverting, setIsVcConverting] = useState(false)
   const [isCcCalibrating, setIsCcCalibrating] = useState(false)
   const [hasCharacterRefs, setHasCharacterRefs] = useState(false)
@@ -125,8 +129,10 @@ export default function ShotsPage() {
         setCurrentProject(project)
         setStatus(project.status as ProjectStatus)
         setSceneOverview(project.scene_overview || '')
-        setShots(project.shots || [])
+        setShots((project.shots || []).map(versionShotMedia))
         setReferenceVoiceShotId(project.reference_voice_shot_id ?? null)
+        setReferenceVoicePath(project.reference_voice_path ?? null)
+        setAutoVoiceCalibrate(project.auto_voice_calibrate ?? false)
         setHasCharacterRefs(project.reference_images?.some((r) => r.kind === 'character') ?? false)
       } catch (error) {
         addToast({
@@ -418,6 +424,51 @@ export default function ShotsPage() {
       addToast({
         type: 'error',
         message: error instanceof Error ? error.message : '还原失败',
+      })
+    }
+  }
+
+  // 上传基准音色文件
+  const handleUploadReferenceVoice = async (file: File) => {
+    if (!projectId) return
+    try {
+      const res = await api.uploadReferenceVoice(projectId, file)
+      setReferenceVoiceShotId(null)
+      setReferenceVoicePath(res.reference_voice_path)
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '上传音色文件失败',
+      })
+    }
+  }
+
+  // 移除基准音色
+  const handleRemoveReferenceVoice = async () => {
+    if (!projectId) return
+    try {
+      await api.clearReferenceVoice(projectId)
+      setReferenceVoiceShotId(null)
+      setReferenceVoicePath(null)
+      setAutoVoiceCalibrate(false)
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '移除音色失败',
+      })
+    }
+  }
+
+  // 切换自动音色校准
+  const handleToggleAutoCalibrate = async (enabled: boolean) => {
+    if (!projectId) return
+    try {
+      const res = await api.setAutoVoiceCalibrate(projectId, enabled)
+      setAutoVoiceCalibrate(res.auto_voice_calibrate)
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '设置自动音色校准失败',
       })
     }
   }
@@ -720,6 +771,21 @@ export default function ShotsPage() {
           </div>
         )}
 
+        {/* Voice Calibration Panel (top of page) */}
+        {status === 'shot_review' && (
+          <div className="mb-6">
+            <VoiceCalibrationPanel
+              referenceVoicePath={referenceVoicePath}
+              referenceVoiceShotId={referenceVoiceShotId}
+              autoVoiceCalibrate={autoVoiceCalibrate}
+              onUpload={handleUploadReferenceVoice}
+              onRemove={handleRemoveReferenceVoice}
+              onToggleAuto={handleToggleAutoCalibrate}
+              onCalibrateAll={handleVoiceConvertAll}
+            />
+          </div>
+        )}
+
         {/* Scene Overview */}
         {sceneOverview !== undefined && (
           <div data-testid="script-content" className="mb-6">
@@ -787,6 +853,7 @@ export default function ShotsPage() {
                 prevLastFramePath={prevShot?.last_frame_path}
                 isReferenceVoice={referenceVoiceShotId === shot.shot_id}
                 hasReferenceVoice={referenceVoiceShotId != null}
+                autoVoiceCalibrate={autoVoiceCalibrate}
                 onSelect={status !== 'script_review' ? toggleShotSelection : undefined}
                 onEditPrompt={handleEditPrompt}
                 onRedraw={handleRedrawShot}
@@ -879,7 +946,7 @@ export default function ShotsPage() {
                     <Button
                       variant="outline"
                       onClick={handleVoiceConvertAll}
-                      disabled={!referenceVoiceShotId || isVcConverting}
+                      disabled={(!referenceVoiceShotId && !referenceVoicePath) || isVcConverting}
                     >
                       {isVcConverting ? (
                         <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -891,7 +958,7 @@ export default function ShotsPage() {
                         : '统一音色'}
                     </Button>
                   </TooltipTrigger>
-                  {!referenceVoiceShotId && (
+                  {!referenceVoiceShotId && !referenceVoicePath && (
                     <TooltipContent>
                       <p>请先在镜头卡片上设置基准音色</p>
                     </TooltipContent>

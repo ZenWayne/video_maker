@@ -7,6 +7,7 @@ import { createSSEConnection, type SSEConnection } from '@/lib/sse'
 import { Progress } from '@/components/ui/progress'
 import { useStore } from '@/lib/state'
 import { api } from '@/lib/api'
+import { versionShotMedia } from '@/lib/media'
 import type {
   SSEEventType,
   StateSnapshotData,
@@ -51,7 +52,7 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
 
       try {
         const detail = await api.getProject(projectId)
-        setShots(detail.shots)
+        setShots(detail.shots.map(versionShotMedia))
         setLastEventTime(Date.now())
       } catch {
         // ignore fetch errors
@@ -77,7 +78,7 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       setLastEventTime(Date.now())
       const snapshot = data as StateSnapshotData
       setCurrentProject(snapshot.project)
-      setShots(snapshot.shots)
+      setShots(snapshot.shots.map(versionShotMedia))
       setProgress(calculateProgress(snapshot.shots))
       setStatus(`当前状态: ${snapshot.project.status}`)
     })

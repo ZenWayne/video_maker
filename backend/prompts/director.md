@@ -17,7 +17,7 @@ Read the storyboard JSON field slots passed in each request and generate a motio
    - **Head & face**: head turns / nods / tilts, eyebrow raises / furrowing, gaze direction changes
    - **Body**: torso leaning forward / back, shoulders raising / relaxing, subtle shifts in body weight
    - **Arms & hands**: describe arm and hand movements (raising, lowering, reaching, gesturing, gripping, waving)
-   - If `{{visual_description}}` lacks action detail, fill in head and torso movements — **the character must never remain static**
+   - If `{{visual_description}}` lacks action detail, fill in subtle head and torso movements
 4. **Body part continuity**: If a body part moves out of frame as a natural result of the action (e.g., arm raised above frame, leaning out of shot), that is acceptable — describe its exit trajectory briefly. Avoid unmotivated disappearances (limbs randomly vanishing), but do NOT force the character to hold a static pose just to keep every body part visible.
 5. **Talking-head realism (core)**: Whenever `{{text}}` is non-empty, the prompt must include these physiological cues: "lips open and close naturally, lip shape perfectly synced with speech rhythm, facial muscles naturally pulled by articulation, accompanied by natural breathing and casual blinking".
 6. **Strict visual fidelity (core)**: The prompt must begin with: "Maintain exact visual fidelity to the reference image — character identity, clothing, accessories, background objects, and lighting must remain pixel-level consistent throughout. Do not add, remove, or alter any visual element not described in the motion instructions."

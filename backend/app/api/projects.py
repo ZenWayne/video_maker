@@ -199,6 +199,9 @@ async def create_project(
             }
             for s in project.shots
         ],
+        reference_voice_shot_id=project.reference_voice_shot_id,
+        reference_voice_path=to_media_url(project.reference_voice_path),
+        auto_voice_calibrate=project.auto_voice_calibrate,
         storyboard=storyboard,
     )
 
@@ -291,6 +294,9 @@ async def get_project(
             }
             for s in project.shots
         ],
+        reference_voice_shot_id=project.reference_voice_shot_id,
+        reference_voice_path=to_media_url(project.reference_voice_path),
+        auto_voice_calibrate=project.auto_voice_calibrate,
         storyboard=storyboard,
     )
 

@@ -42,6 +42,8 @@ export interface Project {
   final_video_path: string | null
   error_message: string | null
   reference_voice_shot_id: number | null
+  reference_voice_path: string | null
+  auto_voice_calibrate: boolean
   created_at: string
   updated_at: string
 }

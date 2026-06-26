@@ -28,6 +28,7 @@ interface ShotCardProps {
   prevLastFramePath?: string | null
   isReferenceVoice?: boolean
   hasReferenceVoice?: boolean
+  autoVoiceCalibrate?: boolean
   onSelect?: (shotId: number) => void
   onEditScript?: (shotId: number, newText: string, newVisual: string, newAlign: boolean) => void
   onEditPrompt?: (shotId: number, prompt: string) => void
@@ -84,6 +85,7 @@ export function ShotCard({
   onShotUpdated,
   isReferenceVoice,
   hasReferenceVoice,
+  autoVoiceCalibrate,
   onSetReferenceVoice,
   onVoiceConvert,
   onVoiceRevert,
@@ -798,6 +800,9 @@ export function ShotCard({
             <div className="flex items-center gap-2 text-sm text-blue-600 bg-blue-50 p-2 rounded">
               <Loader2 className="w-4 h-4 animate-spin" />
               正在转换音色...
+              {autoVoiceCalibrate && (
+                <span className="rounded bg-neutral-700 px-1 text-[10px] text-neutral-300">自动</span>
+              )}
             </div>
           )}
           {shot.vc_status === 'done' && (

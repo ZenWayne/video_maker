@@ -95,10 +95,11 @@ async def health_check():
 
 
 # Import and include routers
-from app.api import projects, pipeline, uploads, assets, stream, debug
+from app.api import projects, pipeline, uploads, assets, stream, debug, voice
 
 app.include_router(projects.router, prefix="/api")
 app.include_router(pipeline.router, prefix="/api")
+app.include_router(voice.router, prefix="/api")
 app.include_router(uploads.router, prefix="/api")
 app.include_router(assets.router, prefix="/api")
 app.include_router(stream.router, prefix="/api")

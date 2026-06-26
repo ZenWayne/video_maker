@@ -47,6 +47,7 @@ async def client(db_engine, db_session_factory, redis, monkeypatch, tmp_path):
     import app.db as db_module
     import app.api.stream as stream_module
     import app.api.pipeline as pipeline_module
+    import app.api.voice as voice_module
     from app.config import settings
 
     # Override DB session factory everywhere
@@ -64,6 +65,9 @@ async def client(db_engine, db_session_factory, redis, monkeypatch, tmp_path):
         return arq
 
     monkeypatch.setattr(pipeline_module, "_get_arq_redis", _fake_get_arq)
+    # voice routes were extracted to app.api.voice; they bind _get_arq_redis in
+    # their own namespace, so patch it there too (per-namespace mocking).
+    monkeypatch.setattr(voice_module, "_get_arq_redis", _fake_get_arq)
 
     # Override FastAPI DI
     async def override_session():
