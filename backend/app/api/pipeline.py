@@ -1132,6 +1132,71 @@ async def upload_tail_frame(
     }
 
 
+@router.post("/projects/{project_id}/shots/{shot_id}/extract-first-frame")
+async def extract_first_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Copy the shot's extracted first frame into custom_first_frame_path (ts_uuid filename)."""
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    src_str = shot.first_frame_path
+    if not src_str or not Path(src_str).exists():
+        raise HTTPException(status_code=400, detail="Shot has no first frame or file is missing")
+
+    dest_dir = shot_custom_frames_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
+    shutil.copy2(src_str, str(dest))
+
+    shot.custom_first_frame_path = str(dest)
+    await session.commit()
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/extract-last-frame")
+async def extract_last_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Copy the shot's extracted last frame into target_last_frame_path (ts_uuid filename, tf_status=done)."""
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    src_str = shot.last_frame_path
+    if not src_str or not Path(src_str).exists():
+        raise HTTPException(status_code=400, detail="Shot has no last frame or file is missing")
+
+    dest_dir = shot_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
+    shutil.copy2(src_str, str(dest))
+
+    shot.target_last_frame_path = str(dest)
+    shot.tf_status = "done"
+    await session.commit()
+    return {
+        "shot_id": shot_id,
+        "target_last_frame_path": to_media_url(str(dest)),
+        "tf_status": "done",
+    }
+
+
 @router.delete("/projects/{project_id}/shots/{shot_id}/first-frame")
 async def delete_first_frame(
     project_id: str,
