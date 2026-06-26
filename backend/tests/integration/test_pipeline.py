@@ -252,7 +252,7 @@ async def test_regenerate_shots_no_user_header(client, project_in_shot_review):
 
 async def test_continue_generation_success(client, db_session_factory):
     # shot_review with some pending shots → 202
-    # Shot 2 is connected (align_with_previous=true by default), so tail frame first
+    # Path-as-truth: continue-generation always enqueues run_shot_pipeline (no auto tail-frame).
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, shot_id=1, status="completed")
     await _add_shot(db_session_factory, pid, shot_id=2, status="pending")
@@ -262,7 +262,7 @@ async def test_continue_generation_success(client, db_session_factory):
     p = (await client.get(f"/api/projects/{pid}")).json()
     assert p["status"] == "shot_generating"
     client.arq.enqueue_job.assert_called_with(
-        "run_tail_frame_pipeline", pid, 2, f"user:{USER}"
+        "run_shot_pipeline", pid, f"user:{USER}"
     )
 
 
