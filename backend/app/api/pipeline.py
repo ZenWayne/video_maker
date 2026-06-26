@@ -38,16 +38,6 @@ from app.services.events import publish_event
 router = APIRouter()
 
 
-def _shot_needs_tail_frame(shot: Shot) -> bool:
-    """Check if a shot should go through tail frame generation before video."""
-    if shot.tf_confirmed:
-        return False  # already confirmed
-    if shot.skip_tail_frame:
-        return False  # user explicitly chose to skip tail frame, use first frame only
-    # Shot 1 or connected shots need tail frames
-    return shot.shot_id == 1 or shot.align_with_previous
-
-
 def _reset_tail_frame(shot: Shot, *, skip: bool) -> None:
     """Clear a shot's tail-frame state in one place.
 
@@ -64,7 +54,11 @@ def _reset_tail_frame(shot: Shot, *, skip: bool) -> None:
 async def _enqueue_next_shot_task(
     project_id: str, session: AsyncSession, arq, user: str
 ) -> str:
-    """Pick the next pending shot and enqueue the right task (tail frame or video).
+    """Pick the next pending shot and enqueue the video pipeline task.
+
+    Path-as-truth: tail frame use is decided inside the worker (resolve_tail_frame).
+    Auto tail-frame generation is no longer triggered here — use the explicit
+    generate-tail-frame endpoint instead.
 
     Returns the enqueued job name.
     """
@@ -81,18 +75,8 @@ async def _enqueue_next_shot_task(
     if not shot:
         return "none"
 
-    if _shot_needs_tail_frame(shot):
-        shot.tf_status = "generating"
-        shot.tf_confirmed = False
-        session.add(shot)
-        await session.commit()
-        await arq.enqueue_job(
-            "run_tail_frame_pipeline", project_id, shot.shot_id, f"user:{user}"
-        )
-        return "run_tail_frame_pipeline"
-    else:
-        await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}")
-        return "run_shot_pipeline"
+    await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}")
+    return "run_shot_pipeline"
 
 
 def _require_user(x_user_name: Optional[str] = Header(default=None)) -> str:
@@ -323,8 +307,9 @@ async def regenerate_shots(
     # Reset specified shots to PENDING and clear post-processing state.
     # Keep motion_prompt / first_frame_path so the re-run reuses the existing
     # director take and first frame instead of regenerating them.
-    # The confirmed target tail frame is kept when its file still exists so
-    # "连续" shots still converge on the same endpoint.
+    # Path-as-truth: target_last_frame_path is left EXACTLY as stored.
+    # Whether the tail frame is actually used is decided by the worker
+    # (resolve_tail_frame checks file presence at run time).
     result = await session.execute(
         select(Shot).where(
             Shot.project_id == project_id,
@@ -340,36 +325,12 @@ async def regenerate_shots(
         shot.vc_error_message = None
         shot.cc_status = None
         shot.cc_error_message = None
-
-        has_valid_tail_frame = (
-            shot.target_last_frame_path
-            and Path(shot.target_last_frame_path).exists()
-        )
-        logger.info(
-            "regenerate shot %d: target_last_frame_path=%s exists=%s has_valid=%s",
-            shot.shot_id,
-            shot.target_last_frame_path,
-            Path(shot.target_last_frame_path).exists() if shot.target_last_frame_path else "N/A",
-            has_valid_tail_frame,
-        )
-        if has_valid_tail_frame:
-            # Keep the confirmed target tail frame for continuity.
-            shot.tf_status = "done"
-            shot.tf_error_message = None
-            shot.tf_confirmed = True
-        else:
-            # No confirmed tail frame: 生成分镜 generates video directly,
-            # skipping tail-frame generation (skip=True routes to run_shot_pipeline).
-            shot.tf_status = None
-            shot.tf_error_message = None
-            shot.tf_confirmed = False
-            shot.target_last_frame_path = None
-            shot.skip_tail_frame = True
-
+        # target_last_frame_path and tf_confirmed are intentionally NOT touched here.
+        # The worker decides whether to use the tail frame based on file presence.
         session.add(shot)
     await session.commit()
 
-    # Enqueue tail frame or video pipeline for the first pending shot
+    # Enqueue video pipeline for the first pending shot
     arq = await _get_arq_redis(redis)
     job = await _enqueue_next_shot_task(project_id, session, arq, user)
 
@@ -385,9 +346,9 @@ async def continue_generation(
 ):
     """Continue generating the next pending shot (approve current, generate next).
 
-    Unlike approve-script, this does NOT auto-generate tail frames.
-    The user is expected to have already generated and confirmed tail frames
-    for shots that need them before clicking continue.
+    Path-as-truth: tail frame use is decided by the worker (resolve_tail_frame).
+    No tail-frame confirmation gate is enforced here — the worker picks up any
+    target_last_frame_path that is already set.
     """
     project = await _get_project_or_404(project_id, session)
 
@@ -407,13 +368,6 @@ async def continue_generation(
     next_shot = result.scalar_one_or_none()
     if not next_shot:
         raise HTTPException(status_code=400, detail="No pending shots to generate")
-
-    # Validate: if the shot needs a tail frame, it must be confirmed already
-    if _shot_needs_tail_frame(next_shot):
-        raise HTTPException(
-            status_code=400,
-            detail=f"镜头 #{next_shot.shot_id} 需要先生成并确认尾帧",
-        )
 
     try:
         await transition_project_status(
