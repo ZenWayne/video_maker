@@ -356,7 +356,9 @@ async def run_shot_pipeline(
                 ref_paths = _json.loads(shot.custom_reference_paths)
 
             # Use previous shot's last frame as first_frame
-            if shot.use_prev_last_frame and shot.shot_id > 1:
+            # Guard: do NOT override when the user has set a custom first frame.
+            # custom_first_frame_path is authoritative (path-as-truth).
+            if shot.use_prev_last_frame and shot.shot_id > 1 and not shot.custom_first_frame_path:
                 prev_result = await session.execute(
                     select(Shot).where(
                         Shot.project_id == project_id,
