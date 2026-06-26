@@ -2,8 +2,9 @@
 
 'use client'
 
-import { useState, useRef } from 'react'
-import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Play, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User, Trash2 } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import type { ComponentType } from 'react'
+import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Play, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User, ChevronDown, Crop, Upload } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -16,6 +17,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { TrimDialog } from '@/components/TrimDialog'
 import type { AspectRatio, Shot, ShotStatus } from '@/lib/types'
 
@@ -42,9 +49,111 @@ interface ShotCardProps {
   onCharacterCalibrate?: (shotId: number) => void
   onCharacterCalibrateRevert?: (shotId: number) => void
   onGenerateTailFrame?: (shotId: number) => void
-  onConfirmTailFrame?: (shotId: number) => void
-  onExtractTailFrame?: (shotId: number) => void
   onDeleteTailFrame?: (shotId: number) => void
+}
+
+interface KeyframeMenuItem {
+  icon: ComponentType<{ className?: string }>
+  label: string
+  disabled?: boolean
+  onClick: () => void
+}
+
+/** 关键帧槽：缩略图 + hover 右上角 × 删除 + 「<label> ▾」分层菜单（单击即执行）。 */
+function KeyframeSlot({
+  label,
+  accent,
+  imgUrl,
+  generating,
+  failed,
+  menuItems,
+  onDelete,
+  onPreview,
+  onRetry,
+}: {
+  label: string
+  accent: 'zinc' | 'indigo'
+  imgUrl?: string | null
+  generating?: boolean
+  failed?: boolean
+  menuItems: KeyframeMenuItem[]
+  onDelete?: () => void
+  onPreview?: (url: string) => void
+  onRetry?: () => void
+}) {
+  const isIndigo = accent === 'indigo'
+  // 路径已设置但文件 404（path-as-truth 前的过期数据）→ 视作空，显示占位而非裂图
+  const [imgError, setImgError] = useState(false)
+  useEffect(() => { setImgError(false) }, [imgUrl])
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <div className="relative group">
+        <div
+          className={`w-16 h-16 rounded overflow-hidden flex items-center justify-center bg-zinc-200 ${
+            isIndigo ? 'border-2 border-indigo-400' : 'border border-zinc-200'
+          }`}
+        >
+          {imgUrl && !imgError ? (
+            <img
+              src={imgUrl}
+              alt={label}
+              className="w-full h-full object-cover cursor-pointer hover:ring-2 hover:ring-offset-0 hover:ring-indigo-500"
+              onClick={() => onPreview?.(imgUrl)}
+              onError={() => setImgError(true)}
+            />
+          ) : (
+            <ImagePlus className="w-5 h-5 text-zinc-400" />
+          )}
+          {generating && (
+            <div className="absolute inset-0 bg-white/70 flex items-center justify-center">
+              <Loader2 className="w-5 h-5 animate-spin text-indigo-600" />
+            </div>
+          )}
+        </div>
+        {imgUrl && onDelete && !generating && (
+          <button
+            type="button"
+            title={`删除${label}`}
+            onClick={onDelete}
+            className="absolute -top-1.5 -right-1.5 w-[18px] h-[18px] rounded-full bg-red-500 text-white shadow opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+          >
+            <X className="w-2.5 h-2.5" />
+          </button>
+        )}
+      </div>
+      {failed ? (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="flex items-center gap-0.5 text-[11px] text-red-600 hover:text-red-700"
+        >
+          <RefreshCw className="w-3 h-3" />重试
+        </button>
+      ) : (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            className={`flex items-center gap-1 px-2 py-0.5 rounded border text-xs bg-white hover:bg-zinc-50 ${
+              isIndigo ? 'border-indigo-300 text-indigo-600' : 'border-zinc-300 text-zinc-700'
+            }`}
+          >
+            {label}
+            <ChevronDown className="w-3 h-3" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            {menuItems.map((it, i) => {
+              const Icon = it.icon
+              return (
+                <DropdownMenuItem key={i} disabled={it.disabled} onClick={it.onClick}>
+                  <Icon className="w-3.5 h-3.5 mr-2" />
+                  {it.label}
+                </DropdownMenuItem>
+              )
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+    </div>
+  )
 }
 
 const shotTypeLabels: Record<string, string> = {
@@ -92,8 +201,6 @@ export function ShotCard({
   onCharacterCalibrate,
   onCharacterCalibrateRevert,
   onGenerateTailFrame,
-  onConfirmTailFrame,
-  onExtractTailFrame,
   onDeleteTailFrame,
 }: ShotCardProps) {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
@@ -116,7 +223,56 @@ export function ShotCard({
   const [isTrimOpen, setIsTrimOpen] = useState(false)
   const [videoVersion, setVideoVersion] = useState(0)
   const refUploadRef = useRef<HTMLInputElement>(null)
+  const firstFrameInputRef = useRef<HTMLInputElement>(null)
+  const tailFrameInputRef = useRef<HTMLInputElement>(null)
   const [aiError, setAiError] = useState('')
+
+  // ── 关键帧管理（path-as-truth）：首帧 = custom_first_frame_path，尾帧 = target_last_frame_path ──
+  const handleUploadFirstFrame = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !projectId) return
+    try {
+      const r = await api.uploadFirstFrame(projectId, shot.shot_id, file)
+      onShotUpdated?.(shot.shot_id, { custom_first_frame_path: r.custom_first_frame_path })
+    } catch { /* handled by parent */ } finally {
+      if (firstFrameInputRef.current) firstFrameInputRef.current.value = ''
+    }
+  }
+
+  const handleUploadTailFrame = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !projectId) return
+    try {
+      const r = await api.uploadTailFrame(projectId, shot.shot_id, file)
+      onShotUpdated?.(shot.shot_id, { target_last_frame_path: r.target_last_frame_path, tf_status: 'done' })
+    } catch { /* handled by parent */ } finally {
+      if (tailFrameInputRef.current) tailFrameInputRef.current.value = ''
+    }
+  }
+
+  const handleExtractFirstFrame = async () => {
+    if (!projectId) return
+    try {
+      const r = await api.extractFirstFrame(projectId, shot.shot_id)
+      onShotUpdated?.(shot.shot_id, { custom_first_frame_path: r.custom_first_frame_path })
+    } catch { /* handled by parent */ }
+  }
+
+  const handleExtractLastFrame = async () => {
+    if (!projectId) return
+    try {
+      const r = await api.extractLastFrame(projectId, shot.shot_id)
+      onShotUpdated?.(shot.shot_id, { target_last_frame_path: r.target_last_frame_path, tf_status: 'done' })
+    } catch { /* handled by parent */ }
+  }
+
+  const handleDeleteFirstFrame = async () => {
+    if (!projectId) return
+    try {
+      await api.deleteFirstFrame(projectId, shot.shot_id)
+      onShotUpdated?.(shot.shot_id, { custom_first_frame_path: null })
+    } catch { /* handled by parent */ }
+  }
 
   const handleSaveScript = () => {
     onEditScript?.(shot.shot_id, editText, editVisual, editAlign)
@@ -244,6 +400,16 @@ export function ShotCard({
     : shot.custom_first_frame_path
       ? [shot.custom_first_frame_path]
       : []
+
+  // 首帧槽显示：用户上传/提取的首帧（落在 custom_frames/）为真实覆盖，直接显示；
+  // 否则连续镜头显示上一镜头的“当前”末帧（prevLastFramePath 带 ?t= 缓存戳，会随上一镜重生成自动刷新），
+  // 兜底回到 custom_first_frame_path（覆盖 shot 1 的角色参考图，无上一镜）。
+  const firstFrameIsUserOverride = !!shot.custom_first_frame_path?.includes('custom_frames')
+  const firstFrameUrl = firstFrameIsUserOverride
+    ? shot.custom_first_frame_path
+    : shot.use_prev_last_frame && prevLastFramePath
+      ? prevLastFramePath
+      : shot.custom_first_frame_path
 
   // Edit dialog (shared between script and review variants)
   const editDialog = (
@@ -671,129 +837,7 @@ export function ShotCard({
             />
           </div>
 
-          {/* 尾帧生成状态 */}
-          {shot.tf_status === 'generating' && (
-            <div className="flex items-center gap-2 text-sm text-indigo-600 bg-indigo-50 p-2 rounded">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              正在生成目标尾帧...
-            </div>
-          )}
-          {shot.tf_status === 'done' && !shot.tf_confirmed && (
-            <div className="space-y-2 p-2 bg-indigo-50 rounded border border-indigo-200">
-              <div className="flex items-center gap-3">
-                {shot.target_last_frame_path && (
-                  <img
-                    src={shot.target_last_frame_path}
-                    alt="目标尾帧"
-                    className="w-16 h-16 object-cover rounded cursor-pointer border-2 border-dashed border-indigo-400 hover:ring-2 hover:ring-indigo-500"
-                    onClick={() => setPreviewUrl(shot.target_last_frame_path)}
-                  />
-                )}
-                <div className="flex-1 space-y-1">
-                  <div className="text-xs font-medium text-indigo-700">目标尾帧已生成</div>
-                  <div className="flex items-center gap-2">
-                    {onConfirmTailFrame && (
-                      <Button
-                        size="sm"
-                        className="h-7 px-3 text-xs bg-indigo-600 hover:bg-indigo-700 text-white"
-                        onClick={() => onConfirmTailFrame(shot.shot_id)}
-                      >
-                        <Sparkles className="w-3 h-3 mr-1" />确认并生成视频
-                      </Button>
-                    )}
-                    {onGenerateTailFrame && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-xs text-indigo-600"
-                        onClick={() => onGenerateTailFrame(shot.shot_id)}
-                      >
-                        <RefreshCw className="w-3 h-3 mr-1" />重新生成
-                      </Button>
-                    )}
-                    {onDeleteTailFrame && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-xs text-red-600 hover:text-red-700"
-                        onClick={() => onDeleteTailFrame(shot.shot_id)}
-                      >
-                        <Trash2 className="w-3 h-3 mr-1" />删除尾帧
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-          {shot.tf_status === 'done' && shot.tf_confirmed && shot.target_last_frame_path && (
-            <div className="flex items-center justify-between text-sm text-indigo-700 bg-indigo-50 p-2 rounded">
-              <div className="flex items-center gap-2">
-                <img
-                  src={shot.target_last_frame_path}
-                  alt="目标尾帧"
-                  className="w-10 h-10 object-cover rounded cursor-pointer border-2 border-dashed border-indigo-400"
-                  onClick={() => setPreviewUrl(shot.target_last_frame_path)}
-                />
-                <span>尾帧已确认</span>
-              </div>
-              <div className="flex items-center gap-1">
-                {onGenerateTailFrame && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs text-indigo-600 hover:text-indigo-800"
-                    onClick={() => onGenerateTailFrame(shot.shot_id)}
-                  >
-                    <RefreshCw className="w-3 h-3 mr-1" />重新生成尾帧
-                  </Button>
-                )}
-                {onDeleteTailFrame && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs text-red-600 hover:text-red-700"
-                    onClick={() => onDeleteTailFrame(shot.shot_id)}
-                  >
-                    <Trash2 className="w-3 h-3 mr-1" />删除尾帧
-                  </Button>
-                )}
-              </div>
-            </div>
-          )}
-          {shot.tf_status === 'failed' && (
-            <div className="text-sm text-red-600 bg-red-50 p-2 rounded space-y-1">
-              <div className="flex items-center gap-1">
-                <AlertTriangle className="w-3 h-3" />
-                尾帧生成失败
-              </div>
-              {shot.tf_error_message && (
-                <p className="text-xs text-red-500">{shot.tf_error_message}</p>
-              )}
-              <div className="flex items-center gap-2">
-                {onGenerateTailFrame && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs"
-                    onClick={() => onGenerateTailFrame(shot.shot_id)}
-                  >
-                    <RefreshCw className="w-3 h-3 mr-1" />重试
-                  </Button>
-                )}
-                {onDeleteTailFrame && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs text-red-600 hover:text-red-700"
-                    onClick={() => onDeleteTailFrame(shot.shot_id)}
-                  >
-                    <Trash2 className="w-3 h-3 mr-1" />删除尾帧
-                  </Button>
-                )}
-              </div>
-            </div>
-          )}
+          {/* 尾帧 generating/failed 状态已并入下方「关键帧管理」控件 */}
 
           {/* 音色状态指示器 */}
           {shot.vc_status === 'converting' && (
@@ -896,28 +940,38 @@ export function ShotCard({
             </div>
           )}
 
-          {/* 视频尾帧 + 目标尾帧对比 */}
-          {shot.video_path && shot.last_frame_path && (
-            <div className="flex items-center gap-3 p-2 bg-zinc-50 rounded border">
-              <div className="flex flex-col items-center gap-1">
-                <img
-                  src={shot.last_frame_path}
-                  alt="视频尾帧"
-                  className="w-16 h-16 object-cover rounded cursor-pointer hover:ring-2 hover:ring-blue-500 border"
-                  onClick={() => setPreviewUrl(shot.last_frame_path)}
-                />
-                <span className="text-[10px] text-zinc-500">视频尾帧</span>
-              </div>
-              {shot.target_last_frame_path && (
-                <div className="flex flex-col items-center gap-1">
-                  <img
-                    src={shot.target_last_frame_path}
-                    alt="目标尾帧"
-                    className="w-16 h-16 object-cover rounded cursor-pointer hover:ring-2 hover:ring-indigo-500 border-2 border-dashed border-indigo-400"
-                    onClick={() => setPreviewUrl(shot.target_last_frame_path)}
-                  />
-                  <span className="text-[10px] text-indigo-500">目标尾帧</span>
-                </div>
+          {/* 关键帧管理：首帧（custom_first_frame_path）/ 尾帧（target_last_frame_path）*/}
+          {projectId && (
+            <div className="flex items-start gap-4 p-3 bg-zinc-50 rounded border">
+              <input ref={firstFrameInputRef} type="file" accept="image/*" className="hidden" onChange={handleUploadFirstFrame} />
+              <input ref={tailFrameInputRef} type="file" accept="image/*" className="hidden" onChange={handleUploadTailFrame} />
+              <KeyframeSlot
+                label="首帧"
+                accent="zinc"
+                imgUrl={firstFrameUrl}
+                onPreview={setPreviewUrl}
+                onDelete={handleDeleteFirstFrame}
+                menuItems={[
+                  { icon: Crop, label: '提取本镜首帧', disabled: !shot.first_frame_path, onClick: handleExtractFirstFrame },
+                  { icon: Upload, label: '上传首帧', onClick: () => firstFrameInputRef.current?.click() },
+                ]}
+              />
+              <KeyframeSlot
+                label="尾帧"
+                accent="indigo"
+                imgUrl={shot.target_last_frame_path}
+                generating={shot.tf_status === 'generating'}
+                failed={shot.tf_status === 'failed'}
+                onPreview={setPreviewUrl}
+                onDelete={onDeleteTailFrame ? () => onDeleteTailFrame(shot.shot_id) : undefined}
+                onRetry={onGenerateTailFrame ? () => onGenerateTailFrame(shot.shot_id) : undefined}
+                menuItems={[
+                  { icon: Crop, label: '提取本镜尾帧', disabled: !shot.last_frame_path, onClick: handleExtractLastFrame },
+                  { icon: Upload, label: '上传尾帧', onClick: () => tailFrameInputRef.current?.click() },
+                ]}
+              />
+              {shot.tf_status === 'failed' && shot.tf_error_message && (
+                <span className="text-[11px] text-red-500 mt-1">{shot.tf_error_message}</span>
               )}
             </div>
           )}
@@ -999,15 +1053,6 @@ export function ShotCard({
                   onClick={() => onGenerateTailFrame(shot.shot_id)}
                 >
                   <Sparkles className="w-4 h-4 mr-1" />生成尾帧
-                </Button>
-              )}
-              {shot.video_path && shot.last_frame_path && onExtractTailFrame && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => onExtractTailFrame(shot.shot_id)}
-                >
-                  <ImagePlus className="w-4 h-4 mr-1" />视频尾帧→目标
                 </Button>
               )}
               {(shot.status === 'completed' || shot.status === 'failed' || shot.status === 'pending') && onRedraw && (

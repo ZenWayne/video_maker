@@ -79,6 +79,27 @@ async function request<T>(
   return response.json()
 }
 
+// 单文件 multipart 上传（字段名固定为 `file`）
+async function uploadSingle<T>(path: string, file: File): Promise<T> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const headers: Record<string, string> = {}
+  const userName = getUserName()
+  if (userName) headers['X-User-Name'] = userName
+
+  const response = await fetch(`${BASE}${path}`, { method: 'POST', headers, body: formData })
+  if (!response.ok) {
+    let errorData: { error?: APIError; detail?: string }
+    try { errorData = await response.json() } catch {
+      throw new APIErrorClass({ code: 'UPLOAD_ERROR', message: `Upload failed: ${response.status}` })
+    }
+    throw new APIErrorClass(
+      errorData.error ?? (errorData.detail ? { code: 'UPLOAD_ERROR', message: errorData.detail } : { code: 'UPLOAD_ERROR', message: 'Upload failed' })
+    )
+  }
+  return response.json()
+}
+
 // 项目管理
 export const api = {
   // 获取项目列表
@@ -418,9 +439,36 @@ export const api = {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/confirm-tail-frame`)
   },
 
-  // 删除尾帧（清空尾帧状态，不自动生成视频）
-  deleteTailFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; skip_tail_frame: boolean; tf_status: null }> => {
+  // 删除尾帧（清空 target_last_frame_path + tf_status，path-as-truth）
+  deleteTailFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; target_last_frame_path: null; tf_status: null }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/delete-tail-frame`)
+  },
+
+  // ── 关键帧管理（首帧 = custom_first_frame_path，尾帧 = target_last_frame_path）──
+
+  // 上传首帧（ts_uuid 命名）
+  uploadFirstFrame: (projectId: string, shotId: number, file: File): Promise<{ shot_id: number; custom_first_frame_path: string }> => {
+    return uploadSingle(`/api/projects/${projectId}/shots/${shotId}/upload-first-frame`, file)
+  },
+
+  // 上传尾帧（ts_uuid 命名，写 tf_status=done）
+  uploadTailFrame: (projectId: string, shotId: number, file: File): Promise<{ shot_id: number; target_last_frame_path: string; tf_status: string }> => {
+    return uploadSingle(`/api/projects/${projectId}/shots/${shotId}/upload-tail-frame`, file)
+  },
+
+  // 提取本镜首帧 → 首帧配置
+  extractFirstFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; custom_first_frame_path: string }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/extract-first-frame`)
+  },
+
+  // 提取本镜尾帧 → 尾帧配置
+  extractLastFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; target_last_frame_path: string; tf_status: string }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/extract-last-frame`)
+  },
+
+  // 删除首帧（清空 custom_first_frame_path + unlink）
+  deleteFirstFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; custom_first_frame_path: null }> => {
+    return request('DELETE', `/api/projects/${projectId}/shots/${shotId}/first-frame`)
   },
 
   // 还原人物校准

@@ -284,7 +284,7 @@ export default function ShotsPage() {
     try {
       await api.approveScript(projectId)
       setStatus('shot_generating')
-      addToast({ type: 'success', message: '开始生成尾帧' })
+      addToast({ type: 'success', message: '开始生成视频' })
     } catch (error) {
       addToast({
         type: 'error',
@@ -548,40 +548,7 @@ export default function ShotsPage() {
     }
   }
 
-  // 确认尾帧并生成视频
-  const handleConfirmTailFrame = async (shotId: number) => {
-    if (!projectId) return
-    try {
-      await api.confirmTailFrame(projectId, shotId)
-      updateShot(shotId, { tf_confirmed: true })
-      setStatus('shot_generating')
-      addToast({ type: 'success', message: `镜头 #${shotId} 尾帧已确认，开始生成视频` })
-    } catch (error) {
-      addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : '确认失败',
-      })
-    }
-  }
-
-  // 从视频提取尾帧
-  const handleExtractTailFrame = async (shotId: number) => {
-    if (!projectId) return
-    try {
-      const result = await api.extractTailFrame(projectId, shotId)
-      updateShot(shotId, {
-        target_last_frame_path: `${result.target_last_frame_path}?t=${Date.now()}`,
-        tf_status: 'done' as const,
-        tf_confirmed: false,
-      })
-      addToast({ type: 'success', message: `镜头 #${shotId} 视频尾帧已提取为目标尾帧` })
-    } catch (error) {
-      addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : '提取失败',
-      })
-    }
-  }
+  // 确认尾帧/提取尾帧 已移除（path-as-truth：尾帧上传/提取/删除在 ShotCard 内联调用对应端点）
 
   // 删除尾帧（清空尾帧状态，不自动生成视频）
   const handleDeleteTailFrame = async (shotId: number) => {
@@ -692,8 +659,6 @@ export default function ShotsPage() {
                   onCharacterCalibrate={handleCharacterCalibrate}
                   onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
                   onGenerateTailFrame={handleGenerateTailFrame}
-                  onConfirmTailFrame={handleConfirmTailFrame}
-                  onExtractTailFrame={handleExtractTailFrame}
                   onDeleteTailFrame={handleDeleteTailFrame}
                 />
               )
@@ -858,15 +823,13 @@ export default function ShotsPage() {
                 onEditPrompt={handleEditPrompt}
                 onRedraw={handleRedrawShot}
                 onShotUpdated={handleShotUpdated}
-                onSetReferenceVoice={status !== 'script_review' ? handleSetReferenceVoice : undefined}
-                onVoiceConvert={status !== 'script_review' ? handleVoiceConvert : undefined}
-                onVoiceRevert={status !== 'script_review' ? handleVoiceRevert : undefined}
-                onCharacterCalibrate={status !== 'script_review' ? handleCharacterCalibrate : undefined}
-                onCharacterCalibrateRevert={status !== 'script_review' ? handleCharacterCalibrateRevert : undefined}
-                onGenerateTailFrame={status !== 'script_review' ? handleGenerateTailFrame : undefined}
-                onConfirmTailFrame={status !== 'script_review' ? handleConfirmTailFrame : undefined}
-                onExtractTailFrame={status !== 'script_review' ? handleExtractTailFrame : undefined}
-                onDeleteTailFrame={status !== 'script_review' ? handleDeleteTailFrame : undefined}
+                onSetReferenceVoice={handleSetReferenceVoice}
+                onVoiceConvert={handleVoiceConvert}
+                onVoiceRevert={handleVoiceRevert}
+                onCharacterCalibrate={handleCharacterCalibrate}
+                onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
+                onGenerateTailFrame={handleGenerateTailFrame}
+                onDeleteTailFrame={handleDeleteTailFrame}
               />
             )
           })}
@@ -901,7 +864,7 @@ export default function ShotsPage() {
                 ) : (
                   <>
                     <CheckCircle className="w-4 h-4 mr-2" />
-                    通过，开始生成尾帧
+                    通过，开始生成视频
                   </>
                 )}
               </Button>
