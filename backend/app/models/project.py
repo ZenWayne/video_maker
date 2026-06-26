@@ -53,7 +53,7 @@ class Project(Base):
     theme_text = Column(Text, nullable=False)
     creator_name = Column(Text, nullable=False)
     status = Column(String(20), nullable=False, default=ProjectStatus.DRAFT.value)
-    aspect_ratio = Column(String(10), nullable=False, default="16:9")
+    aspect_ratio = Column(String(10), nullable=False, default="9:16")
     scene_overview = Column(Text, nullable=True)
     storyboard_path = Column(Text, nullable=True)
     final_video_path = Column(Text, nullable=True)

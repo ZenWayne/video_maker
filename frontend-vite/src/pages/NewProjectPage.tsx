@@ -18,7 +18,7 @@ export default function NewProjectPage() {
 
   const [title, setTitle] = useState('')
   const [themeText, setThemeText] = useState('')
-  const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('16:9')
+  const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('9:16')
   const [characterImages, setCharacterImages] = useState<File[]>([])
   const [sceneImages, setSceneImages] = useState<File[]>([])
 
