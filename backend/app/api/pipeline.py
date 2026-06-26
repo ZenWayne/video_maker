@@ -1132,6 +1132,48 @@ async def upload_tail_frame(
     }
 
 
+@router.delete("/projects/{project_id}/shots/{shot_id}/first-frame")
+async def delete_first_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete a shot's custom first frame, clearing the config and unlinking the file.
+
+    Captures the DB-stored path before clearing, then removes the physical file
+    (covers both uploaded ts_uuid filenames and other paths).
+    Path-as-truth: whether a custom first frame is used is decided by checking
+    custom_first_frame_path. Does NOT touch other fields.
+    """
+    await _get_project_or_404(project_id, session)
+
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    # Capture the stored path BEFORE clearing — needed for unlink below
+    old_path = shot.custom_first_frame_path
+
+    # Clear the custom first frame path
+    shot.custom_first_frame_path = None
+    session.add(shot)
+    await session.commit()
+
+    # Remove the physical file at the DB-stored path (covers ts_uuid filenames
+    # from uploaded frames)
+    if old_path:
+        Path(old_path).unlink(missing_ok=True)
+
+    return {
+        "shot_id": shot_id,
+        "custom_first_frame_path": None,
+    }
+
+
 @router.put("/projects/{project_id}/shots/{shot_id}/reference-images/reorder")
 async def reorder_shot_references(
     project_id: str,
