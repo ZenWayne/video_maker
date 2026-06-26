@@ -38,17 +38,17 @@ from app.services.events import publish_event
 router = APIRouter()
 
 
-def _reset_tail_frame(shot: Shot, *, skip: bool) -> None:
+def _reset_tail_frame(shot: Shot) -> None:
     """Clear a shot's tail-frame state in one place.
 
-    ``skip=True``  → 中性删除：清空尾帧，不再自动走尾帧流程（仅用首帧出视频）。
-    ``skip=False`` → 重新启用尾帧流程（重新生成）。
+    Clears tf_status, target_last_frame_path, and tf_error_message.
+    Does NOT touch skip_tail_frame — path-as-truth: a tail frame is used
+    iff target_last_frame_path is set (decided by resolve_tail_frame in worker).
     """
     shot.tf_status = None
     shot.tf_confirmed = False
     shot.target_last_frame_path = None
     shot.tf_error_message = None
-    shot.skip_tail_frame = skip
 
 
 async def _enqueue_next_shot_task(
@@ -808,7 +808,7 @@ async def generate_tail_frame(
     except InvalidTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    _reset_tail_frame(shot, skip=False)  # re-enable tail frame flow on re-generate
+    _reset_tail_frame(shot)  # re-enable tail frame flow on re-generate
     shot.tf_status = "generating"
     session.add(shot)
     await session.commit()
@@ -874,12 +874,12 @@ async def delete_tail_frame(
 ):
     """Delete a shot's target tail frame, returning it to a neutral state.
 
-    Clears all tail frame state, sets ``skip_tail_frame = True`` (so a later video
-    generation uses first-frame-only), and removes the ``target_last_frame.png`` file.
-    Does NOT transition the project or enqueue video generation — the shot simply
-    returns to a state where the user can re-generate a tail frame or proceed.
-    The "生成尾帧" entry re-appears (``tf_status`` is cleared) and re-generating
-    overwrites via ``skip_tail_frame = False``.
+    Clears target_last_frame_path and tf_status (path-as-truth: the worker
+    decides to use a tail frame only when target_last_frame_path is set).
+    Removes the file at the DB-stored path so uploaded/extracted frames (which
+    use ts_uuid filenames) are cleaned up correctly — not just the canonical name.
+    Does NOT set skip_tail_frame. Does NOT transition the project or enqueue
+    video generation.
     """
     await _get_project_or_404(project_id, session)
 
@@ -897,18 +897,22 @@ async def delete_tail_frame(
             detail="Tail frame is currently being generated; wait for it to complete",
         )
 
-    # Clear all tail-frame state; skip=True keeps the shot on first-frame-only video
-    _reset_tail_frame(shot, skip=True)
+    # Capture the stored path BEFORE clearing — needed for unlink below
+    old_path = shot.target_last_frame_path
+
+    # Clear all tail-frame state (path-as-truth: no skip_tail_frame needed)
+    _reset_tail_frame(shot)
     session.add(shot)
     await session.commit()
 
-    # Remove the physical tail-frame file (deterministic canonical path)
-    from app.services.storage import shot_target_last_frame_path
-    shot_target_last_frame_path(project_id, shot_id).unlink(missing_ok=True)
+    # Remove the physical file at the DB-stored path (covers both AI-generated
+    # canonical names and ts_uuid filenames from uploaded/extracted frames)
+    if old_path:
+        Path(old_path).unlink(missing_ok=True)
 
     return {
         "shot_id": shot_id,
-        "skip_tail_frame": True,
+        "target_last_frame_path": None,
         "tf_status": None,
     }
 

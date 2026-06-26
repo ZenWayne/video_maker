@@ -528,7 +528,8 @@ async def test_delete_tail_frame_clears_state_without_generating_video(
     )
     assert r.status_code in (200, 202)
     body = r.json()
-    assert body["skip_tail_frame"] is True
+    # New return shape: target_last_frame_path + tf_status (no skip_tail_frame)
+    assert body["target_last_frame_path"] is None
     assert body["tf_status"] is None
 
     # Must NOT auto-generate video
@@ -538,12 +539,12 @@ async def test_delete_tail_frame_clears_state_without_generating_video(
     p = (await client.get(f"/api/projects/{pid}")).json()
     assert p["status"] == "shot_review"
 
-    # Shot tail-frame state fully cleared, skip flag set
+    # Shot tail-frame state fully cleared; skip_tail_frame NOT set by delete path
     shot = next(s for s in p["shots"] if s["shot_id"] == 1)
     assert shot["tf_status"] is None
     assert shot["tf_confirmed"] is False
     assert shot["target_last_frame_path"] is None
-    assert shot["skip_tail_frame"] is True
+    assert shot["skip_tail_frame"] is not True
 
     # Physical tail-frame file removed
     assert not path.exists()
