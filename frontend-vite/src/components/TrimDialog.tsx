@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Loader2, ChevronLeft, ChevronRight, Play, Square, Undo2, Crosshair } from 'lucide-react'
+import { Loader2, ChevronLeft, ChevronRight, Play, Square, Undo2, Crosshair, AudioLines } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -40,6 +40,8 @@ export function TrimDialog({
   const [isTrimming, setIsTrimming] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
   const [isAligning, setIsAligning] = useState(false)
+  const [isDetectingSilence, setIsDetectingSilence] = useState(false)
+  const [notice, setNotice] = useState('')
   const [isPreviewing, setIsPreviewing] = useState(false)
   const [hasBackup, setHasBackup] = useState(false)
   const [error, setError] = useState('')
@@ -121,6 +123,7 @@ export function TrimDialog({
     if (!open) return
     setIsLoading(true)
     setError('')
+    setNotice('')
     api.getVideoInfo(projectId, shot.shot_id).then((info) => {
       setFps(info.fps)
       setTotalFrames(info.total_frames)
@@ -215,6 +218,25 @@ export function TrimDialog({
       setError(e instanceof Error ? e.message : 'Align failed')
     } finally {
       setIsAligning(false)
+    }
+  }
+
+  const handleDetectSilence = async () => {
+    setIsDetectingSilence(true)
+    setError('')
+    setNotice('')
+    try {
+      const result = await api.detectSilence(projectId, shot.shot_id)
+      if (result.has_silence && result.suggested_end_frame != null) {
+        setEndFrame(result.suggested_end_frame)
+        seekToFrame(result.suggested_end_frame)
+      } else {
+        setNotice('无尾部静音可裁剪')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Silence detect failed')
+    } finally {
+      setIsDetectingSilence(false)
     }
   }
 
@@ -339,7 +361,7 @@ export function TrimDialog({
                     variant="outline"
                     size="sm"
                     onClick={handleRestore}
-                    disabled={isRestoring || isTrimming || isAligning || isPreviewing}
+                    disabled={isRestoring || isTrimming || isAligning || isPreviewing || isDetectingSilence}
                   >
                     {isRestoring ? (
                       <><Loader2 className="w-4 h-4 mr-1 animate-spin" />还原中...</>
@@ -353,7 +375,7 @@ export function TrimDialog({
                     variant="outline"
                     size="sm"
                     onClick={handleAlignTailFrame}
-                    disabled={isAligning || isTrimming || isRestoring || isPreviewing}
+                    disabled={isAligning || isTrimming || isRestoring || isPreviewing || isDetectingSilence}
                   >
                     {isAligning ? (
                       <><Loader2 className="w-4 h-4 mr-1 animate-spin" />校准中...</>
@@ -362,6 +384,18 @@ export function TrimDialog({
                     )}
                   </Button>
                 )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDetectSilence}
+                  disabled={isDetectingSilence || isTrimming || isAligning || isRestoring || isPreviewing}
+                >
+                  {isDetectingSilence ? (
+                    <><Loader2 className="w-4 h-4 mr-1 animate-spin" />检测中...</>
+                  ) : (
+                    <><AudioLines className="w-4 h-4 mr-1" />静音裁剪</>
+                  )}
+                </Button>
               </div>
               <div className="flex items-center gap-2">
                 <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -369,7 +403,7 @@ export function TrimDialog({
                 </Button>
                 <Button
                   onClick={handleTrim}
-                  disabled={isTrimming || endFrame >= totalFrames}
+                  disabled={isTrimming || isDetectingSilence || endFrame >= totalFrames}
                 >
                   {isTrimming ? (
                     <><Loader2 className="w-4 h-4 mr-1 animate-spin" />裁剪中...</>
@@ -382,6 +416,9 @@ export function TrimDialog({
 
             {error && (
               <p className="text-sm text-red-500">{error}</p>
+            )}
+            {notice && !error && (
+              <p className="text-sm text-zinc-500">{notice}</p>
             )}
           </div>
         )}

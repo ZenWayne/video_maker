@@ -336,6 +336,14 @@ export const api = {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/align-tail-frame`)
   },
 
+  // 静音裁剪建议（只读，返回建议帧，不实际裁剪）
+  detectSilence: (
+    projectId: string,
+    shotId: number
+  ): Promise<{ has_silence: boolean; suggested_end_frame: number | null; silence_start_time: number | null; fps: number; total_frames: number; duration: number }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/detect-silence`)
+  },
+
   // 设置基准音色
   setReferenceVoice: (projectId: string, shotId: number): Promise<{ reference_voice_shot_id: number }> => {
     return request('POST', `/api/projects/${projectId}/reference-voice`, { shot_id: shotId })

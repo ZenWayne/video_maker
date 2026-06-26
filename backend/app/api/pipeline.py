@@ -1377,6 +1377,39 @@ async def align_tail_frame(
     }
 
 
+@router.post("/projects/{project_id}/shots/{shot_id}/detect-silence")
+async def detect_silence(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Suggest a tail-trim point from trailing silence — read-only, no file writes.
+
+    Returns a suggested end frame for the frontend to preview; the actual trim
+    is performed later by the existing ``/trim`` endpoint when the user confirms.
+    """
+    from app.agents.video_trimmer import suggest_silence_trim, get_video_info
+
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot or not shot.video_path:
+        raise HTTPException(status_code=404, detail="Shot or video not found")
+
+    suggestion = suggest_silence_trim(shot.video_path)
+    if suggestion is None:
+        return {
+            "has_silence": False,
+            "suggested_end_frame": None,
+            "silence_start_time": None,
+            **get_video_info(shot.video_path),
+        }
+    return {"has_silence": True, **suggestion}
+
+
 # Voice cloning / 音色校准 routes moved to app/api/voice.py (see voice.router).
 
 
