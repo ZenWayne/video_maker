@@ -31,7 +31,7 @@ from app.services.state_machine import (
 from app.services.storage import (
     storyboard_path, archived_storyboard_path, shot_custom_frames_dir, to_media_url,
     shot_pre_vc_video_path, shot_audio_original_path, shot_audio_vc_path,
-    shot_pre_cc_last_frame_path, join_preview_path,
+    shot_pre_cc_last_frame_path, join_preview_path, shot_dir, ts_uuid_name,
 )
 from app.services.events import publish_event
 
@@ -1070,6 +1070,65 @@ def _ref_images_response(shot: Shot) -> dict:
             [to_media_url(p) for p in json.loads(shot.custom_reference_paths)]
             if shot.custom_reference_paths else None
         ),
+    }
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/upload-first-frame")
+async def upload_first_frame(
+    project_id: str,
+    shot_id: int,
+    file: UploadFile = File(...),
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Upload a custom first frame image for a shot (ts_uuid filename)."""
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    dest_dir = shot_custom_frames_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "x.png").suffix or ".png"
+    dest = dest_dir / ts_uuid_name(ext)
+    dest.write_bytes(await file.read())
+    shot.custom_first_frame_path = str(dest)
+    await session.commit()
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/upload-tail-frame")
+async def upload_tail_frame(
+    project_id: str,
+    shot_id: int,
+    file: UploadFile = File(...),
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Upload a custom tail frame image for a shot (ts_uuid filename, sets tf_status=done)."""
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    dest_dir = shot_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "x.png").suffix or ".png"
+    dest = dest_dir / ts_uuid_name(ext)
+    dest.write_bytes(await file.read())
+    shot.target_last_frame_path = str(dest)
+    shot.tf_status = "done"
+    await session.commit()
+    return {
+        "shot_id": shot_id,
+        "target_last_frame_path": to_media_url(str(dest)),
+        "tf_status": "done",
     }
 
 
