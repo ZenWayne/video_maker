@@ -152,13 +152,13 @@ async def generate_tail_frame(
         name="services-tail-frame-cot-analysis",
         model=settings.tf_cot_model,
         input={"motion_prompt": motion_prompt},
-        model_parameters={"temperature": 0.3},
+        model_parameters={"temperature": 0.6},
     ) as cot_gen:
         cot_response = await _call_with_timeout(
             lambda: client.aio.models.generate_content(
                 model=settings.tf_cot_model,
                 contents=[types.Content(role="user", parts=cot_parts)],
-                config=types.GenerateContentConfig(temperature=0.3),
+                config=types.GenerateContentConfig(temperature=0.6),
             ),
             label="TF CoT API call",
         )
@@ -166,17 +166,16 @@ async def generate_tail_frame(
         observability.update_span(cot_gen, output=end_pose)
     logger.info("TF CoT end pose: %s", end_pose[:500])
 
-    # Retry once with a stronger differentiation instruction if the CoT produced
-    # empty/too-short/conservative output — those correlate strongly with the
-    # image step outputting a near-copy of an input image.
+    # Retry once if the CoT produced empty/too-short/conservative output — those
+    # correlate strongly with the image step outputting a near-copy of an input
+    # image. Re-roll the SAME prompt at a higher temperature so the resample
+    # actually diverges from the weak first answer.
     if _is_cot_too_weak(end_pose):
-        logger.warning("TF CoT output too weak, retrying with stronger prompt")
-        retry_prompt = settings.tf_cot_retry_prompt.format(motion_prompt=motion_prompt)
-        retry_parts = cot_image_parts + [types.Part(text=retry_prompt)]
+        logger.warning("TF CoT output too weak, re-rolling at higher temperature")
         retry_response = await client.aio.models.generate_content(
             model=settings.tf_cot_model,
-            contents=[types.Content(role="user", parts=retry_parts)],
-            config=types.GenerateContentConfig(temperature=0.6),
+            contents=[types.Content(role="user", parts=cot_parts)],
+            config=types.GenerateContentConfig(temperature=0.9),
         )
         retry_text = _extract_text(retry_response)
         logger.info("TF CoT retry end pose: %s", retry_text[:500])

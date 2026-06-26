@@ -2,10 +2,21 @@
 
 import os
 import shutil
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
 from app.config import settings
+
+
+def ts_uuid_name(ext: str = ".png") -> str:
+    """Timestamped unique filename: ``<unix_seconds>_<8hex>.<ext>``.
+
+    Each call is unique, so user-uploaded/extracted keyframes get a fresh URL
+    and the browser never serves a cached stale frame.
+    """
+    return f"{int(time.time())}_{uuid.uuid4().hex[:8]}{ext}"
 
 
 def project_dir(project_id: str) -> Path:

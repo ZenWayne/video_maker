@@ -33,6 +33,7 @@ from app.services.storage import (
     shot_pre_cc_last_frame_path,
     shot_target_last_frame_path,
     get_original_video_for_audio,
+    ts_uuid_name,
 )
 from app.services.events import publish_event
 from app.agents.llm import GeminiProvider
@@ -43,6 +44,19 @@ from app.agents.frame_porter import extract_last_frame
 from app.agents.merger import merge_shots, merge_shots_with_crossfade
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_tail_frame(target_last_frame_path: str | None) -> str | None:
+    """Tail frame is used iff its path is set and the file exists.
+
+    Path presence is the single source of truth — tf_confirmed is
+    intentionally NOT consulted.
+    """
+    if target_last_frame_path:
+        p = Path(target_last_frame_path)
+        if p.exists():
+            return str(p)
+    return None
 
 
 class WorkerContext:
@@ -195,6 +209,8 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
                 reference_image_hint=shot_data.get("reference_image_hint"),
             )
             session.add(shot)
+            # Eagerly populate shot 1's first frame for frontend visibility.
+            await _init_shot1_first_frame(project_id, shot, session)
 
         # Transition to SCRIPT_REVIEW
         await transition_project_status(
@@ -301,8 +317,8 @@ async def run_shot_pipeline(
         )
 
         try:
-            # If tail frame was confirmed, reuse existing motion_prompt and first_frame
-            if shot.tf_confirmed and shot.motion_prompt and shot.first_frame_path:
+            # If motion_prompt and first_frame are already set, reuse them
+            if shot.motion_prompt and shot.first_frame_path:
                 motion_prompt = shot.motion_prompt
                 first_frame = Path(shot.first_frame_path) if shot.first_frame_path else None
             else:
@@ -341,7 +357,9 @@ async def run_shot_pipeline(
                 ref_paths = _json.loads(shot.custom_reference_paths)
 
             # Use previous shot's last frame as first_frame
-            if shot.use_prev_last_frame and shot.shot_id > 1:
+            # Guard: do NOT override when the user has set a custom first frame.
+            # custom_first_frame_path is authoritative (path-as-truth).
+            if shot.use_prev_last_frame and shot.shot_id > 1 and not shot.custom_first_frame_path:
                 prev_result = await session.execute(
                     select(Shot).where(
                         Shot.project_id == project_id,
@@ -353,12 +371,8 @@ async def run_shot_pipeline(
                     first_frame = Path(prev_shot.last_frame_path)
                     ref_paths = None
 
-            # Resolve target tail frame for Veo last_frame param
-            last_frame = None
-            if shot.tf_confirmed and shot.target_last_frame_path:
-                tf_path = Path(shot.target_last_frame_path)
-                if tf_path.exists():
-                    last_frame = str(tf_path)
+            # Resolve target tail frame for Veo last_frame param (path presence only)
+            last_frame = resolve_tail_frame(shot.target_last_frame_path)
 
             # Generate video
             shot.status = ShotStatus.VIDEO_GENERATING.value
@@ -430,10 +444,11 @@ async def run_shot_pipeline(
                     auto_trim_to_tail_frame,
                     auto_trim_to_speech_end,
                 )
-                if shot.tf_confirmed and shot.target_last_frame_path:
-                    # Align-and-trim to the confirmed target tail frame (SSIM).
+                resolved_tail = resolve_tail_frame(shot.target_last_frame_path)
+                if resolved_tail:
+                    # Align-and-trim to the target tail frame (SSIM).
                     trim_result = auto_trim_to_tail_frame(
-                        str(video_out), shot.target_last_frame_path,
+                        str(video_out), resolved_tail,
                     )
                     trim_mode = "tail frame alignment"
                 else:
@@ -446,10 +461,19 @@ async def run_shot_pipeline(
                         shot.shot_id, trim_result["trimmed_to_frame"], trim_mode,
                     )
 
-            # Extract last frame
-            last_frame_out = s_dir / "last_frame.png"
+            # Extract last frame to a UNIQUE name so its URL changes on every
+            # (re)generation — a stable last_frame.png would be replayed from the
+            # browser cache (stale poster + stale next-shot first frame).
+            for _old in s_dir.glob("last_frame*.png"):
+                if _old.name != "last_frame_pre_cc.png":
+                    _old.unlink(missing_ok=True)
+            last_frame_out = s_dir / f"last_frame_{ts_uuid_name('.png')}"
             extract_last_frame(str(video_out), str(last_frame_out))
             shot.last_frame_path = str(last_frame_out)
+            # Eagerly propagate last frame to next shot's first frame for frontend visibility.
+            await _propagate_first_frame_to_next(
+                project_id, shot, str(last_frame_out), session
+            )
 
             # Mark as completed
             shot.status = ShotStatus.COMPLETED.value
@@ -594,6 +618,63 @@ async def _get_first_character_ref(project_id: str, session: AsyncSession) -> Pa
         raise ValueError(f"Reference image not found: {path}")
 
     return path
+
+
+async def _init_shot1_first_frame(
+    project_id: str, shot: Shot, session: AsyncSession
+) -> None:
+    """Eagerly populate shot 1's custom_first_frame_path from the first character ref.
+
+    Write-only-when-empty: if the field is already set (e.g. via upload), leave it.
+    Non-raising: if no character ref exists or the field is already set, do nothing.
+    This is for frontend visibility only — _pick_first_frame remains authoritative at
+    gen-time.
+    """
+    if shot.shot_id != 1 or shot.custom_first_frame_path:
+        return
+
+    result = await session.execute(
+        select(ReferenceImage)
+        .where(
+            ReferenceImage.project_id == project_id,
+            ReferenceImage.kind == "character",
+        )
+        .order_by(ReferenceImage.order_index)
+        .limit(1)
+    )
+    ref = result.scalar_one_or_none()
+    if ref:
+        shot.custom_first_frame_path = ref.storage_path
+        session.add(shot)
+
+
+async def _propagate_first_frame_to_next(
+    project_id: str, shot: Shot, last_frame_path: str, session: AsyncSession
+) -> None:
+    """Eagerly point the NEXT shot's custom_first_frame_path at this shot's last frame.
+
+    Predicate: next shot (shot_id + 1) must exist AND use_prev_last_frame=True.
+
+    Last frames now use unique filenames (last_frame_<ts>_<hex>.png), so the value
+    must be RE-POINTED on every (re)generation/trim — a previously auto-propagated
+    path would otherwise reference a deleted, stale file. We preserve a genuine user
+    override (a frame uploaded/extracted into custom_frames/) and only re-point when
+    the existing value is empty or itself an auto-propagated last frame.
+    """
+    result = await session.execute(
+        select(Shot).where(
+            Shot.project_id == project_id,
+            Shot.shot_id == shot.shot_id + 1,
+        )
+    )
+    next_shot = result.scalar_one_or_none()
+    if next_shot is None or not next_shot.use_prev_last_frame:
+        return
+    existing = next_shot.custom_first_frame_path
+    is_user_override = bool(existing) and "custom_frames" in existing
+    if not is_user_override and existing != last_frame_path:
+        next_shot.custom_first_frame_path = last_frame_path
+        session.add(next_shot)
 
 
 async def _get_character_ref_paths(
@@ -892,8 +973,14 @@ async def _do_voice_convert_one(
                 import shutil
                 shutil.copy2(str(video_path), str(pre_vc))
 
-            # 4. Remux: video stream from backup + converted audio → output.mp4
-            remux_video_with_audio(str(pre_vc), vc_audio, str(video_path))
+            # 4. Remux video stream from backup + converted audio → a NEW unique
+            #    output so the URL changes (browser can't replay a stale copy).
+            #    Drop the old current file; keep the output_pre_vc.mp4 backup.
+            vc_out = shot_dir(project_id, shot_id) / f"output_{ts_uuid_name('.mp4')}"
+            remux_video_with_audio(str(pre_vc), vc_audio, str(vc_out))
+            if video_path.name not in ("output_original.mp4", "output_pre_vc.mp4"):
+                video_path.unlink(missing_ok=True)
+            shot.video_path = str(vc_out)
 
             # 5. Update DB
             shot.vc_status = "done"

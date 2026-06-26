@@ -31,40 +31,34 @@ from app.services.state_machine import (
 from app.services.storage import (
     storyboard_path, archived_storyboard_path, shot_custom_frames_dir, to_media_url,
     shot_pre_vc_video_path, shot_audio_original_path, shot_audio_vc_path,
-    shot_pre_cc_last_frame_path, join_preview_path,
+    shot_pre_cc_last_frame_path, join_preview_path, shot_dir, ts_uuid_name,
 )
 from app.services.events import publish_event
 
 router = APIRouter()
 
 
-def _shot_needs_tail_frame(shot: Shot) -> bool:
-    """Check if a shot should go through tail frame generation before video."""
-    if shot.tf_confirmed:
-        return False  # already confirmed
-    if shot.skip_tail_frame:
-        return False  # user explicitly chose to skip tail frame, use first frame only
-    # Shot 1 or connected shots need tail frames
-    return shot.shot_id == 1 or shot.align_with_previous
-
-
-def _reset_tail_frame(shot: Shot, *, skip: bool) -> None:
+def _reset_tail_frame(shot: Shot) -> None:
     """Clear a shot's tail-frame state in one place.
 
-    ``skip=True``  → 中性删除：清空尾帧，不再自动走尾帧流程（仅用首帧出视频）。
-    ``skip=False`` → 重新启用尾帧流程（重新生成）。
+    Clears tf_status, target_last_frame_path, and tf_error_message.
+    Path-as-truth: a tail frame is used iff target_last_frame_path is set
+    (decided by resolve_tail_frame in worker).
     """
     shot.tf_status = None
     shot.tf_confirmed = False
     shot.target_last_frame_path = None
     shot.tf_error_message = None
-    shot.skip_tail_frame = skip
 
 
 async def _enqueue_next_shot_task(
     project_id: str, session: AsyncSession, arq, user: str
 ) -> str:
-    """Pick the next pending shot and enqueue the right task (tail frame or video).
+    """Pick the next pending shot and enqueue the video pipeline task.
+
+    Path-as-truth: tail frame use is decided inside the worker (resolve_tail_frame).
+    Auto tail-frame generation is no longer triggered here — use the explicit
+    generate-tail-frame endpoint instead.
 
     Returns the enqueued job name.
     """
@@ -81,18 +75,8 @@ async def _enqueue_next_shot_task(
     if not shot:
         return "none"
 
-    if _shot_needs_tail_frame(shot):
-        shot.tf_status = "generating"
-        shot.tf_confirmed = False
-        session.add(shot)
-        await session.commit()
-        await arq.enqueue_job(
-            "run_tail_frame_pipeline", project_id, shot.shot_id, f"user:{user}"
-        )
-        return "run_tail_frame_pipeline"
-    else:
-        await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}")
-        return "run_shot_pipeline"
+    await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}")
+    return "run_shot_pipeline"
 
 
 def _require_user(x_user_name: Optional[str] = Header(default=None)) -> str:
@@ -323,8 +307,9 @@ async def regenerate_shots(
     # Reset specified shots to PENDING and clear post-processing state.
     # Keep motion_prompt / first_frame_path so the re-run reuses the existing
     # director take and first frame instead of regenerating them.
-    # The confirmed target tail frame is kept when its file still exists so
-    # "连续" shots still converge on the same endpoint.
+    # Path-as-truth: target_last_frame_path is left EXACTLY as stored.
+    # Whether the tail frame is actually used is decided by the worker
+    # (resolve_tail_frame checks file presence at run time).
     result = await session.execute(
         select(Shot).where(
             Shot.project_id == project_id,
@@ -340,36 +325,12 @@ async def regenerate_shots(
         shot.vc_error_message = None
         shot.cc_status = None
         shot.cc_error_message = None
-
-        has_valid_tail_frame = (
-            shot.target_last_frame_path
-            and Path(shot.target_last_frame_path).exists()
-        )
-        logger.info(
-            "regenerate shot %d: target_last_frame_path=%s exists=%s has_valid=%s",
-            shot.shot_id,
-            shot.target_last_frame_path,
-            Path(shot.target_last_frame_path).exists() if shot.target_last_frame_path else "N/A",
-            has_valid_tail_frame,
-        )
-        if has_valid_tail_frame:
-            # Keep the confirmed target tail frame for continuity.
-            shot.tf_status = "done"
-            shot.tf_error_message = None
-            shot.tf_confirmed = True
-        else:
-            # No confirmed tail frame: 生成分镜 generates video directly,
-            # skipping tail-frame generation (skip=True routes to run_shot_pipeline).
-            shot.tf_status = None
-            shot.tf_error_message = None
-            shot.tf_confirmed = False
-            shot.target_last_frame_path = None
-            shot.skip_tail_frame = True
-
+        # target_last_frame_path and tf_confirmed are intentionally NOT touched here.
+        # The worker decides whether to use the tail frame based on file presence.
         session.add(shot)
     await session.commit()
 
-    # Enqueue tail frame or video pipeline for the first pending shot
+    # Enqueue video pipeline for the first pending shot
     arq = await _get_arq_redis(redis)
     job = await _enqueue_next_shot_task(project_id, session, arq, user)
 
@@ -385,9 +346,9 @@ async def continue_generation(
 ):
     """Continue generating the next pending shot (approve current, generate next).
 
-    Unlike approve-script, this does NOT auto-generate tail frames.
-    The user is expected to have already generated and confirmed tail frames
-    for shots that need them before clicking continue.
+    Path-as-truth: tail frame use is decided by the worker (resolve_tail_frame).
+    No tail-frame confirmation gate is enforced here — the worker picks up any
+    target_last_frame_path that is already set.
     """
     project = await _get_project_or_404(project_id, session)
 
@@ -407,13 +368,6 @@ async def continue_generation(
     next_shot = result.scalar_one_or_none()
     if not next_shot:
         raise HTTPException(status_code=400, detail="No pending shots to generate")
-
-    # Validate: if the shot needs a tail frame, it must be confirmed already
-    if _shot_needs_tail_frame(next_shot):
-        raise HTTPException(
-            status_code=400,
-            detail=f"镜头 #{next_shot.shot_id} 需要先生成并确认尾帧",
-        )
 
     try:
         await transition_project_status(
@@ -854,7 +808,7 @@ async def generate_tail_frame(
     except InvalidTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    _reset_tail_frame(shot, skip=False)  # re-enable tail frame flow on re-generate
+    _reset_tail_frame(shot)  # re-enable tail frame flow on re-generate
     shot.tf_status = "generating"
     session.add(shot)
     await session.commit()
@@ -920,12 +874,11 @@ async def delete_tail_frame(
 ):
     """Delete a shot's target tail frame, returning it to a neutral state.
 
-    Clears all tail frame state, sets ``skip_tail_frame = True`` (so a later video
-    generation uses first-frame-only), and removes the ``target_last_frame.png`` file.
-    Does NOT transition the project or enqueue video generation — the shot simply
-    returns to a state where the user can re-generate a tail frame or proceed.
-    The "生成尾帧" entry re-appears (``tf_status`` is cleared) and re-generating
-    overwrites via ``skip_tail_frame = False``.
+    Clears target_last_frame_path and tf_status (path-as-truth: the worker
+    decides to use a tail frame only when target_last_frame_path is set).
+    Removes the file at the DB-stored path so uploaded/extracted frames (which
+    use ts_uuid filenames) are cleaned up correctly — not just the canonical name.
+    Does NOT transition the project or enqueue video generation.
     """
     await _get_project_or_404(project_id, session)
 
@@ -943,18 +896,22 @@ async def delete_tail_frame(
             detail="Tail frame is currently being generated; wait for it to complete",
         )
 
-    # Clear all tail-frame state; skip=True keeps the shot on first-frame-only video
-    _reset_tail_frame(shot, skip=True)
+    # Capture the stored path BEFORE clearing — needed for unlink below
+    old_path = shot.target_last_frame_path
+
+    # Clear all tail-frame state (path-as-truth: empty path = no tail frame)
+    _reset_tail_frame(shot)
     session.add(shot)
     await session.commit()
 
-    # Remove the physical tail-frame file (deterministic canonical path)
-    from app.services.storage import shot_target_last_frame_path
-    shot_target_last_frame_path(project_id, shot_id).unlink(missing_ok=True)
+    # Remove the physical file at the DB-stored path (covers both AI-generated
+    # canonical names and ts_uuid filenames from uploaded/extracted frames)
+    if old_path:
+        Path(old_path).unlink(missing_ok=True)
 
     return {
         "shot_id": shot_id,
-        "skip_tail_frame": True,
+        "target_last_frame_path": None,
         "tf_status": None,
     }
 
@@ -1115,6 +1072,172 @@ def _ref_images_response(shot: Shot) -> dict:
     }
 
 
+@router.post("/projects/{project_id}/shots/{shot_id}/upload-first-frame")
+async def upload_first_frame(
+    project_id: str,
+    shot_id: int,
+    file: UploadFile = File(...),
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Upload a custom first frame image for a shot (ts_uuid filename)."""
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    dest_dir = shot_custom_frames_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "x.png").suffix or ".png"
+    dest = dest_dir / ts_uuid_name(ext)
+    dest.write_bytes(await file.read())
+    shot.custom_first_frame_path = str(dest)
+    await session.commit()
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/upload-tail-frame")
+async def upload_tail_frame(
+    project_id: str,
+    shot_id: int,
+    file: UploadFile = File(...),
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Upload a custom tail frame image for a shot (ts_uuid filename, sets tf_status=done)."""
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    dest_dir = shot_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "x.png").suffix or ".png"
+    dest = dest_dir / ts_uuid_name(ext)
+    dest.write_bytes(await file.read())
+    shot.target_last_frame_path = str(dest)
+    shot.tf_status = "done"
+    await session.commit()
+    return {
+        "shot_id": shot_id,
+        "target_last_frame_path": to_media_url(str(dest)),
+        "tf_status": "done",
+    }
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/extract-first-frame")
+async def extract_first_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Copy the shot's extracted first frame into custom_first_frame_path (ts_uuid filename)."""
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    src_str = shot.first_frame_path
+    if not src_str or not Path(src_str).exists():
+        raise HTTPException(status_code=400, detail="Shot has no first frame or file is missing")
+
+    dest_dir = shot_custom_frames_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
+    shutil.copy2(src_str, str(dest))
+
+    shot.custom_first_frame_path = str(dest)
+    await session.commit()
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/extract-last-frame")
+async def extract_last_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Copy the shot's extracted last frame into target_last_frame_path (ts_uuid filename, tf_status=done)."""
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    src_str = shot.last_frame_path
+    if not src_str or not Path(src_str).exists():
+        raise HTTPException(status_code=400, detail="Shot has no last frame or file is missing")
+
+    dest_dir = shot_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
+    shutil.copy2(src_str, str(dest))
+
+    shot.target_last_frame_path = str(dest)
+    shot.tf_status = "done"
+    await session.commit()
+    return {
+        "shot_id": shot_id,
+        "target_last_frame_path": to_media_url(str(dest)),
+        "tf_status": "done",
+    }
+
+
+@router.delete("/projects/{project_id}/shots/{shot_id}/first-frame")
+async def delete_first_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete a shot's custom first frame, clearing the config and unlinking the file.
+
+    Captures the DB-stored path before clearing, then removes the physical file
+    (covers both uploaded ts_uuid filenames and other paths).
+    Path-as-truth: whether a custom first frame is used is decided by checking
+    custom_first_frame_path. Does NOT touch other fields.
+    """
+    await _get_project_or_404(project_id, session)
+
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    # Capture the stored path BEFORE clearing — needed for unlink below
+    old_path = shot.custom_first_frame_path
+
+    # Clear the custom first frame path
+    shot.custom_first_frame_path = None
+    session.add(shot)
+    await session.commit()
+
+    # Remove the physical file at the DB-stored path (covers ts_uuid filenames
+    # from uploaded frames)
+    if old_path:
+        Path(old_path).unlink(missing_ok=True)
+
+    return {
+        "shot_id": shot_id,
+        "custom_first_frame_path": None,
+    }
+
+
 @router.put("/projects/{project_id}/shots/{shot_id}/reference-images/reorder")
 async def reorder_shot_references(
     project_id: str,
@@ -1171,6 +1294,64 @@ async def get_shot_video_info(
     return info
 
 
+def _ensure_pristine_backup(video_path: Path) -> Path:
+    """Copy the current video to output_original.mp4 once (pristine pre-trim source)."""
+    backup = video_path.with_name("output_original.mp4")
+    if not backup.exists():
+        import shutil
+        shutil.copy2(str(video_path), str(backup))
+    return backup
+
+
+async def _repoint_next_first_frame(
+    project_id: str, shot_id: int, last_frame_path: str, session: AsyncSession
+) -> None:
+    """Point the NEXT shot's auto first-frame at last_frame_path (preserve user overrides).
+
+    Mirrors worker.tasks._propagate_first_frame_to_next: re-point when the next shot's
+    custom_first_frame_path is empty or itself an auto-propagated last frame; never
+    clobber a genuine user override stored under custom_frames/.
+    """
+    res = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id + 1)
+    )
+    nxt = res.scalar_one_or_none()
+    if nxt is None or not nxt.use_prev_last_frame:
+        return
+    existing = nxt.custom_first_frame_path
+    is_user_override = bool(existing) and "custom_frames" in existing
+    if not is_user_override and existing != last_frame_path:
+        nxt.custom_first_frame_path = last_frame_path
+        session.add(nxt)
+
+
+async def _commit_new_current_video(
+    project_id: str, shot: Shot, new_video: Path, session: AsyncSession
+) -> None:
+    """Point shot at a freshly-written unique video, refresh its unique last frame,
+    and re-point the next shot's first frame.
+
+    Deletes the previous current video and stale last_frame files (keeps the
+    output_original.mp4 / output_pre_vc.mp4 and last_frame_pre_cc.png backups).
+    """
+    from app.agents.frame_porter import extract_last_frame
+
+    s_dir = new_video.parent
+    old = Path(shot.video_path) if shot.video_path else None
+    if old and old != new_video and old.name not in ("output_original.mp4", "output_pre_vc.mp4"):
+        old.unlink(missing_ok=True)
+    shot.video_path = str(new_video)
+
+    for _old in s_dir.glob("last_frame*.png"):
+        if _old.name != "last_frame_pre_cc.png":
+            _old.unlink(missing_ok=True)
+    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
+    extract_last_frame(str(new_video), str(new_lf))
+    shot.last_frame_path = str(new_lf)
+
+    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+
+
 @router.post("/projects/{project_id}/shots/{shot_id}/trim")
 async def trim_shot_video(
     project_id: str,
@@ -1201,18 +1382,13 @@ async def trim_shot_video(
     if body.end_frame >= info["total_frames"]:
         raise HTTPException(status_code=400, detail="end_frame must be less than total frames")
 
-    # Backup original on first trim
-    backup = video_path.with_name("output_original.mp4")
-    if not backup.exists():
-        video_path.rename(backup)
-    source = str(backup)
-
+    # Backup pristine original once, then trim it → a NEW unique current video so
+    # the URL changes (browser can't replay a stale cached copy of an in-place file).
+    backup = _ensure_pristine_backup(video_path)
+    new_video = video_path.parent / f"output_{ts_uuid_name('.mp4')}"
     # Trim (use frame count, not time — avoids float rounding ±1 frame)
-    trim_video(source, str(video_path), body.end_frame)
-
-    # Re-extract last frame
-    if shot.last_frame_path:
-        extract_last_frame(str(video_path), shot.last_frame_path)
+    trim_video(str(backup), str(new_video), body.end_frame)
+    await _commit_new_current_video(project_id, shot, new_video, session)
 
     # Reset character calibration since last frame changed
     shot.cc_status = None
@@ -1236,10 +1412,10 @@ async def trim_shot_video(
     await session.commit()
 
     return {
-        "video_path": to_media_url(str(video_path)),
+        "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "version": ts,
-        **get_video_info(str(video_path)),
+        **get_video_info(shot.video_path),
     }
 
 
@@ -1267,14 +1443,12 @@ async def restore_trim(
     if not backup.exists():
         raise HTTPException(status_code=404, detail="No backup found — video was never trimmed")
 
-    # Restore original
+    # Restore pristine original → a NEW unique current video, then drop the backup.
     import shutil
-    shutil.copy2(str(backup), str(video_path))
+    new_video = video_path.parent / f"output_{ts_uuid_name('.mp4')}"
+    shutil.copy2(str(backup), str(new_video))
     backup.unlink()
-
-    # Re-extract last frame
-    if shot.last_frame_path:
-        extract_last_frame(str(video_path), shot.last_frame_path)
+    await _commit_new_current_video(project_id, shot, new_video, session)
 
     # Reset character calibration since last frame changed
     shot.cc_status = None
@@ -1297,10 +1471,10 @@ async def restore_trim(
     await session.commit()
 
     return {
-        "video_path": to_media_url(str(video_path)),
+        "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "version": ts,
-        **get_video_info(str(video_path)),
+        **get_video_info(shot.video_path),
     }
 
 
@@ -1339,17 +1513,11 @@ async def align_tail_frame(
 
     video_path = Path(shot.video_path)
 
-    # Backup original on first trim (same logic as manual trim)
-    backup = video_path.with_name("output_original.mp4")
-    if not backup.exists():
-        video_path.rename(backup)
-    source = str(backup)
-
-    trim_video(source, str(video_path), best_frames)
-
-    # Re-extract last frame
-    if shot.last_frame_path:
-        extract_last_frame(str(video_path), shot.last_frame_path)
+    # Backup pristine original once, then trim it → a NEW unique current video.
+    backup = _ensure_pristine_backup(video_path)
+    new_video = video_path.parent / f"output_{ts_uuid_name('.mp4')}"
+    trim_video(str(backup), str(new_video), best_frames)
+    await _commit_new_current_video(project_id, shot, new_video, session)
 
     # Reset character calibration since last frame changed
     shot.cc_status = None
@@ -1369,11 +1537,11 @@ async def align_tail_frame(
     await session.commit()
 
     return {
-        "video_path": to_media_url(str(video_path)),
+        "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "version": ts,
         "aligned_to_frame": best_frames,
-        **get_video_info(str(video_path)),
+        **get_video_info(shot.video_path),
     }
 
 

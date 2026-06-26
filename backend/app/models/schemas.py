@@ -61,7 +61,6 @@ class ShotResponse(BaseModel):
     vc_error_message: Optional[str] = None
     cc_status: Optional[str] = None
     cc_error_message: Optional[str] = None
-    skip_tail_frame: bool = False
     target_last_frame_path: Optional[str] = None
     tf_status: Optional[str] = None
     tf_error_message: Optional[str] = None
@@ -118,7 +117,7 @@ class StoryboardUpdate(BaseModel):
 class ProjectCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     theme_text: str = Field(..., min_length=1, max_length=1000)
-    aspect_ratio: str = Field(default="16:9", pattern="^(16:9|9:16)$")
+    aspect_ratio: str = Field(default="9:16", pattern="^(16:9|9:16)$")
 
 
 class ReferenceVoiceRequest(BaseModel):
@@ -133,7 +132,7 @@ class ProjectResponse(BaseModel):
     id: str
     title: str
     theme_text: str
-    aspect_ratio: str = "16:9"
+    aspect_ratio: str = "9:16"
     creator_name: str
     status: str
     scene_overview: Optional[str] = None
@@ -157,7 +156,7 @@ class ProjectListResponse(BaseModel):
     id: str
     title: str
     theme_text: str
-    aspect_ratio: str = "16:9"
+    aspect_ratio: str = "9:16"
     creator_name: str
     status: str
     scene_overview: Optional[str] = None

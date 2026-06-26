@@ -214,3 +214,60 @@ To add a new package, add it to `backend/pyproject.toml` then run:
 ```bash
 uv sync --project backend
 ```
+
+## Local Deploy (worktree stack switching)
+
+There is **one shared compose project `deploy`** for the whole repo. Every worktree's
+`deploy/docker-compose.dev.yml` uses the same fixed ports and the same named volumes, so only
+**one** stack runs at a time and **all worktrees share the same DB + media storage**:
+
+| Service | Port | Notes |
+|---------|------|-------|
+| backend (FastAPI) | `8002` | `--reload`; docs at `http://localhost:8002/docs` |
+| frontend (Vite) | `4000` | `http://localhost:4000` |
+| redis | `6381` | |
+| worker / vc-worker | — | ARQ |
+
+Shared named volumes (`deploy_app-data` = sqlite DB, `deploy_app-storage` = media) persist across
+worktrees. Source/secrets are bind-mounted **from whichever worktree you run compose in** — so
+"deploying a worktree" = pointing the shared stack at that worktree.
+
+### To run a specific worktree's code locally
+
+```bash
+cd <this-worktree>
+
+# 1. Copy ALL gitignored config from a worktree that has it (the stack won't start without it).
+#    Copy completely — a partial copy once dropped the Langfuse keys.
+SRC=../<some-worktree-with-config>
+cp -a "$SRC/deploy/secrets"     deploy/secrets        # all of: gcp-sa.json, gemini/veo/kie/deepseek_api_key,
+cp -a "$SRC/deploy/secrets.yml" deploy/secrets.yml    #          langfuse_public_key, langfuse_secret_key, vertex*
+cp -a "$SRC/deploy/config.env"  deploy/config.env     # must contain LANGFUSE_ENABLED / LANGFUSE_HOST
+#    (deploy/config.yml is checked in and identical across worktrees; verify config.env matches it)
+
+# 2. Frontend needs node_modules ON THE HOST (no node_modules volume; mount is ../frontend-vite:/app):
+( cd frontend-vite && npm ci )
+
+# 3. Switch the shared stack onto this worktree (recreates containers; shared DB/storage preserved):
+podman compose -f deploy/docker-compose.dev.yml up -d
+```
+
+Verify: `curl -s localhost:8002/openapi.json | grep <new-route>` and `curl -sI localhost:4000`.
+Confirm the mount switched: `podman inspect video-maker-backend-dev --format '{{range .Mounts}}{{if eq .Destination "/app"}}{{.Source}}{{end}}{{end}}'`.
+
+### After editing backend code
+
+`--reload` picks up edits in place, but if it doesn't:
+
+```bash
+podman restart video-maker-backend-dev video-maker-worker-dev
+```
+
+### Notes / gotchas
+
+- **A backend-only change does NOT alter the UI.** If the frontend looks unchanged after deploy, check
+  `git diff <base>..HEAD -- frontend-vite` — an empty diff means there is no frontend code to show, so no
+  amount of container rebuilding will change the page. (Rebuild only matters for `Dockerfile.*` / dep changes.)
+- Switching the stack to a worktree **stops** whatever worktree it was previously serving; reverse by
+  running compose from that other worktree.
+- Missing host `frontend-vite/node_modules` ⇒ frontend container crash-loops with `vite: not found`.

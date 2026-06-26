@@ -103,10 +103,10 @@ async def test_approve_script_success(client, project_in_script_review):
 
     p = (await client.get(f"/api/projects/{pid}")).json()
     assert p["status"] == "shot_generating"
-    # Shot 1 is always disconnected (align_with_previous=false) but still
-    # needs a tail frame, so the pipeline enqueues run_tail_frame_pipeline first.
+    # Path-as-truth: _enqueue_next_shot_task always enqueues run_shot_pipeline.
+    # Tail frame use is decided by the worker (resolve_tail_frame), not here.
     client.arq.enqueue_job.assert_called_with(
-        "run_tail_frame_pipeline", pid, 1, f"user:{USER}"
+        "run_shot_pipeline", pid, f"user:{USER}"
     )
 
 
@@ -162,8 +162,8 @@ async def test_regenerate_shots_success(client, project_in_shot_review):
 async def test_regenerate_shots_preserves_director_inputs(client, db_session_factory):
     """Regenerate must KEEP the cached motion_prompt / first_frame so the
     re-run reuses the existing director take and first frame instead of
-    regenerating them. A confirmed tail frame is kept only when its file
-    still exists on disk."""
+    regenerating them. Path-as-truth: target_last_frame_path is left
+    EXACTLY as stored regardless of whether the file exists on disk."""
     from sqlalchemy import select
     from app.models.project import Shot
 
@@ -190,16 +190,17 @@ async def test_regenerate_shots_preserves_director_inputs(client, db_session_fac
         shot = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalar_one()
         assert shot.motion_prompt == "old camera pan"            # reused, not regenerated
         assert shot.first_frame_path == "/tmp/does/not/matter/first.png"  # reused
-        # tail-frame file is missing -> not preserved, confirmation dropped
-        assert shot.target_last_frame_path is None
-        assert shot.tf_confirmed is False
+        # Path-as-truth: path left as stored even if file is missing on disk
+        assert shot.target_last_frame_path == "/tmp/does/not/exist/tail.png"
+        assert shot.tf_confirmed is True
 
 
 async def test_regenerate_shots_skips_tail_frame_generation(
     client, db_session_factory, project_in_shot_review
 ):
-    """生成分镜 (regenerate) generates video directly, skipping tail-frame
-    generation for shots without a confirmed tail frame."""
+    """生成分镜 (regenerate) always goes directly to video generation.
+    Path-as-truth: _enqueue_next_shot_task always enqueues run_shot_pipeline;
+    the tail frame is decided by target_last_frame_path presence in the worker."""
     from sqlalchemy import select
     from app.models.project import Shot
 
@@ -223,7 +224,8 @@ async def test_regenerate_shots_skips_tail_frame_generation(
                 select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
             )
         ).scalar_one()
-        assert shot.skip_tail_frame is True
+        # Path-as-truth: no tail frame stored, so none will be used
+        assert shot.target_last_frame_path is None
 
 
 async def test_regenerate_shots_invalid_transition(client, db_session_factory):
@@ -250,7 +252,7 @@ async def test_regenerate_shots_no_user_header(client, project_in_shot_review):
 
 async def test_continue_generation_success(client, db_session_factory):
     # shot_review with some pending shots → 202
-    # Shot 2 is connected (align_with_previous=true by default), so tail frame first
+    # Path-as-truth: continue-generation always enqueues run_shot_pipeline (no auto tail-frame).
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, shot_id=1, status="completed")
     await _add_shot(db_session_factory, pid, shot_id=2, status="pending")
@@ -260,7 +262,7 @@ async def test_continue_generation_success(client, db_session_factory):
     p = (await client.get(f"/api/projects/{pid}")).json()
     assert p["status"] == "shot_generating"
     client.arq.enqueue_job.assert_called_with(
-        "run_tail_frame_pipeline", pid, 2, f"user:{USER}"
+        "run_shot_pipeline", pid, f"user:{USER}"
     )
 
 
@@ -526,7 +528,8 @@ async def test_delete_tail_frame_clears_state_without_generating_video(
     )
     assert r.status_code in (200, 202)
     body = r.json()
-    assert body["skip_tail_frame"] is True
+    # New return shape: target_last_frame_path + tf_status
+    assert body["target_last_frame_path"] is None
     assert body["tf_status"] is None
 
     # Must NOT auto-generate video
@@ -536,12 +539,11 @@ async def test_delete_tail_frame_clears_state_without_generating_video(
     p = (await client.get(f"/api/projects/{pid}")).json()
     assert p["status"] == "shot_review"
 
-    # Shot tail-frame state fully cleared, skip flag set
+    # Shot tail-frame state fully cleared
     shot = next(s for s in p["shots"] if s["shot_id"] == 1)
     assert shot["tf_status"] is None
     assert shot["tf_confirmed"] is False
     assert shot["target_last_frame_path"] is None
-    assert shot["skip_tail_frame"] is True
 
     # Physical tail-frame file removed
     assert not path.exists()

@@ -53,7 +53,7 @@ class Project(Base):
     theme_text = Column(Text, nullable=False)
     creator_name = Column(Text, nullable=False)
     status = Column(String(20), nullable=False, default=ProjectStatus.DRAFT.value)
-    aspect_ratio = Column(String(10), nullable=False, default="16:9")
+    aspect_ratio = Column(String(10), nullable=False, default="9:16")
     scene_overview = Column(Text, nullable=True)
     storyboard_path = Column(Text, nullable=True)
     final_video_path = Column(Text, nullable=True)
@@ -145,7 +145,6 @@ class Shot(Base):
     vc_error_message = Column(Text, nullable=True)
     cc_status = Column(String(20), nullable=True)  # null | "calibrating" | "done" | "failed"
     cc_error_message = Column(Text, nullable=True)
-    skip_tail_frame = Column(Boolean, default=False)  # 用户选择跳过尾帧，只用首帧生成
     target_last_frame_path = Column(Text, nullable=True)  # AI 生成的目标尾帧
     tf_status = Column(String(20), nullable=True)  # null | "generating" | "done" | "failed"
     tf_error_message = Column(Text, nullable=True)
