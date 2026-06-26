@@ -18,7 +18,7 @@ from app.models.project import Shot
 
 
 async def test_regenerate_does_not_resurrect_none_tail_frame(client, db_session_factory):
-    """Shot with target_last_frame_path=None stays None after regenerate; skip_tail_frame not set."""
+    """Shot with target_last_frame_path=None stays None after regenerate (path-as-truth)."""
     pid = await _make_project(db_session_factory, status="shot_review")
     async with db_session_factory() as s:
         s.add(Shot(
@@ -49,8 +49,6 @@ async def test_regenerate_does_not_resurrect_none_tail_frame(client, db_session_
         # Path-as-truth: None stays None, tf_confirmed stays False
         assert shot.target_last_frame_path is None
         assert shot.tf_confirmed is False
-        # New behavior: skip_tail_frame NOT set by regenerate (old code set it True here)
-        assert shot.skip_tail_frame is False
 
 
 async def test_regenerate_preserves_existing_tail_frame_path(client, db_session_factory):
@@ -98,8 +96,8 @@ async def test_regenerate_connected_shot_no_target_enqueues_shot_pipeline(
 ):
     """Regenerating a connected shot with no target always enqueues run_shot_pipeline.
 
-    OLD behavior: set skip_tail_frame=True, then route via _shot_needs_tail_frame.
-    NEW behavior: always enqueue run_shot_pipeline directly; skip_tail_frame not touched.
+    OLD behavior: routed via _shot_needs_tail_frame.
+    NEW behavior: always enqueue run_shot_pipeline directly (path-as-truth).
     """
     pid = await _make_project(db_session_factory, status="shot_review")
     async with db_session_factory() as s:
@@ -134,8 +132,8 @@ async def test_regenerate_connected_shot_no_target_enqueues_shot_pipeline(
         shot = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
-        # skip_tail_frame is NOT set by the new code (old code set it True)
-        assert shot.skip_tail_frame is False
+        # Path-as-truth: no tail frame stored, so none will be used
+        assert shot.target_last_frame_path is None
 
 
 async def test_explicit_generate_tail_frame_endpoint_still_works(client, db_session_factory):

@@ -61,7 +61,6 @@ class ShotResponse(BaseModel):
     vc_error_message: Optional[str] = None
     cc_status: Optional[str] = None
     cc_error_message: Optional[str] = None
-    skip_tail_frame: bool = False
     target_last_frame_path: Optional[str] = None
     tf_status: Optional[str] = None
     tf_error_message: Optional[str] = None

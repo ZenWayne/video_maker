@@ -560,7 +560,6 @@ export default function ShotsPage() {
         tf_status: null,
         tf_confirmed: false,
         target_last_frame_path: null,
-        skip_tail_frame: true,
       })
       addToast({ type: 'success', message: `镜头 #${shotId} 尾帧已删除` })
     } catch (error) {

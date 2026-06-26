@@ -145,7 +145,6 @@ class Shot(Base):
     vc_error_message = Column(Text, nullable=True)
     cc_status = Column(String(20), nullable=True)  # null | "calibrating" | "done" | "failed"
     cc_error_message = Column(Text, nullable=True)
-    skip_tail_frame = Column(Boolean, default=False)  # 用户选择跳过尾帧，只用首帧生成
     target_last_frame_path = Column(Text, nullable=True)  # AI 生成的目标尾帧
     tf_status = Column(String(20), nullable=True)  # null | "generating" | "done" | "failed"
     tf_error_message = Column(Text, nullable=True)

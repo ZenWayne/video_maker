@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 def resolve_tail_frame(target_last_frame_path: str | None) -> str | None:
     """Tail frame is used iff its path is set and the file exists.
 
-    Path presence is the single source of truth — tf_confirmed/skip_tail_frame
-    are intentionally NOT consulted.
+    Path presence is the single source of truth — tf_confirmed is
+    intentionally NOT consulted.
     """
     if target_last_frame_path:
         p = Path(target_last_frame_path)

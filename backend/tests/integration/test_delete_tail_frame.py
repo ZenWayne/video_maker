@@ -2,7 +2,6 @@
 
 Covers Task 4 requirements:
 - Clears target_last_frame_path + tf_status on DELETE
-- Does NOT set skip_tail_frame=True
 - Unlinks the DB-stored file path (not the hardcoded canonical path)
 - Returns 409 when tf_status=="generating"
 """
@@ -28,7 +27,6 @@ async def _seed_shot_with_tail_frame(db_session_factory, project_id, file_path: 
             align_with_previous=False,
             tf_status="done",
             tf_confirmed=True,
-            skip_tail_frame=False,
             target_last_frame_path=file_path,
         )
         s.add(shot)
@@ -89,27 +87,6 @@ async def test_delete_tail_frame_clears_db(client, db_session_factory, tmp_path)
     assert shot.tf_status is None
 
 
-async def test_delete_tail_frame_does_not_set_skip_tail_frame(
-    client, db_session_factory, tmp_path
-):
-    """DELETE must NOT set skip_tail_frame=True — it stays at its default (False)."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-
-    tail_file = tmp_path / "tail_frame_skip_test.png"
-    tail_file.write_bytes(b"\x89PNG\r\n")
-
-    await _seed_shot_with_tail_frame(db_session_factory, pid, str(tail_file))
-
-    await client.post(
-        f"/api/projects/{pid}/shots/1/delete-tail-frame",
-        headers=HEADERS,
-    )
-
-    # 3. skip_tail_frame must NOT be set to True by the delete path
-    shot = await _get_shot(db_session_factory, pid)
-    assert shot.skip_tail_frame is not True
-
-
 async def test_delete_tail_frame_removes_file(client, db_session_factory, tmp_path):
     """DELETE removes the actual file whose path was stored in DB."""
     pid = await _make_project(db_session_factory, status="shot_review")
@@ -151,7 +128,6 @@ async def test_delete_tail_frame_blocks_when_generating(
             align_with_previous=False,
             tf_status="generating",
             tf_confirmed=False,
-            skip_tail_frame=False,
             target_last_frame_path=str(tail_file),
         )
         s.add(shot)

@@ -200,7 +200,7 @@ async def test_regenerate_shots_skips_tail_frame_generation(
 ):
     """生成分镜 (regenerate) always goes directly to video generation.
     Path-as-truth: _enqueue_next_shot_task always enqueues run_shot_pipeline;
-    skip_tail_frame is NOT set by regenerate (mechanism removed)."""
+    the tail frame is decided by target_last_frame_path presence in the worker."""
     from sqlalchemy import select
     from app.models.project import Shot
 
@@ -224,8 +224,8 @@ async def test_regenerate_shots_skips_tail_frame_generation(
                 select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
             )
         ).scalar_one()
-        # skip_tail_frame is no longer set by regenerate (path-as-truth: worker decides)
-        assert shot.skip_tail_frame is False
+        # Path-as-truth: no tail frame stored, so none will be used
+        assert shot.target_last_frame_path is None
 
 
 async def test_regenerate_shots_invalid_transition(client, db_session_factory):
@@ -528,7 +528,7 @@ async def test_delete_tail_frame_clears_state_without_generating_video(
     )
     assert r.status_code in (200, 202)
     body = r.json()
-    # New return shape: target_last_frame_path + tf_status (no skip_tail_frame)
+    # New return shape: target_last_frame_path + tf_status
     assert body["target_last_frame_path"] is None
     assert body["tf_status"] is None
 
@@ -539,12 +539,11 @@ async def test_delete_tail_frame_clears_state_without_generating_video(
     p = (await client.get(f"/api/projects/{pid}")).json()
     assert p["status"] == "shot_review"
 
-    # Shot tail-frame state fully cleared; skip_tail_frame NOT set by delete path
+    # Shot tail-frame state fully cleared
     shot = next(s for s in p["shots"] if s["shot_id"] == 1)
     assert shot["tf_status"] is None
     assert shot["tf_confirmed"] is False
     assert shot["target_last_frame_path"] is None
-    assert shot["skip_tail_frame"] is not True
 
     # Physical tail-frame file removed
     assert not path.exists()

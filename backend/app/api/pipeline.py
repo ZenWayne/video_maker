@@ -42,8 +42,8 @@ def _reset_tail_frame(shot: Shot) -> None:
     """Clear a shot's tail-frame state in one place.
 
     Clears tf_status, target_last_frame_path, and tf_error_message.
-    Does NOT touch skip_tail_frame — path-as-truth: a tail frame is used
-    iff target_last_frame_path is set (decided by resolve_tail_frame in worker).
+    Path-as-truth: a tail frame is used iff target_last_frame_path is set
+    (decided by resolve_tail_frame in worker).
     """
     shot.tf_status = None
     shot.tf_confirmed = False
@@ -878,8 +878,7 @@ async def delete_tail_frame(
     decides to use a tail frame only when target_last_frame_path is set).
     Removes the file at the DB-stored path so uploaded/extracted frames (which
     use ts_uuid filenames) are cleaned up correctly — not just the canonical name.
-    Does NOT set skip_tail_frame. Does NOT transition the project or enqueue
-    video generation.
+    Does NOT transition the project or enqueue video generation.
     """
     await _get_project_or_404(project_id, session)
 
@@ -900,7 +899,7 @@ async def delete_tail_frame(
     # Capture the stored path BEFORE clearing — needed for unlink below
     old_path = shot.target_last_frame_path
 
-    # Clear all tail-frame state (path-as-truth: no skip_tail_frame needed)
+    # Clear all tail-frame state (path-as-truth: empty path = no tail frame)
     _reset_tail_frame(shot)
     session.add(shot)
     await session.commit()
