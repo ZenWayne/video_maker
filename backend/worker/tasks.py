@@ -45,6 +45,19 @@ from app.agents.merger import merge_shots, merge_shots_with_crossfade
 logger = logging.getLogger(__name__)
 
 
+def resolve_tail_frame(target_last_frame_path: str | None) -> str | None:
+    """Tail frame is used iff its path is set and the file exists.
+
+    Path presence is the single source of truth — tf_confirmed/skip_tail_frame
+    are intentionally NOT consulted.
+    """
+    if target_last_frame_path:
+        p = Path(target_last_frame_path)
+        if p.exists():
+            return str(p)
+    return None
+
+
 class WorkerContext:
     """Helper to access context in tasks."""
 
@@ -301,8 +314,8 @@ async def run_shot_pipeline(
         )
 
         try:
-            # If tail frame was confirmed, reuse existing motion_prompt and first_frame
-            if shot.tf_confirmed and shot.motion_prompt and shot.first_frame_path:
+            # If motion_prompt and first_frame are already set, reuse them
+            if shot.motion_prompt and shot.first_frame_path:
                 motion_prompt = shot.motion_prompt
                 first_frame = Path(shot.first_frame_path) if shot.first_frame_path else None
             else:
@@ -353,12 +366,8 @@ async def run_shot_pipeline(
                     first_frame = Path(prev_shot.last_frame_path)
                     ref_paths = None
 
-            # Resolve target tail frame for Veo last_frame param
-            last_frame = None
-            if shot.tf_confirmed and shot.target_last_frame_path:
-                tf_path = Path(shot.target_last_frame_path)
-                if tf_path.exists():
-                    last_frame = str(tf_path)
+            # Resolve target tail frame for Veo last_frame param (path presence only)
+            last_frame = resolve_tail_frame(shot.target_last_frame_path)
 
             # Generate video
             shot.status = ShotStatus.VIDEO_GENERATING.value
@@ -430,10 +439,11 @@ async def run_shot_pipeline(
                     auto_trim_to_tail_frame,
                     auto_trim_to_speech_end,
                 )
-                if shot.tf_confirmed and shot.target_last_frame_path:
-                    # Align-and-trim to the confirmed target tail frame (SSIM).
+                resolved_tail = resolve_tail_frame(shot.target_last_frame_path)
+                if resolved_tail:
+                    # Align-and-trim to the target tail frame (SSIM).
                     trim_result = auto_trim_to_tail_frame(
-                        str(video_out), shot.target_last_frame_path,
+                        str(video_out), resolved_tail,
                     )
                     trim_mode = "tail frame alignment"
                 else:
