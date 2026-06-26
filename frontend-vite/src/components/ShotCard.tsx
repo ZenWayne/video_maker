@@ -966,6 +966,9 @@ export function ShotCard({
                 onDelete={onDeleteTailFrame ? () => onDeleteTailFrame(shot.shot_id) : undefined}
                 onRetry={onGenerateTailFrame ? () => onGenerateTailFrame(shot.shot_id) : undefined}
                 menuItems={[
+                  ...(onGenerateTailFrame
+                    ? [{ icon: Sparkles, label: '生成尾帧', disabled: !shot.motion_prompt, onClick: () => onGenerateTailFrame(shot.shot_id) }]
+                    : []),
                   { icon: Crop, label: '提取本镜尾帧', disabled: !shot.last_frame_path, onClick: handleExtractLastFrame },
                   { icon: Upload, label: '上传尾帧', onClick: () => tailFrameInputRef.current?.click() },
                 ]}
@@ -1044,15 +1047,6 @@ export function ShotCard({
                   disabled={shot.cc_status === 'calibrating'}
                 >
                   <User className="w-4 h-4 mr-1" />{shot.cc_status === 'done' ? '重新校准' : '校准人物'}
-                </Button>
-              )}
-              {!shot.tf_status && onGenerateTailFrame && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => onGenerateTailFrame(shot.shot_id)}
-                >
-                  <Sparkles className="w-4 h-4 mr-1" />生成尾帧
                 </Button>
               )}
               {(shot.status === 'completed' || shot.status === 'failed' || shot.status === 'pending') && onRedraw && (
