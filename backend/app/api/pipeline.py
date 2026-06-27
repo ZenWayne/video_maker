@@ -1289,18 +1289,12 @@ async def get_shot_video_info(
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
     info = get_video_info(shot.video_path)
-    backup = Path(shot.video_path).with_name("output_original.mp4")
-    info["has_backup"] = backup.exists()
+    # Restore is possible when a pristine output_ exists and the current clip is a
+    # derived (trimmed_/vc_) file, i.e. not the pristine itself.
+    from app.services.storage import pristine_video_path
+    pristine = pristine_video_path(project_id, shot_id)
+    info["has_backup"] = pristine is not None and Path(shot.video_path) != pristine
     return info
-
-
-def _ensure_pristine_backup(video_path: Path) -> Path:
-    """Copy the current video to output_original.mp4 once (pristine pre-trim source)."""
-    backup = video_path.with_name("output_original.mp4")
-    if not backup.exists():
-        import shutil
-        shutil.copy2(str(video_path), str(backup))
-    return backup
 
 
 async def _repoint_next_first_frame(
@@ -1328,17 +1322,18 @@ async def _repoint_next_first_frame(
 async def _commit_new_current_video(
     project_id: str, shot: Shot, new_video: Path, session: AsyncSession
 ) -> None:
-    """Point shot at a freshly-written unique video, refresh its unique last frame,
-    and re-point the next shot's first frame.
+    """Point shot at a video (a freshly-written trimmed_/vc_ file, or the pristine
+    output_ on restore), refresh its unique last frame, and re-point the next shot.
 
-    Deletes the previous current video and stale last_frame files (keeps the
-    output_original.mp4 / output_pre_vc.mp4 and last_frame_pre_cc.png backups).
+    Deletes the previous current ONLY if it is a derived file (trimmed_/vc_); the
+    pristine output_<ts>_<uuid>.mp4 is never deleted here so restore-trim can recover
+    it. Stale last_frame files are cleared (keeps the last_frame_pre_cc.png backup).
     """
     from app.agents.frame_porter import extract_last_frame
 
     s_dir = new_video.parent
     old = Path(shot.video_path) if shot.video_path else None
-    if old and old != new_video and old.name not in ("output_original.mp4", "output_pre_vc.mp4"):
+    if old and old != new_video and old.name.startswith(("trimmed_", "vc_")):
         old.unlink(missing_ok=True)
     shot.video_path = str(new_video)
 
@@ -1382,12 +1377,12 @@ async def trim_shot_video(
     if body.end_frame >= info["total_frames"]:
         raise HTTPException(status_code=400, detail="end_frame must be less than total frames")
 
-    # Backup pristine original once, then trim it → a NEW unique current video so
-    # the URL changes (browser can't replay a stale cached copy of an in-place file).
-    backup = _ensure_pristine_backup(video_path)
-    new_video = video_path.parent / f"output_{ts_uuid_name('.mp4')}"
+    # Trim the CURRENT video → a NEW trimmed_<ts>_<uuid>.mp4 (frame-correct: end_frame
+    # is relative to the clip the user is viewing). The pristine output_ stays on disk
+    # for restore; no fixed-name backup is created.
+    new_video = video_path.parent / f"trimmed_{ts_uuid_name('.mp4')}"
     # Trim (use frame count, not time — avoids float rounding ±1 frame)
-    trim_video(str(backup), str(new_video), body.end_frame)
+    trim_video(str(video_path), str(new_video), body.end_frame)
     await _commit_new_current_video(project_id, shot, new_video, session)
 
     # Reset character calibration since last frame changed
@@ -1400,11 +1395,9 @@ async def trim_shot_video(
     if pre_cc.exists():
         pre_cc.unlink()
 
-    # Remove stale pre-VC backup — audio length no longer matches trimmed video
-    from app.services.storage import shot_pre_vc_video_path
-    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
-    if pre_vc.exists():
-        pre_vc.unlink()
+    # Trimming changes length → any voice-converted variant no longer matches; drop it.
+    for _vc in video_path.parent.glob("vc_*.mp4"):
+        _vc.unlink(missing_ok=True)
     shot.vc_status = None
     shot.vc_error_message = None
 
@@ -1438,17 +1431,18 @@ async def restore_trim(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    video_path = Path(shot.video_path)
-    backup = video_path.with_name("output_original.mp4")
-    if not backup.exists():
-        raise HTTPException(status_code=404, detail="No backup found — video was never trimmed")
+    # Restore to the pristine full video (output_<ts>_<uuid>.mp4).
+    from app.services.storage import pristine_video_path
+    pristine = pristine_video_path(project_id, shot_id)
+    if pristine is None or Path(shot.video_path) == pristine:
+        raise HTTPException(status_code=404, detail="No trimmed/derived video to restore from")
 
-    # Restore pristine original → a NEW unique current video, then drop the backup.
-    import shutil
-    new_video = video_path.parent / f"output_{ts_uuid_name('.mp4')}"
-    shutil.copy2(str(backup), str(new_video))
-    backup.unlink()
-    await _commit_new_current_video(project_id, shot, new_video, session)
+    # Drop all derived variants (trimmed_/vc_); point back to the pristine output_.
+    for _d in pristine.parent.glob("trimmed_*.mp4"):
+        _d.unlink(missing_ok=True)
+    for _d in pristine.parent.glob("vc_*.mp4"):
+        _d.unlink(missing_ok=True)
+    await _commit_new_current_video(project_id, shot, pristine, session)
 
     # Reset character calibration since last frame changed
     shot.cc_status = None
@@ -1459,11 +1453,6 @@ async def restore_trim(
     if pre_cc.exists():
         pre_cc.unlink()
 
-    # Remove stale pre-VC backup — audio length no longer matches restored video
-    from app.services.storage import shot_pre_vc_video_path
-    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
-    if pre_vc.exists():
-        pre_vc.unlink()
     shot.vc_status = None
     shot.vc_error_message = None
 
@@ -1513,10 +1502,9 @@ async def align_tail_frame(
 
     video_path = Path(shot.video_path)
 
-    # Backup pristine original once, then trim it → a NEW unique current video.
-    backup = _ensure_pristine_backup(video_path)
-    new_video = video_path.parent / f"output_{ts_uuid_name('.mp4')}"
-    trim_video(str(backup), str(new_video), best_frames)
+    # Trim the CURRENT video → a NEW trimmed_<ts>_<uuid>.mp4; pristine output_ stays.
+    new_video = video_path.parent / f"trimmed_{ts_uuid_name('.mp4')}"
+    trim_video(str(video_path), str(new_video), best_frames)
     await _commit_new_current_video(project_id, shot, new_video, session)
 
     # Reset character calibration since last frame changed
@@ -1526,10 +1514,9 @@ async def align_tail_frame(
     if pre_cc.exists():
         pre_cc.unlink()
 
-    # Remove stale pre-VC backup
-    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
-    if pre_vc.exists():
-        pre_vc.unlink()
+    # Trimming changes length → drop any voice-converted variant.
+    for _vc in video_path.parent.glob("vc_*.mp4"):
+        _vc.unlink(missing_ok=True)
     shot.vc_status = None
     shot.vc_error_message = None
 
