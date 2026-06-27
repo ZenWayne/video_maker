@@ -391,15 +391,14 @@ async def run_shot_pipeline(
             # Ensure shot directory
             ensure_shot_dir(project_id, shot.shot_id)
             s_dir = shot_dir(project_id, shot.shot_id)
-            # Name the generated video uniquely (timestamp + uuid) so a regenerated
-            # video is always a new URL — the browser can never replay a cached copy
-            # of an overwritten-in-place file. Remove the prior current video first
-            # (legacy output.mp4 or an earlier unique file); keep the trim/VC backups,
-            # which the regenerate / voice-convert flows manage separately.
-            for _old in s_dir.glob("output*.mp4"):
-                if _old.name not in ("output_original.mp4", "output_pre_vc.mp4"):
-                    _old.unlink(missing_ok=True)
-            video_out = s_dir / f"output_{int(datetime.utcnow().timestamp())}_{uuid.uuid4().hex[:8]}.mp4"
+            # Name the generated video uniquely (output_<ts>_<uuid>.mp4) so a
+            # regenerated video is always a new URL — the browser can never replay a
+            # cached copy. A fresh generation is a clean slate: delete EVERY prior
+            # video (output_/trimmed_/vc_ — all uniquely named, no fixed backups), so
+            # no stale trim/VC predecessor can survive and be sourced later.
+            for _old in s_dir.glob("*.mp4"):
+                _old.unlink(missing_ok=True)
+            video_out = s_dir / f"output_{ts_uuid_name('.mp4')}"
 
             video_model = (
                 settings.kie_veo_model
@@ -463,10 +462,11 @@ async def run_shot_pipeline(
 
             # Extract last frame to a UNIQUE name so its URL changes on every
             # (re)generation — a stable last_frame.png would be replayed from the
-            # browser cache (stale poster + stale next-shot first frame).
+            # browser cache (stale poster + stale next-shot first frame). Delete ALL
+            # prior last_frame*.png, including the pre-CC backup: a fresh generation
+            # makes the old character-calibration backup stale too.
             for _old in s_dir.glob("last_frame*.png"):
-                if _old.name != "last_frame_pre_cc.png":
-                    _old.unlink(missing_ok=True)
+                _old.unlink(missing_ok=True)
             last_frame_out = s_dir / f"last_frame_{ts_uuid_name('.png')}"
             extract_last_frame(str(video_out), str(last_frame_out))
             shot.last_frame_path = str(last_frame_out)
@@ -966,19 +966,13 @@ async def _do_voice_convert_one(
             vc_audio = str(shot_audio_vc_path(project_id, shot_id))
             await voice_convert(src_audio, ref_audio_path, vc_audio)
 
-            # 3. Backup current video before VC (if not already backed up)
-            pre_vc = shot_pre_vc_video_path(project_id, shot_id)
+            # 3. Remux the un-VC'd video stream + converted audio → a NEW vc_ file.
+            #    No backup copy: the non-VC predecessor (original_video) stays on disk
+            #    for revert and as the audio source. Only drop a prior vc_ output.
+            vc_out = shot_dir(project_id, shot_id) / f"vc_{ts_uuid_name('.mp4')}"
+            remux_video_with_audio(str(original_video), vc_audio, str(vc_out))
             video_path = Path(shot.video_path)
-            if not pre_vc.exists():
-                import shutil
-                shutil.copy2(str(video_path), str(pre_vc))
-
-            # 4. Remux video stream from backup + converted audio → a NEW unique
-            #    output so the URL changes (browser can't replay a stale copy).
-            #    Drop the old current file; keep the output_pre_vc.mp4 backup.
-            vc_out = shot_dir(project_id, shot_id) / f"output_{ts_uuid_name('.mp4')}"
-            remux_video_with_audio(str(pre_vc), vc_audio, str(vc_out))
-            if video_path.name not in ("output_original.mp4", "output_pre_vc.mp4"):
+            if video_path.name.startswith("vc_"):
                 video_path.unlink(missing_ok=True)
             shot.video_path = str(vc_out)
 
