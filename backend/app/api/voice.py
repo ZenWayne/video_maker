@@ -260,11 +260,18 @@ async def voice_revert_shot(
     if shot.vc_status != "done":
         raise HTTPException(status_code=400, detail="Shot has not been voice-converted")
 
-    # Restore pre-VC video
-    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
-    if pre_vc.exists():
-        video_path = Path(shot.video_path)
-        shutil.copy2(str(pre_vc), str(video_path))
+    # Revert by pointing video_path back at the pre-VC predecessor (the newest
+    # non-VC output_/trimmed_ file) and dropping the vc_ output. No fixed-name backup.
+    from app.services.storage import get_original_video_for_audio
+    try:
+        predecessor = get_original_video_for_audio(project_id, shot_id)
+    except FileNotFoundError:
+        predecessor = None
+    if predecessor is not None:
+        old = Path(shot.video_path) if shot.video_path else None
+        if old and old.name.startswith("vc_"):
+            old.unlink(missing_ok=True)
+        shot.video_path = str(predecessor)
 
     shot.vc_status = None
     shot.vc_error_message = None

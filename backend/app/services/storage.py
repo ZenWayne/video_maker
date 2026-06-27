@@ -69,25 +69,30 @@ def shot_target_last_frame_path(project_id: str, shot_id: int) -> Path:
     return shot_dir(project_id, shot_id) / "target_last_frame.png"
 
 
-def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
-    """Get the un-VC'd video to extract audio from.
+def pristine_video_path(project_id: str, shot_id: int) -> Optional[Path]:
+    """The full generated video (output_<ts>_<uuid>.mp4) — the restore-trim target.
 
-    Priority: output_pre_vc.mp4 (VC backup, post-trim) > newest
-    output_<ts>_<uuid>.mp4 (current, uniquely-named).
-    NOT output_original.mp4 — that is the pre-trim backup and has different
-    duration, which would cause lip sync mismatch after trimming.
+    No fixed-name backups exist anymore; every file is uniquely named with a role
+    prefix (output_ = pristine, trimmed_ = trimmed, vc_ = voice-converted) and a
+    regeneration wipes the whole shot dir, so the newest output_* is always current.
     """
     s_dir = shot_dir(project_id, shot_id)
-    pre_vc = s_dir / "output_pre_vc.mp4"
-    if pre_vc.exists():
-        return pre_vc
-    uniques = [
-        p for p in s_dir.glob("output_*.mp4")
-        if p.name not in ("output_original.mp4", "output_pre_vc.mp4")
-    ]
-    if uniques:
-        return max(uniques, key=lambda p: p.stat().st_mtime)
-    raise FileNotFoundError(f"No video found in {s_dir}")
+    outs = sorted(s_dir.glob("output_*.mp4"), key=lambda p: p.stat().st_mtime)
+    return outs[-1] if outs else None
+
+
+def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
+    """Get the un-VC'd video to extract source audio from.
+
+    Returns the newest video that is NOT a VC output (i.e. an output_/trimmed_ file)
+    — the current clip if it has not been voice-converted, otherwise the pre-VC
+    predecessor. Avoids double-converting and keeps lip-sync length matched.
+    """
+    s_dir = shot_dir(project_id, shot_id)
+    non_vc = [p for p in s_dir.glob("*.mp4") if not p.name.startswith("vc_")]
+    if non_vc:
+        return max(non_vc, key=lambda p: p.stat().st_mtime)
+    raise FileNotFoundError(f"No non-VC video found in {s_dir}")
 
 
 def final_dir(project_id: str) -> Path:
