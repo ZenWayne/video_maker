@@ -2,18 +2,21 @@ import { test, expect } from '@playwright/test'
 
 // E2E for the voiceprint waveform track in the trim dialog.
 //
-// Strategy: hermetic project/shot mocks (like join-preview.spec.ts), BUT the
-// shot's video_path points at a REAL media file served by the running backend
-// so the browser's Web Audio decodeAudioData path actually runs end-to-end.
-// video-info is mocked to return a realistic trailing-silence result so the
-// "speech-end" overlay path is exercised.
+// Fully hermetic render-guard: the project, `video-info`, AND the `/waveform`
+// peaks endpoint are all mocked. Waveform bars are produced by the BACKEND
+// (ffmpeg peak extraction) in production; here we mock that endpoint with
+// synthetic peaks and assert the track renders from them (no in-browser audio
+// decode is involved — that approach was removed because Chromium cannot decode
+// the shot MP4s). `video-info` is mocked with a realistic trailing-silence
+// result so the "speech-end" overlay path is exercised.
 //
-// The real file is shot 5 of an exported project (vc_*.mp4, AAC audio with a
-// genuine trailing-silence tail — the backend returned speech_end_frame=104).
+// The real backend extraction is covered separately by backend unit tests (real
+// ffmpeg) and was validated against a production shot during development.
 
 const TEST_USER = 'e2e-test'
 const PROJECT_ID = 'e2e-waveform-id'
-// Real, backend-served media file (same-origin via the dev proxy) so decode runs for real.
+// A real, backend-served media file — used only as the dialog's <video> element
+// source so it has a valid src; the waveform itself comes from the mocked /waveform route.
 const REAL_VIDEO =
   '/api/media/projects/2f1fcbbb-18c4-4f5d-b0a7-df2c70cc4343/shots/shot_5/vc_1782562825_6544acfb.mp4'
 
