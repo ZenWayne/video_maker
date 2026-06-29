@@ -325,3 +325,36 @@ def suggest_silence_trim(
         "silence_start_time": speech_end,
         **info,
     }
+
+
+def extract_waveform_peaks(video_path: str, buckets: int = 200) -> list[float]:
+    """Extract audio waveform peaks via ffmpeg PCM decode.
+
+    Decodes audio to mono 8 kHz s16le PCM, splits into `buckets` equal
+    time-bins, and returns the normalised peak (max abs / 32768) for each.
+    Returns [] when the video has no audio track or ffmpeg fails.
+    """
+    import subprocess
+    import array
+
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", video_path,
+         "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
+        capture_output=True,
+    )
+    raw = proc.stdout
+    if not raw:
+        return []
+    samples: array.array = array.array("h")
+    samples.frombytes(raw[: len(raw) // 2 * 2])
+    n = len(samples)
+    if n == 0:
+        return []
+    out: list[float] = []
+    size = n / buckets
+    for i in range(buckets):
+        s = int(i * size)
+        e = max(s + 1, int((i + 1) * size))
+        peak = max((abs(x) for x in samples[s:e]), default=0)
+        out.append(round(peak / 32768.0, 4))
+    return out

@@ -1300,6 +1300,29 @@ async def get_shot_video_info(
     return info
 
 
+@router.get("/projects/{project_id}/shots/{shot_id}/waveform")
+async def get_shot_waveform(
+    project_id: str,
+    shot_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return audio waveform peaks for the shot video as a list of floats in [0,1]."""
+    from app.agents.video_trimmer import extract_waveform_peaks
+
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot or not shot.video_path:
+        raise HTTPException(status_code=404, detail="Shot or video not found")
+    try:
+        peaks = extract_waveform_peaks(shot.video_path)
+    except Exception:
+        peaks = []
+    return {"peaks": peaks}
+
+
 def _ensure_pristine_backup(video_path: Path) -> Path:
     """Copy the current video to output_original.mp4 once (pristine pre-trim source)."""
     backup = video_path.with_name("output_original.mp4")
