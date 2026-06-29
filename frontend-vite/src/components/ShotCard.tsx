@@ -32,7 +32,6 @@ interface ShotCardProps {
   projectId?: string
   aspectRatio?: AspectRatio
   selected?: boolean
-  prevLastFramePath?: string | null
   isReferenceVoice?: boolean
   hasReferenceVoice?: boolean
   autoVoiceCalibrate?: boolean
@@ -184,7 +183,6 @@ export function ShotCard({
   projectId,
   aspectRatio,
   selected,
-  prevLastFramePath,
   onSelect,
   onEditScript,
   onEditPrompt,
@@ -254,14 +252,6 @@ export function ShotCard({
     if (!projectId) return
     try {
       const r = await api.extractFirstFrame(projectId, shot.shot_id)
-      onShotUpdated?.(shot.shot_id, { custom_first_frame_path: r.custom_first_frame_path })
-    } catch { /* handled by parent */ }
-  }
-
-  const handleUsePrevLastFrame = async () => {
-    if (!projectId) return
-    try {
-      const r = await api.usePrevLastFrame(projectId, shot.shot_id)
       onShotUpdated?.(shot.shot_id, { custom_first_frame_path: r.custom_first_frame_path })
     } catch { /* handled by parent */ }
   }
@@ -409,7 +399,7 @@ export function ShotCard({
       ? [shot.custom_first_frame_path]
       : []
 
-  // 首帧槽显示 custom_first_frame_path：由「用上一镜末帧」/「提取本镜首帧」/「上传首帧」
+  // 首帧槽显示 custom_first_frame_path：由「提取本镜首帧」/「上传首帧」
   // 或连续性初始化显式写入(不再依赖会失灵的 use_prev_last_frame live 链接)。
   const firstFrameUrl = shot.custom_first_frame_path
 
@@ -933,7 +923,6 @@ export function ShotCard({
                 onPreview={setPreviewUrl}
                 onDelete={handleDeleteFirstFrame}
                 menuItems={[
-                  { icon: Link, label: '用上一镜末帧', disabled: !prevLastFramePath, onClick: handleUsePrevLastFrame },
                   { icon: Crop, label: '提取本镜首帧', disabled: !shot.first_frame_path, onClick: handleExtractFirstFrame },
                   { icon: Upload, label: '上传首帧', onClick: () => firstFrameInputRef.current?.click() },
                 ]}

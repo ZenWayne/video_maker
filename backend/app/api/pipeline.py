@@ -1166,47 +1166,6 @@ async def extract_first_frame(
     return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
 
 
-@router.post("/projects/{project_id}/shots/{shot_id}/use-prev-last-frame")
-async def use_prev_last_frame(
-    project_id: str,
-    shot_id: int,
-    user: str = Depends(_require_user),
-    session: AsyncSession = Depends(get_session),
-):
-    """Snapshot the PREVIOUS shot's current last frame as this shot's first frame.
-
-    Copies prev shot's last_frame into this shot's custom_frames/ (ts_uuid name) and
-    sets custom_first_frame_path — a stable snapshot, so regenerating the previous
-    shot later won't leave a dangling reference.
-    """
-    await _get_project_or_404(project_id, session)
-    result = await session.execute(
-        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
-    )
-    shot = result.scalar_one_or_none()
-    if not shot:
-        raise HTTPException(status_code=404, detail="Shot not found")
-
-    prev_result = await session.execute(
-        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id - 1)
-    )
-    prev = prev_result.scalar_one_or_none()
-    if not prev or not prev.video_path or not Path(prev.video_path).exists():
-        raise HTTPException(status_code=400, detail="Previous shot has no video")
-
-    from app.agents.frame_porter import extract_last_frame
-    dest_dir = shot_custom_frames_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / ts_uuid_name(".png")
-    # Extract the prev shot's VIDEO actual last frame — NOT prev.last_frame_path,
-    # which a character-calibration may have overwritten with a pose-changed still.
-    extract_last_frame(str(prev.video_path), str(dest))
-
-    shot.custom_first_frame_path = str(dest)
-    await session.commit()
-    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
-
-
 @router.post("/projects/{project_id}/shots/{shot_id}/extract-last-frame")
 async def extract_last_frame(
     project_id: str,
