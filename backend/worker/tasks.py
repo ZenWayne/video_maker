@@ -434,6 +434,12 @@ async def run_shot_pipeline(
                 )
                 video_out.write_bytes(video_bytes)
                 shot.video_path = str(video_out)
+                from app.agents.video_trimmer import get_video_info as _gvi
+                _src_info = _gvi(str(video_out))
+                shot.source_fps = _src_info["fps"]
+                shot.source_frames = _src_info["total_frames"]
+                shot.trim_frames = None
+                shot.vc_audio_path = None
                 observability.update_span(
                     vid_gen,
                     output={
