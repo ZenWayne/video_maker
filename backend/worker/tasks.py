@@ -892,55 +892,46 @@ async def run_merger(
         )
         shots = shots_result.scalars().all()
 
-        shot_paths = [s.video_path for s in shots if s.video_path]
-
-        if not shot_paths:
+        if not shots:
             raise ValueError("No completed shots to merge")
 
         final_path = final_video_path(project_id)
         final_path.parent.mkdir(parents=True, exist_ok=True)
 
+        import tempfile, shutil as _shutil
+        from app.agents.effective_clip import effective_clip_paths
+        tmp_dir = tempfile.mkdtemp(prefix=f"export_{project_id}_")
         try:
+            shot_paths = effective_clip_paths(list(shots), tmp_dir)
+            if not shot_paths:
+                raise ValueError("No completed shots to merge")
             cf = crossfade_duration if crossfade_duration is not None else settings.crossfade_duration
             merge_shots_with_crossfade(shot_paths, str(final_path), crossfade_duration=cf)
 
             project.final_video_path = str(final_path)
             session.add(project)
-
             await transition_project_status(
                 project, ProjectStatus.EXPORTED, "system:worker", session, redis
             )
-
             await publish_event(
-                redis,
-                project_id,
-                {
-                    "type": "export_done",
-                    "data": {
-                        "final_video_path": f"/api/projects/{project_id}/final.mp4"
-                    },
-                },
+                redis, project_id,
+                {"type": "export_done",
+                 "data": {"final_video_path": f"/api/projects/{project_id}/final.mp4"}},
             )
-
             logger.info(f"Merger completed for project {project_id}")
-
         except Exception as e:
             logger.error(f"Merger failed for project {project_id}: {e}")
             project.error_message = str(e)
             session.add(project)
-
             await transition_project_status(
                 project, ProjectStatus.FAILED, "system:worker", session, redis
             )
-
             await publish_event(
-                redis,
-                project_id,
-                {
-                    "type": "pipeline_failed",
-                    "data": {"error_message": str(e)},
-                },
+                redis, project_id,
+                {"type": "pipeline_failed", "data": {"error_message": str(e)}},
             )
+        finally:
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 async def _do_voice_convert_one(
