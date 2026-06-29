@@ -844,3 +844,94 @@ Run: `make dev`(或 `cd frontend-vite && npm run dev`),浏览器打开某个有 
 **2. Placeholder scan:** 无 TBD/TODO;每个代码步骤含完整可运行代码与预期输出。✓
 
 **3. Type consistency:** helper `speech_end_info` 在 Task 1 定义、端点与单测共用;响应键 `speech_end_frame`/`speech_end_sec` 在 Task 1(后端键)、Task 2(TS 类型)、Task 5(读取 `info.speech_end_frame`)一致;`downsamplePeaks`/`frameFromOffsetX`/`pixelForFrame` 在 Task 3 定义、Task 4 消费,签名一致;`WaveformTrackProps`(videoSrc/totalFrames/endFrame/speechEndFrame/onScrub)在 Task 4 定义、Task 5 传参一致。✓
+
+---
+
+## Addendum (2026-06-29):数据源转向后端 ffmpeg 提峰值
+
+**背景**:Task 6 真实栈 e2e 发现前端 Web Audio `decodeAudioData` 对生产 shot MP4(带视频轨的 muxed 容器)恒返回 `EncodingError`(已在 3 个文件确认),波形静默卸载、功能落空。单元测试因 mock 了 `decodeAudioData` 而未暴露。经用户决策:**改为后端 ffmpeg 抽音轨算峰值,前端只渲染**。`detect_speech_end`/黄线/`video-info`(Task 1)真实验证正常,保持不变。
+
+### Task 7:后端波形峰值提取 + `/waveform` 端点
+
+**Files:**
+- Modify: `backend/app/agents/video_trimmer.py`(新增 `extract_waveform_peaks`)
+- Modify: `backend/app/api/pipeline.py`(新增 `GET .../shots/{shot_id}/waveform` 端点)
+- Test: `backend/tests/unit/test_waveform_peaks.py`(新建)
+
+**Interfaces:**
+- Produces:
+  - `extract_waveform_peaks(video_path: str, buckets: int = 200) -> list[float]` —— 用 ffmpeg 抽单声道 PCM(`-ac 1 -ar 8000 -f s16le -`),分 `buckets` 桶取每桶 `max(abs)/32768` 归一化到 `[0,1]`;无音轨/失败返回 `[]`。
+  - 端点 `GET /api/projects/{project_id}/shots/{shot_id}/waveform` → `{"peaks": list[float]}`。
+
+**TDD 要点(真实 ffmpeg,合成视频复用 Task 1 的 lavfi/concat helper 思路):**
+- 对**有人声**的合成视频(sine + 静音段),`extract_waveform_peaks` 返回长度 == buckets 的数组,人声段桶峰值明显 > 0、静音段桶峰值接近 0。
+- 对**无音轨**视频(`-an`)返回 `[]`。
+- 关键:这里**不 mock ffmpeg**——后端 ffmpeg 解码可靠,正是修复点;测试必须跑真实 ffmpeg(skip 当 ffmpeg 缺失)。
+
+```python
+def extract_waveform_peaks(video_path: str, buckets: int = 200) -> list[float]:
+    import subprocess, array
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", video_path,
+         "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
+        capture_output=True,
+    )
+    raw = proc.stdout
+    if not raw:
+        return []
+    samples = array.array("h")
+    samples.frombytes(raw[: len(raw) // 2 * 2])
+    n = len(samples)
+    if n == 0:
+        return []
+    out: list[float] = []
+    size = n / buckets
+    for i in range(buckets):
+        s = int(i * size)
+        e = max(s + 1, int((i + 1) * size))
+        peak = max((abs(x) for x in samples[s:e]), default=0)
+        out.append(round(peak / 32768.0, 4))
+    return out
+```
+
+端点(紧随 `video-info` 端点之后):
+```python
+@router.get("/projects/{project_id}/shots/{shot_id}/waveform")
+async def get_shot_waveform(project_id: str, shot_id: int, session: AsyncSession = Depends(get_session)):
+    from app.agents.video_trimmer import extract_waveform_peaks
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id))
+    shot = result.scalar_one_or_none()
+    if not shot or not shot.video_path:
+        raise HTTPException(status_code=404, detail="Shot or video not found")
+    try:
+        peaks = extract_waveform_peaks(shot.video_path)
+    except Exception:
+        peaks = []
+    return {"peaks": peaks}
+```
+
+### Task 8:前端改吃后端峰值 + 移除 Web Audio + 真实栈 e2e 验证
+
+**Files:**
+- Modify: `frontend-vite/src/lib/api.ts`(新增 `getWaveform`)
+- Modify: `frontend-vite/src/components/WaveformTrack.tsx`(props `videoSrc`→`peaks`,删 Web Audio/AudioContext/fetch-decode)
+- Modify: `frontend-vite/src/lib/waveform.ts`(删 `downsamplePeaks` + 其测试,峰值已由后端给;保留 `frameFromOffsetX`/`pixelForFrame`)
+- Modify: `frontend-vite/src/components/TrimDialog.tsx`(拉 `getWaveform`,新增 `peaks` state,传给 WaveformTrack)
+- Modify 测试:`WaveformTrack.test.tsx`、`TrimDialog.test.tsx`、`waveform.test.ts`、`waveform-trim.spec.ts`(取消 test1 fixme)
+
+**Interfaces:**
+- `api.getWaveform(projectId, shotId): Promise<{ peaks: number[] }>`。
+- `WaveformTrackProps`:`{ peaks: number[] | null, totalFrames, endFrame, speechEndFrame, onScrub }`。
+  - `peaks === null` → 加载中(显示「波形加载中…」+ 占位 canvas)。
+  - `peaks` 为空数组 `[]` → 无音轨/失败,返回 `null`(降级回纯滑块)。
+  - 非空 → 画柱(柱宽 = trackWidth/peaks.length;峰值已 0..1 归一化,低于 0.05 画 zinc-300 否则 blue-500),叠加静音带/黄线/红手柄(沿用现有 `pixelForFrame`/`frameFromOffsetX`)。
+
+**测试要点:**
+- `WaveformTrack.test.tsx`:不再 mock AudioContext/fetch;传 `peaks={[0.1,0.8,...]}` 断言 canvas 渲染 + fillRect 调用;`peaks={[]}` 断言返回 null(无 canvas);`onScrub` 仍以 `frameFromOffsetX` 计算帧(点击断言 `toHaveBeenCalledWith(120)`)。
+- `TrimDialog.test.tsx`:mock `api.getWaveform` 返回非空 peaks,断言 `声纹波形` 渲染;移除不再需要的 AudioContext/fetch stub。
+- `waveform.test.ts`:删 `downsamplePeaks` 相关用例,保留映射用例。
+- **`waveform-trim.spec.ts`**:取消 test1 的 `test.fixme`(因数据来自后端 ffmpeg,不再依赖浏览器解码),mock `**/api/projects/*/shots/*/waveform` 返回非空 peaks,断言波形轨稳定渲染(不再卸载)。
+- **真实栈验收(替代原 Task 6 手测)**:把共享栈切到本 worktree,跑 `npx playwright test waveform-trim.spec.ts`——两条用例都应通过,证明真实生产 MP4 上波形能渲染。
+
+**收尾**:重跑全量单测 + tsc(基线 17)+ 重新派最终全分支审查覆盖 Task 7-8 的改动。
