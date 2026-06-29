@@ -1,7 +1,10 @@
 """Shared fixtures for backend integration tests."""
+import subprocess
 import pytest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from httpx import AsyncClient, ASGITransport
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -148,6 +151,47 @@ async def _add_character_image(sf, project_id):
         await s.commit()
         await s.refresh(img)
         return img.id
+
+
+# ── Shared seeding helper (Tasks 5/6/7/8) ─────────────────────────────────────
+
+async def seed_shot_with_source(sf, project_id: str, shot_id: int, frames: int = 120) -> Path:
+    """Create a real source video for an already-inserted shot and update its DB fields.
+
+    Writes ``output_<ts>_<uuid>.mp4`` into the shot dir (which must already exist
+    under ``settings.storage_root``), then sets ``video_path``, ``source_fps``, and
+    ``source_frames`` on the shot row.  Returns the Path to the written file.
+
+    Reusable by Tasks 6/7/8 integration tests.
+    """
+    from app.services.storage import shot_dir, ts_uuid_name
+    from app.agents.video_trimmer import get_video_info
+
+    s_dir = shot_dir(project_id, shot_id)
+    s_dir.mkdir(parents=True, exist_ok=True)
+    out = s_dir / f"output_{ts_uuid_name('.mp4')}"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"testsrc2=size=128x128:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=440",
+            "-frames:v", str(frames),
+            "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac",
+            "-shortest", str(out),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    info = get_video_info(str(out))
+    async with sf() as s:
+        shot = (await s.execute(
+            select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+        )).scalar_one()
+        shot.video_path = str(out)
+        shot.source_fps = info["fps"]
+        shot.source_frames = info["total_frames"]
+        await s.commit()
+    return out
 
 
 # ── State fixtures ─────────────────────────────────────────────────────────────

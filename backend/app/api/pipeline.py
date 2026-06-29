@@ -1389,9 +1389,15 @@ async def trim_shot_video(
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Trim video to end at the given frame number (inclusive)."""
-    from app.agents.video_trimmer import get_video_info, trim_video
-    from app.agents.frame_porter import extract_last_frame
+    """Non-destructive trim: record trim_frames and refresh the last frame.
+
+    The source output_*.mp4 is never modified. Trimming changes the effective
+    last frame (index N-1 of the source) → re-extract it and reset CC. VC is
+    untouched (the vc audio is full-length and independent of trim length).
+    """
+    from app.agents.video_trimmer import get_video_info
+    from app.agents.frame_porter import extract_frame_at
+    from app.services.storage import shot_source_path
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1403,37 +1409,38 @@ async def trim_shot_video(
     if shot.status != "completed":
         raise HTTPException(status_code=409, detail="Shot is not completed")
 
-    video_path = Path(shot.video_path)
-    info = get_video_info(str(video_path))
+    source = shot_source_path(project_id, shot_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source video not found")
+    info = get_video_info(str(source))
+    total = info["total_frames"]
 
     if body.end_frame < 24:
         raise HTTPException(status_code=400, detail="Must keep at least 24 frames")
-    if body.end_frame >= info["total_frames"]:
-        raise HTTPException(status_code=400, detail="end_frame must be less than total frames")
+    n = min(body.end_frame, total)  # clamp; full length is a no-op trim
 
-    # Trim the CURRENT video → a NEW trimmed_<ts>_<uuid>.mp4 (frame-correct: end_frame
-    # is relative to the clip the user is viewing). The pristine output_ stays on disk
-    # for restore; no fixed-name backup is created.
-    new_video = video_path.parent / f"trimmed_{ts_uuid_name('.mp4')}"
-    # Trim (use frame count, not time — avoids float rounding ±1 frame)
-    trim_video(str(video_path), str(new_video), body.end_frame)
-    await _commit_new_current_video(project_id, shot, new_video, session)
+    # 1. Metadata only — source file is never touched
+    shot.trim_frames = n if n < total else None
+    shot.video_path = str(source)   # always the immutable source
+    shot.source_fps = info["fps"]
+    shot.source_frames = total
 
-    # Reset character calibration since last frame changed
+    # 2. Refresh last frame = source frame N-1 (or full last frame when no trim)
+    s_dir = shot_dir(project_id, shot_id)
+    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
+        _old.unlink(missing_ok=True)
+    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
+    frame_idx = (n - 1) if n < total else (total - 1)
+    extract_frame_at(str(source), frame_idx, str(new_lf))
+    shot.last_frame_path = str(new_lf)
+    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+
+    # 3. Last frame changed → reset CC. VC is untouched.
     shot.cc_status = None
     shot.cc_error_message = None
-
-    # Remove stale pre-CC backup so next calibration creates a fresh one
-    from app.services.storage import shot_pre_cc_last_frame_path
     pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
     if pre_cc.exists():
         pre_cc.unlink()
-
-    # Trimming changes length → any voice-converted variant no longer matches; drop it.
-    for _vc in video_path.parent.glob("vc_*.mp4"):
-        _vc.unlink(missing_ok=True)
-    shot.vc_status = None
-    shot.vc_error_message = None
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
@@ -1441,8 +1448,9 @@ async def trim_shot_video(
     return {
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
+        "trim_frames": shot.trim_frames,
         "version": ts,
-        **get_video_info(shot.video_path),
+        **get_video_info(str(source)),
     }
 
 
