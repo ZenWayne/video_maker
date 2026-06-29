@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from worker.tasks import _do_voice_convert_one
-from tests.integration.conftest import _make_project, _add_shot, seed_shot_with_source
+from tests.integration.conftest import _make_project, _add_shot, seed_shot_with_source, HEADERS
 
 
 def _md5(p: Path) -> str:
@@ -60,3 +60,43 @@ async def test_vc_writes_wav_only_keeps_source(db_session_factory, monkeypatch, 
 
     # Temp audio_in_*.wav cleaned up
     assert not list(shot_directory.glob("audio_in_*.wav"))
+
+
+@pytest.mark.asyncio
+async def test_voice_revert_clears_audio(client, db_session_factory):
+    """voice-revert must delete vc_audio wav, clear vc metadata, leave source untouched."""
+    from sqlalchemy import select
+    from app.models.project import Shot
+    from app.services.storage import shot_dir, ts_uuid_name
+
+    pid = await _make_project(db_session_factory, status="completed")
+    await _add_shot(db_session_factory, pid, 1)
+    source_mp4 = await seed_shot_with_source(db_session_factory, pid, 1)
+    before_md5 = _md5(source_mp4)
+
+    # Create a real (fake) vc audio wav in the shot directory
+    s_dir = shot_dir(pid, 1)
+    wav_name = f"audio_vc_{ts_uuid_name('.wav')}"
+    wav_path = s_dir / wav_name
+    wav_path.write_bytes(b"RIFFfakewav")
+
+    # Set shot to vc-done state
+    async with db_session_factory() as s:
+        shot = (await s.execute(
+            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
+        )).scalar_one()
+        shot.vc_status = "done"
+        shot.vc_audio_path = str(wav_path)
+        await s.commit()
+
+    r = await client.post(
+        f"/api/projects/{pid}/shots/1/voice-revert",
+        headers=HEADERS,
+    )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["vc_status"] is None
+    assert data["vc_audio_url"] is None
+    assert not wav_path.exists()
+    assert _md5(source_mp4) == before_md5
