@@ -1436,11 +1436,9 @@ async def trim_shot_video(
     await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
 
     # 3. Last frame changed → reset CC. VC is untouched.
+    # Note: last_frame_pre_cc.png is already removed by the glob above.
     shot.cc_status = None
     shot.cc_error_message = None
-    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
-    if pre_cc.exists():
-        pre_cc.unlink()
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
@@ -1465,7 +1463,7 @@ async def restore_trim(
     from app.agents.video_trimmer import get_video_info
     from app.agents.frame_porter import extract_frame_at
     from app.services.storage import (
-        shot_source_path, ts_uuid_name, shot_dir, shot_pre_cc_last_frame_path,
+        shot_source_path, ts_uuid_name, shot_dir,
     )
 
     await _get_project_or_404(project_id, session)
@@ -1495,11 +1493,9 @@ async def restore_trim(
     shot.last_frame_path = str(new_lf)
     await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
 
+    # Note: last_frame_pre_cc.png is already removed by the glob above.
     shot.cc_status = None
     shot.cc_error_message = None
-    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
-    if pre_cc.exists():
-        pre_cc.unlink()
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
@@ -1519,9 +1515,11 @@ async def align_tail_frame(
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Auto-trim video to the frame that best matches the target tail frame (SSIM)."""
-    from app.agents.video_trimmer import find_best_tail_frame, get_video_info, trim_video
-    from app.agents.frame_porter import extract_last_frame
+    """Non-destructive auto-trim: update trim_frames metadata to the frame that best
+    matches the target tail frame (SSIM). Source output_*.mp4 is never modified."""
+    from app.agents.video_trimmer import find_best_tail_frame, get_video_info
+    from app.agents.frame_porter import extract_frame_at
+    from app.services.storage import shot_source_path
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1533,37 +1531,37 @@ async def align_tail_frame(
     if not shot.target_last_frame_path:
         raise HTTPException(status_code=400, detail="No target tail frame for this shot")
 
-    best_frames = find_best_tail_frame(shot.video_path, shot.target_last_frame_path)
-    if best_frames is None:
-        # Already optimal — return current info without trimming
-        info = get_video_info(shot.video_path)
-        return {
-            "video_path": to_media_url(shot.video_path),
-            "last_frame_path": to_media_url(shot.last_frame_path),
-            "version": int(datetime.utcnow().timestamp()),
-            "aligned_to_frame": info["total_frames"],
-            **info,
-        }
+    source = shot_source_path(project_id, shot_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source video not found")
+    info = get_video_info(str(source))
+    total = info["total_frames"]
 
-    video_path = Path(shot.video_path)
+    best = find_best_tail_frame(str(source), shot.target_last_frame_path)
+    n = total if best is None else min(best, total)
 
-    # Trim the CURRENT video → a NEW trimmed_<ts>_<uuid>.mp4; pristine output_ stays.
-    new_video = video_path.parent / f"trimmed_{ts_uuid_name('.mp4')}"
-    trim_video(str(video_path), str(new_video), best_frames)
-    await _commit_new_current_video(project_id, shot, new_video, session)
+    # 1. Metadata only — source file is never touched
+    shot.trim_frames = n if n < total else None
+    shot.video_path = str(source)
+    shot.source_fps = info["fps"]
+    shot.source_frames = total
 
-    # Reset character calibration since last frame changed
+    # 2. Refresh last frame (same pattern as /trim)
+    s_dir = shot_dir(project_id, shot_id)
+    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
+        _old.unlink(missing_ok=True)
+    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
+    frame_idx = (n - 1) if n < total else (total - 1)
+    extract_frame_at(str(source), frame_idx, str(new_lf))
+    shot.last_frame_path = str(new_lf)
+    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+
+    # 3. Last frame changed → reset CC. VC is untouched (consistent with /trim).
     shot.cc_status = None
     shot.cc_error_message = None
     pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
     if pre_cc.exists():
         pre_cc.unlink()
-
-    # Trimming changes length → drop any voice-converted variant.
-    for _vc in video_path.parent.glob("vc_*.mp4"):
-        _vc.unlink(missing_ok=True)
-    shot.vc_status = None
-    shot.vc_error_message = None
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
@@ -1571,9 +1569,10 @@ async def align_tail_frame(
     return {
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
+        "trim_frames": shot.trim_frames,
         "version": ts,
-        "aligned_to_frame": best_frames,
-        **get_video_info(shot.video_path),
+        "aligned_to_frame": n,
+        **get_video_info(str(source)),
     }
 
 
