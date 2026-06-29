@@ -89,9 +89,7 @@ These are advisory — the backend never blocks a save because of word count.
 ## `has_video` note
 
 Shots returned by `list_shots` / `get_shot` carry `"has_video": true/false`.
-When `has_video` is true, edits saved via `update_dialogue` / `update_motion` /
-`batch_update_shots` will **not** affect the existing rendered video until the shot is
-regenerated — the backend returns an explanatory `"note"` field alongside the result.
+When `has_video` is true, edits saved via `update_dialogue` or `update_motion` will **not** affect the existing rendered video until the shot is regenerated — these endpoints return an explanatory `"note"` field in their response. `batch_update_shots` does not include a `note` field.
 
 ## Error handling
 
