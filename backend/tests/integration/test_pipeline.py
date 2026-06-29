@@ -664,3 +664,22 @@ async def test_put_storyboard_empty_shots(client, project_in_script_review):
         headers=HEADERS,
     )
     assert r.status_code == 422
+
+
+async def test_put_storyboard_deletes_shot_output_dir(client, db_session_factory, project_in_script_review):
+    pid = project_in_script_review  # shots 1,2,3
+    from app.services.storage import shot_dir
+    leftover = shot_dir(pid, 3)
+    leftover.mkdir(parents=True, exist_ok=True)
+    (leftover / "output.mp4").write_bytes(b"stale")
+    assert leftover.exists()
+
+    r = await client.put(
+        f"/api/projects/{pid}/storyboard",
+        json={"scene_overview": "ov", "shots": [
+            {"shot_id": 1, "text": "keep", "shot_type": "Medium Shot",
+             "visual_description": "v", "shot_duration": 6, "align_with_previous": False}]},
+        headers=HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    assert not leftover.exists()  # shot 3 dir removed

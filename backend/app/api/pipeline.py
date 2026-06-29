@@ -270,10 +270,13 @@ async def put_storyboard(
     existing = {s.shot_id: s for s in result.scalars().all()}
     payload_ids = {item.shot_id for item in body.shots}
 
-    # Delete shots absent from the payload (defensive file cleanup handled in Task 2).
+    # Delete shots absent from the payload + remove any leftover output dir (CLAUDE.md audit).
     for shot_id, shot in existing.items():
         if shot_id not in payload_ids:
             await session.delete(shot)
+            s_dir = shot_dir(project_id, shot_id)
+            if s_dir.exists():
+                shutil.rmtree(s_dir, ignore_errors=True)
 
     # Upsert shots present in the payload.
     for item in body.shots:
