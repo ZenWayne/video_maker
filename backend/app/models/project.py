@@ -10,6 +10,7 @@ from sqlalchemy import (
     String,
     Text,
     Integer,
+    Float,
     Boolean,
     DateTime,
     ForeignKey,
@@ -150,6 +151,11 @@ class Shot(Base):
     tf_error_message = Column(Text, nullable=True)
     tf_confirmed = Column(Boolean, default=False)  # 用户已确认尾帧
     auto_trim = Column(Boolean, nullable=False, default=True)  # 生成后自动 SSIM 裁剪
+    # --- 非破坏式编辑 EDL ---
+    trim_frames = Column(Integer, nullable=True)      # 从头保留帧数；None=不裁剪
+    source_fps = Column(Float, nullable=True)         # 源视频 fps（生成时写入）
+    source_frames = Column(Integer, nullable=True)    # 源视频总帧数
+    vc_audio_path = Column(Text, nullable=True)       # 替换音轨 wav；None=用源原音
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
