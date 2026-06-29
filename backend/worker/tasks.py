@@ -944,7 +944,8 @@ async def _do_voice_convert_one(
     """Voice-convert a single shot using the given reference audio.
 
     Extracts original audio from the shot, calls CosyVoice VC service,
-    and remuxes the result back into the video.
+    and stores the result as a new uniquely-named wav file. The source
+    video is never touched; only shot.vc_audio_path is updated (metadata-only).
     """
     from app.agents.audio_extractor import extract_audio_wav
     from app.services.cosyvoice_client import voice_convert

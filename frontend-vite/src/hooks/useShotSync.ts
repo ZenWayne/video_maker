@@ -33,7 +33,7 @@ export function useShotSync({ trimEndSec, audioEnabled }: ShotSyncOptions) {
     const a = audioRef.current
     if (!v) return
     if (trimEndSec != null && v.currentTime >= trimEndSec) {
-      v.pause()
+      v?.pause?.()
       a?.pause?.()
       return
     }

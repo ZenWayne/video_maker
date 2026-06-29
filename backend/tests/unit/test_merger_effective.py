@@ -21,7 +21,7 @@ def _md5(p: Path) -> str:
     return hashlib.md5(p.read_bytes()).hexdigest()
 
 
-def test_single_shot_export_last_frame_md5(tmp_path, monkeypatch):
+def test_single_shot_export_last_frame_md5(tmp_path):
     """単镜头导出走 c=copy；用无损烤片 → 最终视频末帧 == 源第 N-1 帧（严格 md5）。"""
     src = tmp_path / "out.mkv"
     subprocess.run(

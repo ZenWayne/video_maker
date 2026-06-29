@@ -22,7 +22,6 @@ const SHOT_MOCK = {
   shot_duration: 4,
   status: 'completed',
   align_with_previous: false,
-  use_prev_last_frame: false,
   motion_prompt: null,
   first_frame_path: null,
   video_path: `/api/media/projects/${PROJECT_ID}/shots/shot_1/output.mp4`,
