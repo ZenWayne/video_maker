@@ -36,7 +36,7 @@ DEV_COMPOSE   ?= $(DEPLOY_DIR)/docker-compose.dev.yml
 
 # ---------------------------------------------
 .PHONY: help dev build push deploy deploy-frontend deploy-backend \
-        dev-frontend dev-backend dev-redis dev-stop dev-worker \
+        dev-frontend dev-backend dev-redis dev-stop dev-worker dev-mcp \
         prod-up prod-down prod-logs prod-ps \
         login build-frontend build-backend \
         sync remote-deploy clean \
@@ -56,6 +56,7 @@ help:
 	@echo "  make dev-frontend     Start frontend Vite dev server only"
 	@echo "  make dev-backend      Start backend dev server only"
 	@echo "  make dev-worker       Start background worker"
+	@echo "  make dev-mcp          Start MCP server (port 8765)"
 	@echo "  make dev-redis        Start local Redis"
 	@echo "  make dev-stop         Stop all dev services"
 	@echo ""
@@ -129,6 +130,11 @@ dev-backend:
 dev-worker:
 	@echo "Starting worker..."
 	podman compose -f $(DEV_COMPOSE) up -d worker
+
+# Start MCP server only
+dev-mcp:
+	@echo "Starting MCP server..."
+	podman compose -f $(DEV_COMPOSE) up -d mcp
 
 # Start Redis only
 dev-redis:
