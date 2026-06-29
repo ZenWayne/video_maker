@@ -81,9 +81,11 @@ def create_server(backend: BackendClient) -> FastMCP:
         """Apply many {shot_id, text?, motion_prompt?} edits in one call. Partial success allowed."""
         results = []
         for u in updates:
-            sid = u["shot_id"]
-            body = {k: u[k] for k in ("text", "motion_prompt") if k in u and u[k] is not None}
+            sid = u.get("shot_id")
             try:
+                if sid is None:
+                    raise ValueError("missing shot_id")
+                body = {k: u[k] for k in ("text", "motion_prompt") if k in u and u[k] is not None}
                 if not body:
                     raise ValueError("no text or motion_prompt provided")
                 shot = await backend.patch_shot(project_id, sid, body)

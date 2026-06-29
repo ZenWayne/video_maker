@@ -69,6 +69,26 @@ async def test_batch_update_shots_partial(server, db_session_factory):
     by_id = {r["shot_id"]: r for r in results}
     assert by_id[1]["ok"] is True
     assert by_id[999]["ok"] is False
+    assert "error" in by_id[999]
+
+
+async def test_batch_update_shots_missing_shot_id(server, db_session_factory):
+    pid = await seed_project(db_session_factory)
+    async with Client(server) as c:
+        res = await c.call_tool("batch_update_shots", {
+            "project_id": pid,
+            "updates": [
+                {"shot_id": 1, "text": "valid item"},
+                {"text": "x"},  # missing shot_id → per-item failure, not batch abort
+            ],
+        })
+    results = _payload(res)["results"]
+    # valid item succeeds
+    valid = next(r for r in results if r["shot_id"] == 1)
+    assert valid["ok"] is True
+    # malformed item recorded as failure with shot_id None
+    failed = next(r for r in results if r["shot_id"] is None)
+    assert failed["ok"] is False
 
 
 async def test_replace_storyboard_tool(server, db_session_factory):
