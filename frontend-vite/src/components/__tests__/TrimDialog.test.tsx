@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { TrimDialog } from '../TrimDialog'
+import { api } from '@/lib/api'
 import type { Shot } from '@/lib/types'
 
 // Mock api module
@@ -285,5 +286,9 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
       />,
     )
     expect(await screen.findByText('声纹波形')).toBeInTheDocument()
+    // 确认波形数据确实经 api.getWaveform 拉取(而非仅渲染 loading 标签)
+    await waitFor(() =>
+      expect(api.getWaveform).toHaveBeenCalledWith('proj-1', 1),
+    )
   })
 })
