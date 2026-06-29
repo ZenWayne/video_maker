@@ -925,6 +925,8 @@ MCP 代理的推荐操作顺序：
     → 批量写入各镜运镜提示词
 ```
 
+> **注意**：`update_dialogue` / `update_motion` / `batch_update_shots` 底层均调用 `PATCH /shots/{shot_id}`，该端点**不做项目状态校验**，因此可在任意状态（包括视频生成中）直接修改 `text` 与 `motion_prompt`；新内容将在下次重新生成时生效。
+
 也可以用 `update_dialogue` / `update_motion` 逐镜操作；`batch_update_shots` 支持同时传 `text` 和 `motion_prompt`，允许部分成功（`"ok": false` 逐项报告错误）。
 
 工具目录详见 `backend/mcp_server/README.md`。

@@ -523,6 +523,7 @@ async def patch_shot(
         "use_prev_last_frame": shot.use_prev_last_frame,
         "shot_duration": shot.shot_duration,
         "auto_trim": shot.auto_trim,
+        "video_path": shot.video_path,
     }
 
 
