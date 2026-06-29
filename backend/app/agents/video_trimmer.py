@@ -53,13 +53,19 @@ def detect_speech_end(
     if not starts:
         return None
 
-    # The last silence_start has no matching silence_end → it's trailing silence
-    # (silence that runs to the end of the file)
-    is_trailing = len(starts) > len(ends)
+    # Detect trailing silence: either the last silence_start has no matching silence_end
+    # (file ends before silencedetect flushes), OR the last silence_end is at/past the
+    # video duration (the normal case — encoders like AAC add a tiny amount of padding so
+    # silence_end is reported fractionally beyond the nominal container duration).
+    _TRAILING_TOLERANCE = 0.15  # seconds; covers typical AAC encoder delay/flush padding
+    is_trailing = len(starts) > len(ends) or (
+        len(ends) > 0 and ends[-1] >= video_duration - _TRAILING_TOLERANCE
+    )
 
     if not is_trailing:
-        # All silence segments have both start and end → no trailing silence
-        logger.info("No trailing silence in %s (all segments have end markers)", video_path)
+        # Last silence ends well before the video ends → no trailing silence
+        logger.info("No trailing silence in %s (last silence_end=%.2f, duration=%.2f)",
+                    video_path, ends[-1] if ends else 0.0, video_duration)
         return None
 
     last_start = starts[-1]
@@ -71,6 +77,18 @@ def detect_speech_end(
 
     logger.info("Speech end detected at %.2fs in %s (duration=%.2fs)", last_start, video_path, video_duration)
     return last_start
+
+
+def speech_end_info(video_path: str, fps: float) -> tuple[float | None, int | None]:
+    """(尾部静音起点秒, 对应帧号);无尾部静音返回 (None, None)。
+
+    复用 detect_speech_end(-30dB / 0.3s),与「智能校准」同一套检测,
+    便于前端波形上对比手动裁剪点与自动裁剪点。
+    """
+    sec = detect_speech_end(video_path)
+    if sec is None:
+        return None, None
+    return sec, int(sec * fps)
 
 
 def get_video_info(video_path: str) -> dict:
