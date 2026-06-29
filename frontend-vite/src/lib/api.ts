@@ -473,6 +473,11 @@ export const api = {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/extract-first-frame`)
   },
 
+  // 用上一镜末帧做首帧（快照复制上一镜当前末帧 → 本镜 custom_first_frame_path）
+  usePrevLastFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; custom_first_frame_path: string }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/use-prev-last-frame`)
+  },
+
   // 提取本镜尾帧 → 尾帧配置
   extractLastFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; target_last_frame_path: string; tf_status: string }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/extract-last-frame`)
@@ -495,7 +500,7 @@ export const api = {
 
   // 成片视频 URL
   finalVideoUrl: (id: string): string => {
-    return `${BASE}/api/projects/${id}/final-video`
+    return `${BASE}/api/projects/${id}/final.mp4`
   },
 }
 

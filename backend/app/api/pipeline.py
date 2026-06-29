@@ -585,6 +585,10 @@ async def rewrite_motion_prompt(
         visual_description = shot.visual_description
         text = shot.text
         duration = shot.shot_duration
+        object_ref_paths = (
+            json.loads(shot.custom_reference_paths)
+            if shot.custom_reference_paths else None
+        )
 
     provider = GeminiProvider(
         project=settings.gemini_project, location=settings.gemini_location
@@ -599,6 +603,7 @@ async def rewrite_motion_prompt(
                 text=text,
                 duration=duration,
                 llm_provider=provider,
+                reference_image_paths=object_ref_paths,
             )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Director agent failed: {e}")
@@ -1155,6 +1160,47 @@ async def extract_first_frame(
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
     shutil.copy2(src_str, str(dest))
+
+    shot.custom_first_frame_path = str(dest)
+    await session.commit()
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/use-prev-last-frame")
+async def use_prev_last_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Snapshot the PREVIOUS shot's current last frame as this shot's first frame.
+
+    Copies prev shot's last_frame into this shot's custom_frames/ (ts_uuid name) and
+    sets custom_first_frame_path — a stable snapshot, so regenerating the previous
+    shot later won't leave a dangling reference.
+    """
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    prev_result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id - 1)
+    )
+    prev = prev_result.scalar_one_or_none()
+    if not prev or not prev.video_path or not Path(prev.video_path).exists():
+        raise HTTPException(status_code=400, detail="Previous shot has no video")
+
+    from app.agents.frame_porter import extract_last_frame
+    dest_dir = shot_custom_frames_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / ts_uuid_name(".png")
+    # Extract the prev shot's VIDEO actual last frame — NOT prev.last_frame_path,
+    # which a character-calibration may have overwritten with a pose-changed still.
+    extract_last_frame(str(prev.video_path), str(dest))
 
     shot.custom_first_frame_path = str(dest)
     await session.commit()
@@ -1718,10 +1764,16 @@ async def character_calibrate_revert(
     if shot.cc_status != "done":
         raise HTTPException(status_code=400, detail="Shot has not been character-calibrated")
 
-    # Restore pre-CC last frame
-    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
-    if pre_cc.exists() and shot.last_frame_path:
-        shutil.copy2(str(pre_cc), shot.last_frame_path)
+    # Revert by pointing last_frame_path back at the pristine (un-calibrated)
+    # last_frame_; drop the calibrated cc_ file. No fixed-name backup.
+    from app.services.storage import pristine_last_frame_path
+    pristine = pristine_last_frame_path(project_id, shot_id)
+    if pristine is not None and shot.last_frame_path != str(pristine):
+        old = Path(shot.last_frame_path) if shot.last_frame_path else None
+        if old and old.name.startswith("cc_"):
+            old.unlink(missing_ok=True)
+        shot.last_frame_path = str(pristine)
+        await _repoint_next_first_frame(project_id, shot_id, str(pristine), session)
 
     shot.cc_status = None
     shot.cc_error_message = None

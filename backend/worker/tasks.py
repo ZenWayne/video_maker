@@ -33,6 +33,7 @@ from app.services.storage import (
     shot_pre_cc_last_frame_path,
     shot_target_last_frame_path,
     get_original_video_for_audio,
+    pristine_last_frame_path,
     ts_uuid_name,
 )
 from app.services.events import publish_event
@@ -334,6 +335,10 @@ async def run_shot_pipeline(
                     text=shot.text,
                     duration=shot.shot_duration,
                     llm_provider=provider,
+                    reference_image_paths=(
+                        json.loads(shot.custom_reference_paths)
+                        if shot.custom_reference_paths else None
+                    ),
                 )
 
                 # Refresh shot from DB to pick up any reference images
@@ -464,8 +469,8 @@ async def run_shot_pipeline(
             # (re)generation — a stable last_frame.png would be replayed from the
             # browser cache (stale poster + stale next-shot first frame). Delete ALL
             # prior last_frame*.png, including the pre-CC backup: a fresh generation
-            # makes the old character-calibration backup stale too.
-            for _old in s_dir.glob("last_frame*.png"):
+            # makes the old extracted frames AND calibrated (cc_) frames stale too.
+            for _old in list(s_dir.glob("last_frame*.png")) + list(s_dir.glob("cc_*.png")):
                 _old.unlink(missing_ok=True)
             last_frame_out = s_dir / f"last_frame_{ts_uuid_name('.png')}"
             extract_last_frame(str(video_out), str(last_frame_out))
@@ -564,22 +569,23 @@ async def _pick_first_frame(
     """
     Pick the first frame for a shot.
 
-    Returns None when the shot has custom_reference_paths (multi-image mode).
-    For disconnected shots with custom_first_frame_path: use that image.
-    For disconnected shots (shot_id > 1) without custom images: raise ValueError.
+    The 首帧 slot (custom_first_frame_path) is AUTHORITATIVE when set — it anchors
+    the character's identity for the whole clip, so it wins over multi-image mode.
+    Only when there is no explicit first frame does a shot with custom_reference_paths
+    fall into multi-image mode (return None → caller uses reference_images).
     For shot 1 without custom images: fall back to project character reference.
-    For connected shots: use previous shot's last frame.
+    For connected shots without a first frame: use previous shot's last frame.
     """
-    # Multi-image reference mode → return None (caller uses reference_images)
-    # Only for disconnected shots; connected shots use custom refs for tail frame generation
-    if shot.custom_reference_paths and not shot.align_with_previous:
-        return None
-
-    # Single custom first frame
+    # Single custom first frame (the 首帧 slot) — authoritative; anchors identity.
     if shot.custom_first_frame_path:
         custom = Path(shot.custom_first_frame_path)
         if custom.exists():
             return custom
+
+    # Multi-image reference mode → return None (caller uses reference_images).
+    # Only when there is NO explicit first frame above.
+    if shot.custom_reference_paths and not shot.align_with_previous:
+        return None
 
     # Try to get previous shot's last frame (for both connected and disconnected shots)
     if shot.shot_id > 1:
@@ -741,8 +747,15 @@ async def run_tail_frame_pipeline(
             first_frame = await _pick_first_frame(project_id, shot, session)
             shot.first_frame_path = str(first_frame) if first_frame else None
 
-            # 2. Director → generate motion_prompt (skip if already exists)
-            if shot.motion_prompt:
+            # 2. Director → generate motion_prompt. Reuse the stored prompt, EXCEPT
+            #    when the shot has reference props — those must be woven into the
+            #    motion, so regenerate to pick them up (a prop-less stored prompt
+            #    would otherwise leave the prop out of the tail frame).
+            obj_refs = (
+                json.loads(shot.custom_reference_paths)
+                if shot.custom_reference_paths else None
+            )
+            if shot.motion_prompt and not obj_refs:
                 motion_prompt = shot.motion_prompt
                 logger.info("Reusing existing motion_prompt for shot %d", shot_id)
             else:
@@ -757,8 +770,11 @@ async def run_tail_frame_pipeline(
                     text=shot.text,
                     duration=shot.shot_duration,
                     llm_provider=provider,
+                    reference_image_paths=obj_refs,
                 )
                 shot.motion_prompt = motion_prompt
+                if obj_refs:
+                    logger.info("Regenerated motion_prompt for shot %d (%d ref prop)", shot_id, len(obj_refs))
 
             # 3. Generate target tail frame
             shot.tf_status = "generating"
@@ -766,11 +782,6 @@ async def run_tail_frame_pipeline(
             await session.commit()
 
             char_refs = await _get_character_ref_paths(project_id, session)
-
-            # Object reference images (from custom_reference_paths on connected shots)
-            obj_refs = None
-            if shot.custom_reference_paths:
-                obj_refs = json.loads(shot.custom_reference_paths)
 
             ensure_shot_dir(project_id, shot.shot_id)
             tf_output = str(shot_target_last_frame_path(project_id, shot.shot_id))
@@ -1116,23 +1127,24 @@ async def _do_character_calibrate_one(
         )
 
         try:
-            import shutil
-            last_frame = Path(shot.last_frame_path)
-            pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
+            s_dir = shot_dir(project_id, shot_id)
+            # Calibrate from the un-calibrated pristine frame (never stack onto an
+            # already-calibrated one); write the result to a NEW unique cc_ file so
+            # its URL changes — no in-place overwrite, no fixed-name backup.
+            pristine = pristine_last_frame_path(project_id, shot_id) or Path(shot.last_frame_path)
+            cc_out = s_dir / f"cc_{ts_uuid_name('.png')}"
+            await calibrate_face(ref_image_paths, str(pristine), str(cc_out))
 
-            if pre_cc.exists():
-                # Restore original frame before re-calibrating
-                shutil.copy2(str(pre_cc), str(last_frame))
-            else:
-                # First time — backup the original
-                shutil.copy2(str(last_frame), str(pre_cc))
+            # Drop the previous calibrated frame(s); keep the pristine last_frame_.
+            for _old in s_dir.glob("cc_*.png"):
+                if _old != cc_out:
+                    _old.unlink(missing_ok=True)
 
-            # Run face calibration (overwrites last_frame in place)
-            await calibrate_face(ref_image_paths, str(last_frame), str(last_frame))
-
-            # Update DB
+            shot.last_frame_path = str(cc_out)
             shot.cc_status = "done"
             shot.cc_error_message = None
+            # Next shot's first frame should reflect the calibrated face.
+            await _propagate_first_frame_to_next(project_id, shot, str(cc_out), session)
             session.add(shot)
             await session.commit()
 
@@ -1142,7 +1154,7 @@ async def _do_character_calibrate_one(
                     "type": "cc_completed",
                     "data": {
                         "shot_id": shot_id,
-                        "last_frame_path": to_media_url(str(last_frame)),
+                        "last_frame_path": to_media_url(str(cc_out)),
                     },
                 },
             )

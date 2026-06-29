@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from app.agents.llm import GeminiProvider
 from app.config import settings
@@ -39,6 +39,7 @@ def build_user_prompt(
     visual_description: str,
     text: str,
     duration: int,
+    num_reference_images: int = 0,
 ) -> str:
     """Build user prompt for director agent."""
     prompt = f"""Shot ID: {shot_id}
@@ -49,6 +50,14 @@ Duration: {duration} seconds
 
     if text:
         prompt += f"Dialogue/Narration: {text}\n"
+
+    if num_reference_images:
+        prompt += (
+            f"\nReference prop/object image(s) ({num_reference_images}) are attached. "
+            "These are props the character holds or shows in this shot. Describe the "
+            "hand/arm motion of picking up, holding, and clearly presenting these "
+            "object(s) to the camera as part of the action — never leave them out.\n"
+        )
 
     prompt += "\nGenerate a motion prompt for this shot in English:"
 
@@ -79,6 +88,7 @@ async def run_director(
     text: str,
     duration: int,
     llm_provider: GeminiProvider,
+    reference_image_paths: Optional[List[str]] = None,
 ) -> str:
     """
     Generate motion prompt for a shot.
@@ -94,6 +104,9 @@ async def run_director(
     Returns:
         Motion prompt string
     """
+    # Only attach reference images that exist on disk.
+    refs = [p for p in (reference_image_paths or []) if p and Path(p).exists()]
+
     system_prompt = load_system_prompt()
     user_prompt = build_user_prompt(
         shot_id=shot_id,
@@ -101,7 +114,10 @@ async def run_director(
         visual_description=visual_description,
         text=text,
         duration=duration,
+        num_reference_images=len(refs),
     )
+
+    logger.info("Director shot %d: %d reference image(s) attached", shot_id, len(refs))
 
     # Generate motion prompt
     motion_prompt = await llm_provider.generate_text(
@@ -110,6 +126,7 @@ async def run_director(
         user_message=user_prompt,
         temperature=0.7,
         operation="agents-director-generate-motion",
+        image_paths=refs or None,
     )
 
     # Post-process to ensure text is included

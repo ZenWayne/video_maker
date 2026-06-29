@@ -81,6 +81,20 @@ def pristine_video_path(project_id: str, shot_id: int) -> Optional[Path]:
     return outs[-1] if outs else None
 
 
+def pristine_last_frame_path(project_id: str, shot_id: int) -> Optional[Path]:
+    """The un-calibrated extracted last frame (last_frame_<ts>_<uuid>.png).
+
+    Character-calibration writes a separate cc_<ts>_<uuid>.png and never overwrites
+    this, so it is the revert target (mirrors pristine_video_path for video).
+    """
+    s_dir = shot_dir(project_id, shot_id)
+    fs = [
+        p for p in s_dir.glob("last_frame_*.png")
+        if p.name != "last_frame_pre_cc.png"
+    ]
+    return max(fs, key=lambda p: p.stat().st_mtime) if fs else None
+
+
 def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
     """Get the un-VC'd video to extract source audio from.
 

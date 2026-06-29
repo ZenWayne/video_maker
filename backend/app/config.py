@@ -79,14 +79,24 @@ class Settings(BaseSettings):
     # [Image 1] = shot last frame (BASE — preserve everything)
     # [Image 2] = character reference image (only copy facial features from this)
     cc_prompt: str = (
-        "[Image 1] is the base image. [Image 2] is the target identity.\n\n"
-        "Perform a face swap: put the face from [Image 2] onto [Image 1].\n"
-        "The output must look like the person in [Image 2], but with the "
-        "exact same pose, expression, emotion, eye gaze, and mouth state as [Image 1].\n\n"
-        "Keep the skin texture, wrinkles, pores, and lighting details from [Image 1]. "
-        "Do NOT smooth the skin or remove any fine details.\n\n"
-        "Do not change anything outside the face: body, hands, background, "
-        "clothing, hair style, lighting must remain identical to [Image 1]."
+        "Precise FACIAL-FEATURE-ONLY identity edit. Edit the LAST image only.\n\n"
+        "The LAST image is the BASE. The output MUST stay identical to the LAST "
+        "image in EVERYTHING except the facial features: same camera framing, same "
+        "pose, same head angle and position, same body, arms, hands, fingers and "
+        "ring placement, same clothing, same hair, same expression, same eye gaze "
+        "and mouth state, same lighting and background — pixel-identical.\n\n"
+        "The OTHER image(s) are the IDENTITY reference, used ONLY as the source of "
+        "facial features: eye shape, nose shape, lip/mouth shape, eyebrows, and "
+        "face/jaw bone structure and skin texture. Do NOT copy ANYTHING else from "
+        "the reference image(s) — ignore their pose, head angle, hands, body, "
+        "expression, gaze, hair, clothing and background. They only tell you WHO "
+        "the person is, never how they are posed.\n\n"
+        "Task: keep the LAST image unchanged and adjust ONLY the facial features so "
+        "the person's identity matches the reference. Do NOT re-pose or move the "
+        "head, hands, arms or body. Do NOT change the expression or where the eyes "
+        "look. Keep the skin texture, wrinkles and pores from the LAST image — do "
+        "not smooth.\n\n"
+        "If changing the face would require altering the pose, keep the pose."
     )
 
     # Tail frame generation (target end-frame via Vertex AI)

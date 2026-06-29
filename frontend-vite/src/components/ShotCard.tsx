@@ -258,6 +258,14 @@ export function ShotCard({
     } catch { /* handled by parent */ }
   }
 
+  const handleUsePrevLastFrame = async () => {
+    if (!projectId) return
+    try {
+      const r = await api.usePrevLastFrame(projectId, shot.shot_id)
+      onShotUpdated?.(shot.shot_id, { custom_first_frame_path: r.custom_first_frame_path })
+    } catch { /* handled by parent */ }
+  }
+
   const handleExtractLastFrame = async () => {
     if (!projectId) return
     try {
@@ -401,15 +409,9 @@ export function ShotCard({
       ? [shot.custom_first_frame_path]
       : []
 
-  // 首帧槽显示：用户上传/提取的首帧（落在 custom_frames/）为真实覆盖，直接显示；
-  // 否则连续镜头显示上一镜头的“当前”末帧（prevLastFramePath 带 ?t= 缓存戳，会随上一镜重生成自动刷新），
-  // 兜底回到 custom_first_frame_path（覆盖 shot 1 的角色参考图，无上一镜）。
-  const firstFrameIsUserOverride = !!shot.custom_first_frame_path?.includes('custom_frames')
-  const firstFrameUrl = firstFrameIsUserOverride
-    ? shot.custom_first_frame_path
-    : shot.use_prev_last_frame && prevLastFramePath
-      ? prevLastFramePath
-      : shot.custom_first_frame_path
+  // 首帧槽显示 custom_first_frame_path：由「用上一镜末帧」/「提取本镜首帧」/「上传首帧」
+  // 或连续性初始化显式写入(不再依赖会失灵的 use_prev_last_frame live 链接)。
+  const firstFrameUrl = shot.custom_first_frame_path
 
   // Edit dialog (shared between script and review variants)
   const editDialog = (
@@ -765,27 +767,6 @@ export function ShotCard({
                 {shot.reference_image_hint}
               </div>
             )}
-            {!shot.align_with_previous && prevLastFramePath && (
-              <label className="flex items-center gap-2 text-xs text-zinc-600 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={shot.use_prev_last_frame}
-                  onChange={async (e) => {
-                    if (!projectId) return
-                    const val = e.target.checked
-                    try {
-                      await api.patchShot(projectId, shot.shot_id, { use_prev_last_frame: val })
-                      onShotUpdated?.(shot.shot_id, { use_prev_last_frame: val })
-                    } catch { /* handled by parent */ }
-                  }}
-                  className="rounded border-zinc-300"
-                />
-                使用上一镜头末帧作为首张参考图
-                {shot.use_prev_last_frame && (
-                  <img src={prevLastFramePath} alt="上一镜头末帧" className="w-12 h-12 object-cover rounded border ml-1 cursor-pointer" onClick={() => setPreviewUrl(prevLastFramePath!)} />
-                )}
-              </label>
-            )}
             {/* 参考图上传 */}
             <div className="flex items-center gap-2">
               <input ref={refUploadRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUploadRefs} />
@@ -952,6 +933,7 @@ export function ShotCard({
                 onPreview={setPreviewUrl}
                 onDelete={handleDeleteFirstFrame}
                 menuItems={[
+                  { icon: Link, label: '用上一镜末帧', disabled: !prevLastFramePath, onClick: handleUsePrevLastFrame },
                   { icon: Crop, label: '提取本镜首帧', disabled: !shot.first_frame_path, onClick: handleExtractFirstFrame },
                   { icon: Upload, label: '上传首帧', onClick: () => firstFrameInputRef.current?.click() },
                 ]}
