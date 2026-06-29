@@ -20,7 +20,7 @@ from app.db import get_session
 from app.main import get_redis
 from app.models.project import Project, Shot, ReferenceImage
 from app.models.schemas import (
-    ProjectResponse, StoryboardUpdate, ShotUpdate, ShotAiEditRequest,
+    ProjectResponse, StoryboardUpdate, StoryboardReplace, ShotUpdate, ShotAiEditRequest,
     ShotTrimRequest, RegenerateShotsRequest, PipelineActionResponse,
     ExportRequest, JoinPreviewRequest,
 )
@@ -220,6 +220,95 @@ async def patch_storyboard(
     await session.refresh(project)
 
     # Reload storyboard
+    from app.models.schemas import Storyboard
+    storyboard = None
+    if project.storyboard_path:
+        try:
+            sb_data = json.loads(Path(project.storyboard_path).read_text())
+            storyboard = Storyboard(**sb_data)
+        except Exception:
+            pass
+
+    return ProjectResponse(
+        id=project.id,
+        title=project.title,
+        theme_text=project.theme_text,
+        creator_name=project.creator_name,
+        status=project.status,
+        scene_overview=project.scene_overview,
+        storyboard_path=project.storyboard_path,
+        final_video_path=project.final_video_path,
+        error_message=project.error_message,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+        reference_images=[],
+        shots=[],
+        storyboard=storyboard,
+    )
+
+
+@router.put("/projects/{project_id}/storyboard", response_model=ProjectResponse)
+async def put_storyboard(
+    project_id: str,
+    body: StoryboardReplace,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Full-replace storyboard: upsert shots by shot_id, delete missing, rewrite storyboard.json.
+
+    Only allowed in SCRIPT_REVIEW (pre-render): no generated material files at stake.
+    """
+    project = await _get_project_or_404(project_id, session)
+
+    if project.status != ProjectStatus.SCRIPT_REVIEW.value:
+        raise HTTPException(
+            status_code=409,
+            detail="Project must be in script_review status to replace storyboard",
+        )
+
+    result = await session.execute(select(Shot).where(Shot.project_id == project_id))
+    existing = {s.shot_id: s for s in result.scalars().all()}
+    payload_ids = {item.shot_id for item in body.shots}
+
+    # Delete shots absent from the payload (defensive file cleanup handled in Task 2).
+    for shot_id, shot in existing.items():
+        if shot_id not in payload_ids:
+            await session.delete(shot)
+
+    # Upsert shots present in the payload.
+    for item in body.shots:
+        shot = existing.get(item.shot_id)
+        if shot is None:
+            shot = Shot(project_id=project_id, shot_id=item.shot_id)
+            session.add(shot)
+        shot.text = item.text
+        shot.shot_type = item.shot_type
+        shot.visual_description = item.visual_description
+        shot.shot_duration = item.shot_duration
+        shot.align_with_previous = item.align_with_previous
+        shot.reference_image_hint = item.reference_image_hint
+
+    project.scene_overview = body.scene_overview
+
+    # Rewrite storyboard.json to match (DB is source of truth).
+    sb_path = storyboard_path(project_id)
+    sb_path.parent.mkdir(parents=True, exist_ok=True)
+    sb_path.write_text(
+        json.dumps(
+            {
+                "scene_overview": body.scene_overview,
+                "shots": [item.model_dump() for item in body.shots],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    project.storyboard_path = str(sb_path)
+    project.updated_at = datetime.utcnow()
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+
     from app.models.schemas import Storyboard
     storyboard = None
     if project.storyboard_path:

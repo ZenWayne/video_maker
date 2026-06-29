@@ -568,3 +568,99 @@ async def test_delete_tail_frame_shot_not_found(client, project_in_shot_review):
         f"/api/projects/{pid}/shots/999/delete-tail-frame", headers=HEADERS
     )
     assert r.status_code == 404
+
+
+# ── PUT /projects/{id}/storyboard (full replace) ──────────────────────────────
+
+async def test_put_storyboard_upsert_and_add(client, db_session_factory, project_in_script_review):
+    pid = project_in_script_review  # has shots 1,2,3
+    r = await client.put(
+        f"/api/projects/{pid}/storyboard",
+        json={
+            "scene_overview": "new overview",
+            "shots": [
+                {"shot_id": 1, "text": "edited one", "shot_type": "Close-up",
+                 "visual_description": "v1", "shot_duration": 4, "align_with_previous": False},
+                {"shot_id": 4, "text": "brand new", "shot_type": "Wide Shot",
+                 "visual_description": "v4", "shot_duration": 8, "align_with_previous": True},
+            ],
+        },
+        headers=HEADERS,
+    )
+    assert r.status_code == 200, r.text
+
+    from app.models.project import Shot
+    from sqlalchemy import select
+    async with db_session_factory() as s:
+        rows = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalars().all()
+    by_id = {row.shot_id: row for row in rows}
+    assert set(by_id) == {1, 4}            # shots 2,3 deleted; 4 created
+    assert by_id[1].text == "edited one"
+    assert by_id[1].shot_type == "Close-up"
+    assert by_id[4].text == "brand new"
+
+
+async def test_put_storyboard_rewrites_json(client, db_session_factory, project_in_script_review, tmp_path):
+    pid = project_in_script_review
+    r = await client.put(
+        f"/api/projects/{pid}/storyboard",
+        json={"scene_overview": "ov", "shots": [
+            {"shot_id": 1, "text": "only", "shot_type": "Medium Shot",
+             "visual_description": "v", "shot_duration": 6, "align_with_previous": False},
+        ]},
+        headers=HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    import json
+    from app.services.storage import storyboard_path
+    data = json.loads(storyboard_path(pid).read_text(encoding="utf-8"))
+    assert data["scene_overview"] == "ov"
+    assert [s["shot_id"] for s in data["shots"]] == [1]
+    assert data["shots"][0]["text"] == "only"
+
+
+async def test_put_storyboard_wrong_status(client, project_in_shot_review):
+    pid = project_in_shot_review
+    r = await client.put(
+        f"/api/projects/{pid}/storyboard",
+        json={"scene_overview": "x", "shots": [
+            {"shot_id": 1, "text": "t", "shot_type": "Medium Shot",
+             "visual_description": "v", "shot_duration": 6, "align_with_previous": False}]},
+        headers=HEADERS,
+    )
+    assert r.status_code == 409
+
+
+async def test_put_storyboard_not_found(client):
+    r = await client.put(
+        "/api/projects/nonexistent/storyboard",
+        json={"scene_overview": "x", "shots": [
+            {"shot_id": 1, "text": "t", "shot_type": "Medium Shot",
+             "visual_description": "v", "shot_duration": 6, "align_with_previous": False}]},
+        headers=HEADERS,
+    )
+    assert r.status_code == 404
+
+
+async def test_put_storyboard_duplicate_shot_id(client, project_in_script_review):
+    pid = project_in_script_review
+    r = await client.put(
+        f"/api/projects/{pid}/storyboard",
+        json={"scene_overview": "x", "shots": [
+            {"shot_id": 1, "text": "a", "shot_type": "Medium Shot",
+             "visual_description": "v", "shot_duration": 6, "align_with_previous": False},
+            {"shot_id": 1, "text": "b", "shot_type": "Medium Shot",
+             "visual_description": "v", "shot_duration": 6, "align_with_previous": False}]},
+        headers=HEADERS,
+    )
+    assert r.status_code == 422
+
+
+async def test_put_storyboard_empty_shots(client, project_in_script_review):
+    pid = project_in_script_review
+    r = await client.put(
+        f"/api/projects/{pid}/storyboard",
+        json={"scene_overview": "x", "shots": []},
+        headers=HEADERS,
+    )
+    assert r.status_code == 422

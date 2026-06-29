@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.project import ProjectStatus, ShotStatus, ReferenceImageKind
 
@@ -116,6 +116,20 @@ class Storyboard(BaseModel):
 class StoryboardUpdate(BaseModel):
     scene_overview: Optional[str] = None
     shots: Optional[List[ShotItem]] = None
+
+
+class StoryboardReplace(BaseModel):
+    """Full-replace storyboard: both fields required (vs StoryboardUpdate's optionals)."""
+    scene_overview: str
+    shots: List[ShotItem] = Field(..., min_length=1)
+
+    @field_validator("shots")
+    @classmethod
+    def _unique_shot_ids(cls, v: List[ShotItem]) -> List[ShotItem]:
+        ids = [s.shot_id for s in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError("shot_id values must be unique")
+        return v
 
 
 # ============== Project Schemas ==============
