@@ -95,18 +95,25 @@ def pristine_last_frame_path(project_id: str, shot_id: int) -> Optional[Path]:
     return max(fs, key=lambda p: p.stat().st_mtime) if fs else None
 
 
-def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
-    """Get the un-VC'd video to extract source audio from.
+def shot_source_path(project_id: str, shot_id: int) -> Optional[Path]:
+    """The immutable source video (output_<ts>_<uuid>.mp4).
 
-    Returns the newest video that is NOT a VC output (i.e. an output_/trimmed_ file)
-    — the current clip if it has not been voice-converted, otherwise the pre-VC
-    predecessor. Avoids double-converting and keeps lip-sync length matched.
+    In the non-destructive model this is the ONLY video file; trim/VC never
+    write trimmed_/vc_ files. Alias of pristine_video_path for intent clarity.
     """
-    s_dir = shot_dir(project_id, shot_id)
-    non_vc = [p for p in s_dir.glob("*.mp4") if not p.name.startswith("vc_")]
-    if non_vc:
-        return max(non_vc, key=lambda p: p.stat().st_mtime)
-    raise FileNotFoundError(f"No non-VC video found in {s_dir}")
+    return pristine_video_path(project_id, shot_id)
+
+
+def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
+    """Return the immutable source video to extract VC input audio from.
+
+    Non-destructive model: there is exactly one video (output_*.mp4); VC reads
+    its full audio and never depends on trim length.
+    """
+    src = shot_source_path(project_id, shot_id)
+    if src is None:
+        raise FileNotFoundError(f"No source video in {shot_dir(project_id, shot_id)}")
+    return src
 
 
 def final_dir(project_id: str) -> Path:
