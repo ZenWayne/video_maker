@@ -10,6 +10,9 @@ vi.mock('@/lib/api', () => ({
       fps: 24,
       total_frames: 240,
       duration: 10.0,
+      has_backup: false,
+      speech_end_frame: 180,
+      speech_end_sec: 7.5,
     }),
     trimShot: vi.fn(),
   },
@@ -81,6 +84,23 @@ beforeEach(() => {
   HTMLMediaElement.prototype.pause = vi.fn(function (this: HTMLMediaElement) {
     Object.defineProperty(this, 'paused', { value: true, writable: true, configurable: true })
   })
+
+  // Stubs for WaveformTrack (AudioContext / fetch / canvas)
+  vi.stubGlobal('AudioContext', vi.fn().mockImplementation(function() {
+    return {
+      decodeAudioData: vi.fn().mockResolvedValue({
+        numberOfChannels: 1, length: 10, sampleRate: 24000, duration: 0,
+        getChannelData: () => new Float32Array(10).fill(0.3),
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    }
+  }))
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)),
+  }))
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    clearRect: vi.fn(), fillRect: vi.fn(), fillStyle: '',
+  } as unknown as CanvasRenderingContext2D)
 })
 
 afterEach(() => {
@@ -262,5 +282,18 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     // Move back to max → nothing to trim again
     fireEvent.change(screen.getByRole('slider'), { target: { value: '240' } })
     expect(screen.getByText('确认裁剪').closest('button')).toBeDisabled()
+  })
+
+  it('加载后渲染声纹波形轨', async () => {
+    render(
+      <TrimDialog
+        shot={mockShot}
+        projectId="proj-1"
+        open={true}
+        onOpenChange={() => {}}
+        onTrimmed={() => {}}
+      />,
+    )
+    expect(await screen.findByText('声纹波形')).toBeInTheDocument()
   })
 })

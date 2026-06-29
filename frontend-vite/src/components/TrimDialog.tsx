@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/dialog'
 import { api } from '@/lib/api'
 import type { AspectRatio, Shot } from '@/lib/types'
+import WaveformTrack from '@/components/WaveformTrack'
 
 interface TrimDialogProps {
   shot: Shot
@@ -36,6 +37,7 @@ export function TrimDialog({
   const [totalFrames, setTotalFrames] = useState(0)
   const [duration, setDuration] = useState(0)
   const [endFrame, setEndFrame] = useState(0)
+  const [speechEndFrame, setSpeechEndFrame] = useState<number | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isTrimming, setIsTrimming] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
@@ -130,6 +132,7 @@ export function TrimDialog({
       setDuration(info.duration)
       setEndFrame(info.total_frames)
       setHasBackup(info.has_backup)
+      setSpeechEndFrame(info.speech_end_frame)
       setIsLoading(false)
     }).catch((e) => {
       setError(e instanceof Error ? e.message : 'Failed to load video info')
@@ -265,6 +268,17 @@ export function TrimDialog({
                 className="max-w-full max-h-full object-contain"
                 onLoadedMetadata={() => seekToFrame(endFrame)}
                 onEnded={stopPreview}
+              />
+            </div>
+
+            {/* Waveform track — 与下方滑块共享时间轴 */}
+            <div className="shrink-0">
+              <WaveformTrack
+                videoSrc={shot.video_path || ''}
+                totalFrames={totalFrames}
+                endFrame={endFrame}
+                speechEndFrame={speechEndFrame}
+                onScrub={handleSliderChange}
               />
             </div>
 
