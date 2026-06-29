@@ -27,4 +27,23 @@ describe('ShotPlayer', () => {
     const audio = container.querySelector('audio') as HTMLAudioElement
     expect(audio.muted).toBe(true)
   })
+
+  it('audio error falls back to source audio and shows error message', () => {
+    const { container } = render(<ShotPlayer videoUrl="/v.mp4" trimEndSec={2} audioUrl="/a.wav" />)
+    const audio = container.querySelector('audio') as HTMLAudioElement
+    const video = container.querySelector('video') as HTMLVideoElement
+
+    // Initially video should be muted (vc track active)
+    expect(video.muted).toBe(true)
+
+    // Fire an error event on the audio element
+    fireEvent.error(audio)
+
+    // Video should become unmuted (fallback to source audio)
+    expect(video.muted).toBe(false)
+
+    // Error message should appear
+    expect(screen.getByTestId('audio-error-msg')).toBeTruthy()
+    expect(screen.getByTestId('audio-error-msg').textContent).toContain('配音音轨加载失败')
+  })
 })

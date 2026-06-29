@@ -13,9 +13,15 @@ export interface ShotPlayerProps {
 export function ShotPlayer({ videoUrl, trimEndSec, audioUrl }: ShotPlayerProps) {
   const hasVc = !!audioUrl
   const [useVc, setUseVc] = useState(true)        // true = vc track, false = source audio
-  const audioEnabled = hasVc && useVc
+  const [audioError, setAudioError] = useState(false)
+  const audioEnabled = hasVc && useVc && !audioError
   const { videoRef, audioRef, onPlay, onPause, onSeeked, onTimeUpdate } =
     useShotSync({ trimEndSec, audioEnabled })
+
+  function handleAudioError() {
+    setAudioError(true)
+    setUseVc(false)
+  }
 
   return (
     <div className="shot-player">
@@ -32,14 +38,25 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl }: ShotPlayerProps) 
       />
       {hasVc && (
         <>
-          <audio ref={audioRef} src={audioUrl!} muted={!useVc} preload="auto" />
+          <audio
+            ref={audioRef}
+            src={audioUrl!}
+            muted={!useVc || audioError}
+            preload="auto"
+            onError={handleAudioError}
+          />
+          {audioError && (
+            <p data-testid="audio-error-msg" className="text-xs text-red-500 mt-1">
+              配音音轨加载失败，已回退原音
+            </p>
+          )}
           <button
             type="button"
             data-testid="ab-toggle"
             onClick={() => setUseVc((v) => !v)}
             className="text-xs px-2 py-1 mt-1 rounded bg-gray-100"
           >
-            {useVc ? '🔊 配音' : '🎙 原音'}
+            {useVc && !audioError ? '🔊 配音' : '🎙 原音'}
           </button>
         </>
       )}
