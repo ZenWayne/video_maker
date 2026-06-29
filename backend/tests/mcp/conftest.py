@@ -5,7 +5,7 @@ from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.models.project import Base, Project, Shot, ReferenceImage
+from app.models.project import Base, Project, Shot
 
 USER = "mcp-agent"
 
