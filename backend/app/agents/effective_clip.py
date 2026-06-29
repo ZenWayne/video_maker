@@ -43,13 +43,13 @@ def build_effective_clip(
         ff = ff.input(vc_audio_path)
         audio_map = "1:a"
 
-    opts: dict = {"map": ["0:v", audio_map], "vcodec": vcodec, "acodec": acodec}
+    opts: dict = {"map": ["0:v", audio_map], "vcodec": vcodec, "acodec": acodec,
+                  "shortest": None}  # always bound audio to video duration
     if vcodec == "libx264":
         opts["preset"] = "fast"
         opts["crf"] = crf
     if trim_frames:
         opts["vframes"] = trim_frames
-        opts["shortest"] = None  # stop audio when the trimmed video ends
 
     ff.output(out_path, **opts).execute()
     if not Path(out_path).exists():

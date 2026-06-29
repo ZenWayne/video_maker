@@ -74,3 +74,46 @@ def test_no_edit_passthrough(lossless_src, tmp_path):
         acodec="pcm_s16le",
     )
     assert get_video_info(str(out))["total_frames"] == 120
+
+
+def test_vc_only_audio_bounded_by_video_duration(tmp_path):
+    """VC without trim: substituted audio longer than source is clamped by -shortest."""
+    # Source: 60 frames @ 30 fps = 2.0 s video
+    src = tmp_path / "src.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=128x128:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+            "-frames:v", "60", "-c:v", "ffv1", "-c:a", "pcm_s16le", "-shortest",
+            str(src),
+        ],
+        check=True, capture_output=True,
+    )
+    # Replacement audio: 4 s — intentionally longer than the 2 s source video
+    vc_wav = tmp_path / "vc.wav"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "sine=frequency=880:duration=4",
+            "-c:a", "pcm_s16le",
+            str(vc_wav),
+        ],
+        check=True, capture_output=True,
+    )
+    out = tmp_path / "vc_clip.mkv"
+    build_effective_clip(
+        str(src),
+        trim_frames=None,
+        vc_audio_path=str(vc_wav),
+        out_path=str(out),
+        vcodec="ffv1",
+        acodec="pcm_s16le",
+    )
+    info = get_video_info(str(out))
+    # -shortest must clamp output to ~2.0 s (source video duration), not 4 s
+    assert info["duration"] < 2.15, (
+        f"Output duration {info['duration']:.3f}s exceeds video duration — -shortest not applied"
+    )
+    # Video frames must be preserved (no trim)
+    assert info["total_frames"] == 60
