@@ -1461,9 +1461,12 @@ async def restore_trim(
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Restore the original video before any trimming."""
+    """Clear the trim: trim_frames=None, refresh last frame to the source's final frame."""
     from app.agents.video_trimmer import get_video_info
-    from app.agents.frame_porter import extract_last_frame
+    from app.agents.frame_porter import extract_frame_at
+    from app.services.storage import (
+        shot_source_path, ts_uuid_name, shot_dir, shot_pre_cc_last_frame_path,
+    )
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1473,39 +1476,39 @@ async def restore_trim(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    # Restore to the pristine full video (output_<ts>_<uuid>.mp4).
-    from app.services.storage import pristine_video_path
-    pristine = pristine_video_path(project_id, shot_id)
-    if pristine is None or Path(shot.video_path) == pristine:
-        raise HTTPException(status_code=404, detail="No trimmed/derived video to restore from")
+    source = shot_source_path(project_id, shot_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source video not found")
+    info = get_video_info(str(source))
+    total = info["total_frames"]
 
-    # Drop all derived variants (trimmed_/vc_); point back to the pristine output_.
-    for _d in pristine.parent.glob("trimmed_*.mp4"):
-        _d.unlink(missing_ok=True)
-    for _d in pristine.parent.glob("vc_*.mp4"):
-        _d.unlink(missing_ok=True)
-    await _commit_new_current_video(project_id, shot, pristine, session)
+    shot.trim_frames = None
+    shot.video_path = str(source)
+    shot.source_fps = info["fps"]
+    shot.source_frames = total
 
-    # Reset character calibration since last frame changed
+    s_dir = shot_dir(project_id, shot_id)
+    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
+        _old.unlink(missing_ok=True)
+    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
+    extract_frame_at(str(source), total - 1, str(new_lf))
+    shot.last_frame_path = str(new_lf)
+    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+
     shot.cc_status = None
     shot.cc_error_message = None
-
-    from app.services.storage import shot_pre_cc_last_frame_path
     pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
     if pre_cc.exists():
         pre_cc.unlink()
 
-    shot.vc_status = None
-    shot.vc_error_message = None
-
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
-
     return {
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
+        "trim_frames": None,
         "version": ts,
-        **get_video_info(shot.video_path),
+        **get_video_info(str(source)),
     }
 
 

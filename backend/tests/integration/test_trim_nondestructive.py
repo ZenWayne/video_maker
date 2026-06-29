@@ -128,3 +128,33 @@ async def test_trim_video_path_still_points_to_source(client, db_session_factory
         assert shot.video_path == str(source), (
             f"video_path changed from source: {shot.video_path} != {source}"
         )
+
+
+@pytest.mark.asyncio
+async def test_restore_clears_trim(client, db_session_factory):
+    """restore-trim must clear trim_frames and leave the source file byte-identical."""
+    pid = await _make_project(db_session_factory, status="completed")
+    await _add_shot(db_session_factory, pid, shot_id=1, status="completed")
+    source = await seed_shot_with_source(db_session_factory, pid, 1)
+
+    before_md5 = _md5(source)
+
+    # Apply a trim first
+    r = await client.post(
+        f"/api/projects/{pid}/shots/1/trim",
+        json={"end_frame": 40},
+        headers=HEADERS,
+    )
+    assert r.status_code == 200
+
+    # Now restore
+    r = await client.post(
+        f"/api/projects/{pid}/shots/1/restore-trim",
+        headers=HEADERS,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["trim_frames"] is None
+
+    # Source file must be byte-identical across the whole cycle
+    assert _md5(source) == before_md5, "Source file was mutated — must be immutable"
