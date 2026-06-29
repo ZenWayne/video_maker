@@ -1,9 +1,11 @@
 from fastmcp import FastMCP
 
-from mcp_server.client import BackendClient
+from app.agents.director import postprocess_motion_prompt
+from mcp_server.client import BackendClient, BackendError
 from mcp_server.config import settings
 from mcp_server.context import shape_project, shape_shot, with_neighbors
 from mcp_server.guidelines import AUTHORING_GUIDELINES
+from mcp_server.validation import word_count_report
 
 
 def create_server(backend: BackendClient) -> FastMCP:
@@ -45,7 +47,73 @@ def create_server(backend: BackendClient) -> FastMCP:
         """Return dialogue + motion authoring conventions."""
         return AUTHORING_GUIDELINES
 
+    @mcp.tool
+    async def update_dialogue(project_id: str, shot_id: int, text: str) -> dict:
+        """Set a shot's dialogue (text/台词). Rejects empty text; word count is advisory."""
+        if not text or not text.strip():
+            raise ValueError("text must not be empty")
+        shot = await backend.patch_shot(project_id, shot_id, {"text": text})
+        return {
+            "shot": shot,
+            "word_count": word_count_report(text, shot["shot_duration"]),
+            "note": _video_note(shot),
+        }
+
+    @mcp.tool
+    async def update_motion(
+        project_id: str, shot_id: int, motion_prompt: str, sync_lip_marker: bool = True
+    ) -> dict:
+        """Set a shot's motion_prompt (动作). When sync_lip_marker, keep the lip-sync line in sync."""
+        final = motion_prompt
+        if sync_lip_marker:
+            current = await backend.get_project(project_id)
+            shot_text = next(
+                (s.get("text") for s in current.get("shots", []) if s["shot_id"] == shot_id),
+                None,
+            )
+            if shot_text:
+                final = postprocess_motion_prompt(motion_prompt, shot_text)
+        shot = await backend.patch_shot(project_id, shot_id, {"motion_prompt": final})
+        return {"shot": shot, "note": _video_note(shot)}
+
+    @mcp.tool
+    async def batch_update_shots(project_id: str, updates: list[dict]) -> dict:
+        """Apply many {shot_id, text?, motion_prompt?} edits in one call. Partial success allowed."""
+        results = []
+        for u in updates:
+            sid = u["shot_id"]
+            body = {k: u[k] for k in ("text", "motion_prompt") if k in u and u[k] is not None}
+            try:
+                if not body:
+                    raise ValueError("no text or motion_prompt provided")
+                shot = await backend.patch_shot(project_id, sid, body)
+                results.append({"shot_id": sid, "ok": True, "shot": shot})
+            except (BackendError, ValueError) as e:
+                results.append({"shot_id": sid, "ok": False, "error": str(e)})
+        return {"results": results}
+
+    @mcp.tool
+    async def replace_storyboard(
+        project_id: str, scene_overview: str, shots: list[dict]
+    ) -> dict:
+        """Full-replace the storyboard (structure + dialogue). Requires script_review status.
+
+        Each shot: {shot_id, text, shot_type, visual_description, shot_duration,
+        align_with_previous, reference_image_hint?}. Set motion via update_motion afterward.
+        """
+        try:
+            await backend.replace_storyboard(project_id, scene_overview, shots)
+            return {"ok": True}
+        except BackendError as e:
+            return {"ok": False, "status_code": e.status_code, "error": e.detail}
+
     return mcp
+
+
+def _video_note(shot: dict) -> str | None:
+    if shot.get("video_path"):
+        return "edit saved; it won't change the existing video until the shot is regenerated"
+    return None
 
 
 def main() -> None:
