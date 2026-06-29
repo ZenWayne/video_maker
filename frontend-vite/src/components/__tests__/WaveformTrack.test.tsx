@@ -6,6 +6,8 @@ import WaveformTrack from '../WaveformTrack'
 const decodeAudioData = vi.fn()
 const close = vi.fn().mockResolvedValue(undefined)
 
+let ctx2d: { clearRect: ReturnType<typeof vi.fn>; fillRect: ReturnType<typeof vi.fn>; fillStyle: string }
+
 beforeEach(() => {
   decodeAudioData.mockReset()
   close.mockReset().mockResolvedValue(undefined)
@@ -23,11 +25,10 @@ beforeEach(() => {
     vi.fn().mockResolvedValue({ arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)) }),
   )
   // canvas 2d context stub
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
-    clearRect: vi.fn(),
-    fillRect: vi.fn(),
-    fillStyle: '',
-  } as unknown as CanvasRenderingContext2D)
+  ctx2d = { clearRect: vi.fn(), fillRect: vi.fn(), fillStyle: '' }
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
+    ctx2d as unknown as CanvasRenderingContext2D,
+  )
 })
 
 afterEach(() => {
@@ -60,6 +61,7 @@ describe('WaveformTrack', () => {
     await waitFor(() =>
       expect(document.querySelector('canvas')).toBeInTheDocument(),
     )
+    await waitFor(() => expect(ctx2d.fillRect).toHaveBeenCalled())
   })
 
   it('点击波形上报对应帧', async () => {
@@ -82,7 +84,7 @@ describe('WaveformTrack', () => {
     // jsdom 下 offsetWidth=0,组件应有兜底宽度;mock 一个尺寸
     Object.defineProperty(canvas, 'offsetWidth', { value: 500, configurable: true })
     fireEvent.pointerDown(canvas, { clientX: 250 })
-    expect(onScrub).toHaveBeenCalled()
+    expect(onScrub).toHaveBeenCalledWith(120)
   })
 
   it('解码失败时降级隐藏(返回 null,无 canvas)', async () => {
