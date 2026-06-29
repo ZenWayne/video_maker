@@ -125,3 +125,8 @@ def test_sine_then_silence_trailing_buckets_near_zero(tmp_path):
     # 尾部 60 桶 (后 ~30%) 应接近静音
     late = peaks[-60:]
     assert all(p < 0.05 for p in late), f"Expected silence in late buckets, got max={max(late):.4f}"
+
+
+def test_bad_path_returns_empty():
+    """坏路径 → ffmpeg 非零退出、无 stdout → 降级为 [](不抛异常)。"""
+    assert extract_waveform_peaks("/nonexistent/does-not-exist.mp4") == []
