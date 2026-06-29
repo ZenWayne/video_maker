@@ -105,6 +105,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 function getVideo(): HTMLVideoElement {
