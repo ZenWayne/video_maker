@@ -24,6 +24,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { TrimDialog } from '@/components/TrimDialog'
+import { ShotPlayer } from './ShotPlayer'
 import type { AspectRatio, Shot, ShotStatus } from '@/lib/types'
 
 interface ShotCardProps {
@@ -699,11 +700,10 @@ export function ShotCard({
           {/* 视频播放器 */}
           {shot.video_path && isPlaying && (
             <div className="relative rounded-lg overflow-hidden">
-              <video
-                src={shot.video_path}
-                controls
-                autoPlay
-                className="w-full"
+              <ShotPlayer
+                videoUrl={shot.video_path}
+                trimEndSec={shot.trim_end_sec ?? null}
+                audioUrl={shot.vc_audio_url ?? null}
               />
             </div>
           )}

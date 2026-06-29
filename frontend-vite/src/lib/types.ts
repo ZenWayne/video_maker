@@ -83,6 +83,11 @@ export interface Shot {
   tf_error_message: string | null
   tf_confirmed: boolean
   auto_trim: boolean
+  trim_frames?: number | null
+  source_fps?: number | null
+  source_frames?: number | null
+  trim_end_sec?: number | null
+  vc_audio_url?: string | null
 }
 
 export interface ReferenceImage {
