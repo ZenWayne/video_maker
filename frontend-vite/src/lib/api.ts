@@ -327,6 +327,11 @@ export const api = {
     return request('PUT', `/api/projects/${projectId}/shots/${shotId}/reference-images/reorder`, { order })
   },
 
+  // 波形峰值(后端 ffmpeg 提取,200 桶,0..1 归一化;无音频时返回 [])
+  getWaveform: (projectId: string, shotId: number): Promise<{ peaks: number[] }> => {
+    return request('GET', `/api/projects/${projectId}/shots/${shotId}/waveform`)
+  },
+
   // 视频元信息
   getVideoInfo: (projectId: string, shotId: number): Promise<{
     fps: number

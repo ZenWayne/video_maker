@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { downsamplePeaks, frameFromOffsetX, pixelForFrame } from '@/lib/waveform'
+import { useEffect, useRef, useCallback } from 'react'
+import { frameFromOffsetX, pixelForFrame } from '@/lib/waveform'
 
 interface WaveformTrackProps {
-  videoSrc: string
+  peaks: number[] | null
   totalFrames: number
   endFrame: number
   speechEndFrame: number | null
@@ -10,55 +10,22 @@ interface WaveformTrackProps {
 }
 
 const TRACK_HEIGHT = 84
-const BAR_WIDTH = 3
-const BAR_GAP = 2
-const SILENCE_RATIO = 0.05 // 低于全局峰值 5% 的柱视为静音(灰)
 const FALLBACK_WIDTH = 500
 
-type Status = 'loading' | 'ready' | 'unavailable'
-
 export default function WaveformTrack({
-  videoSrc,
+  peaks,
   totalFrames,
   endFrame,
   speechEndFrame,
   onScrub,
 }: WaveformTrackProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const peaksRef = useRef<number[]>([])
   const draggingRef = useRef(false)
-  const [status, setStatus] = useState<Status>('loading')
-
-  // ---- 解码音频(videoSrc 变化时)----
-  useEffect(() => {
-    let cancelled = false
-    setStatus('loading')
-    const ctx = new AudioContext()
-    fetch(videoSrc)
-      .then((r) => r.arrayBuffer())
-      .then((buf) => ctx.decodeAudioData(buf))
-      .then((audio) => {
-        if (cancelled) return
-        const width = canvasRef.current?.offsetWidth || FALLBACK_WIDTH
-        const buckets = Math.max(1, Math.floor(width / (BAR_WIDTH + BAR_GAP)))
-        peaksRef.current = downsamplePeaks(audio.getChannelData(0), buckets)
-        setStatus('ready')
-      })
-      .catch(() => {
-        if (!cancelled) setStatus('unavailable')
-      })
-      .finally(() => {
-        ctx.close().catch(() => {})
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [videoSrc])
 
   // ---- 画 canvas(峰值/状态变化时)----
-  const draw = useCallback(() => {
+  useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || status !== 'ready') return
+    if (!canvas || !peaks || peaks.length === 0) return
     const width = canvas.offsetWidth || FALLBACK_WIDTH
     canvas.width = width
     canvas.height = TRACK_HEIGHT
@@ -66,8 +33,6 @@ export default function WaveformTrack({
     if (!g) return
     g.clearRect(0, 0, width, TRACK_HEIGHT)
 
-    const peaks = peaksRef.current
-    const globalMax = peaks.reduce((m, p) => (p > m ? p : m), 0) || 1
     const mid = TRACK_HEIGHT / 2
 
     // 静音高亮带 + 说话结束竖线
@@ -80,12 +45,11 @@ export default function WaveformTrack({
     }
 
     // 峰值柱
-    const step = BAR_WIDTH + BAR_GAP
-    peaks.forEach((p, i) => {
-      const norm = p / globalMax
-      const h = Math.max(2, norm * (TRACK_HEIGHT - 16))
-      g.fillStyle = norm < SILENCE_RATIO ? '#D4D4D8' : '#3B82F6' // zinc-300 / blue-500
-      g.fillRect(i * step, mid - h / 2, BAR_WIDTH, h)
+    const barWidth = Math.max(1, width / peaks.length)
+    peaks.forEach((value, i) => {
+      const h = Math.max(2, value * (TRACK_HEIGHT - 16))
+      g.fillStyle = value < 0.05 ? '#D4D4D8' : '#3B82F6' // zinc-300 / blue-500
+      g.fillRect(i * barWidth, mid - h / 2, barWidth, h)
     })
 
     // 待裁区 + 裁剪竖线
@@ -94,11 +58,7 @@ export default function WaveformTrack({
     g.fillRect(cx, 0, width - cx, TRACK_HEIGHT)
     g.fillStyle = '#EF4444' // red-500
     g.fillRect(cx - 1, 0, 3, TRACK_HEIGHT)
-  }, [status, endFrame, speechEndFrame, totalFrames])
-
-  useEffect(() => {
-    draw()
-  }, [draw])
+  }, [peaks, endFrame, speechEndFrame, totalFrames])
 
   // ---- 交互:点击/拖拽设裁剪点 ----
   const scrubTo = useCallback(
@@ -111,7 +71,8 @@ export default function WaveformTrack({
     [onScrub, totalFrames],
   )
 
-  if (status === 'unavailable') return null
+  // 无音频时降级隐藏
+  if (peaks !== null && peaks.length === 0) return null
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -138,8 +99,8 @@ export default function WaveformTrack({
           e.currentTarget.releasePointerCapture(e.pointerId)
         }}
       />
-      {status === 'loading' && (
-        <span className="text-[11px] text-zinc-400">声纹解码中…</span>
+      {peaks === null && (
+        <span className="text-[11px] text-zinc-400">波形加载中…</span>
       )}
     </div>
   )

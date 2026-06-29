@@ -43,6 +43,7 @@ export function TrimDialog({
   const [isRestoring, setIsRestoring] = useState(false)
   const [isAligning, setIsAligning] = useState(false)
   const [isDetectingSilence, setIsDetectingSilence] = useState(false)
+  const [peaks, setPeaks] = useState<number[] | null>(null)
   const [notice, setNotice] = useState('')
   const [isPreviewing, setIsPreviewing] = useState(false)
   const [hasBackup, setHasBackup] = useState(false)
@@ -126,6 +127,7 @@ export function TrimDialog({
     setIsLoading(true)
     setError('')
     setNotice('')
+    setPeaks(null)
     api.getVideoInfo(projectId, shot.shot_id).then((info) => {
       setFps(info.fps)
       setTotalFrames(info.total_frames)
@@ -138,6 +140,7 @@ export function TrimDialog({
       setError(e instanceof Error ? e.message : 'Failed to load video info')
       setIsLoading(false)
     })
+    api.getWaveform(projectId, shot.shot_id).then((r) => setPeaks(r.peaks)).catch(() => setPeaks([]))
   }, [open, projectId, shot.shot_id])
 
   const seekToFrame = (frame: number) => {
@@ -274,7 +277,7 @@ export function TrimDialog({
             {/* Waveform track — 与下方滑块共享时间轴 */}
             <div className="shrink-0">
               <WaveformTrack
-                videoSrc={shot.video_path || ''}
+                peaks={peaks}
                 totalFrames={totalFrames}
                 endFrame={endFrame}
                 speechEndFrame={speechEndFrame}

@@ -75,9 +75,15 @@ test.describe('裁剪弹窗 · 声纹波形轨', () => {
       await route.fulfill({ status: 200, body: '' })
     })
     // video-info is NOT an AI endpoint, but the mock project id has no real row,
-    // so we must serve it ourselves (the real video file is still decoded for real).
+    // so we must serve it ourselves.
     await page.route('**/api/projects/*/shots/*/video-info', async (route) => {
       await route.fulfill({ json: mockVideoInfo })
+    })
+    // Waveform peaks come from backend ffmpeg — mock with a synthetic sine wave.
+    await page.route('**/api/projects/*/shots/*/waveform', async (route) => {
+      await route.fulfill({
+        json: { peaks: Array.from({ length: 200 }, (_, i) => 0.2 + 0.6 * Math.abs(Math.sin(i / 8))) },
+      })
     })
     // Mock AI-triggering endpoints per CLAUDE.md (defensive — not used by this flow).
     for (const path of [
@@ -95,13 +101,7 @@ test.describe('裁剪弹窗 · 声纹波形轨', () => {
     }
   })
 
-  // BLOCKED (real-stack finding 2026-06-29): Chromium `decodeAudioData` returns
-  // EncodingError on the shot MP4s (muxed video+AAC container) — confirmed across
-  // multiple production files. The frontend Web Audio decode approach (spec §3/§4.1)
-  // does not work for these videos, so the waveform track unmounts (status →
-  // 'unavailable') instead of rendering. Re-enable once the audio-peak source is
-  // moved to a backend ffmpeg extraction (or another decodable source).
-  test.fixme('打开裁剪弹窗后声纹波形轨渲染并完成解码', async ({ page }) => {
+  test('打开裁剪弹窗后声纹波形轨渲染并完成加载', async ({ page }) => {
     await page.goto(`/projects/${PROJECT_ID}/shots`)
     await expect(page.getByTestId('shots-list')).toBeVisible({ timeout: 10_000 })
 
@@ -112,16 +112,14 @@ test.describe('裁剪弹窗 · 声纹波形轨', () => {
     // Dialog title confirms TrimDialog is open.
     await expect(page.getByText('裁剪视频 — Shot #1')).toBeVisible({ timeout: 5_000 })
 
-    // The waveform track label renders (it only renders while status !== 'unavailable').
+    // The waveform track label renders (it only renders while peaks !== []).
     await expect(page.getByText('声纹波形')).toBeVisible({ timeout: 10_000 })
 
     // A canvas element is present for the waveform.
     await expect(page.locator('canvas')).toBeVisible()
 
-    // Decode succeeds against the real file: the "声纹解码中…" loading hint
-    // appears then disappears. If decode FAILED, the whole track would unmount
-    // (status → unavailable) and "声纹波形" above would have vanished instead.
-    await expect(page.getByText('声纹解码中…')).toHaveCount(0, { timeout: 15_000 })
+    // Loading hint disappears once backend peaks arrive; '声纹波形' label stays visible.
+    await expect(page.getByText('波形加载中…')).toHaveCount(0, { timeout: 15_000 })
     await expect(page.getByText('声纹波形')).toBeVisible()
   })
 

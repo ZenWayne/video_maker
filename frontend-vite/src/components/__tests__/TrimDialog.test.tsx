@@ -14,6 +14,7 @@ vi.mock('@/lib/api', () => ({
       speech_end_frame: 180,
       speech_end_sec: 7.5,
     }),
+    getWaveform: vi.fn().mockResolvedValue({ peaks: [0.2, 0.6, 0.4, 0.8, 0.3] }),
     trimShot: vi.fn(),
   },
 }))
@@ -85,19 +86,7 @@ beforeEach(() => {
     Object.defineProperty(this, 'paused', { value: true, writable: true, configurable: true })
   })
 
-  // Stubs for WaveformTrack (AudioContext / fetch / canvas)
-  vi.stubGlobal('AudioContext', vi.fn().mockImplementation(function() {
-    return {
-      decodeAudioData: vi.fn().mockResolvedValue({
-        numberOfChannels: 1, length: 10, sampleRate: 24000, duration: 0,
-        getChannelData: () => new Float32Array(10).fill(0.3),
-      }),
-      close: vi.fn().mockResolvedValue(undefined),
-    }
-  }))
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-    arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)),
-  }))
+  // canvas 2d context stub (WaveformTrack draws to canvas)
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
     clearRect: vi.fn(), fillRect: vi.fn(), fillStyle: '',
   } as unknown as CanvasRenderingContext2D)

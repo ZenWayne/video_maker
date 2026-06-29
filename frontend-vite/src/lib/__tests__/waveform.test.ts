@@ -1,26 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { downsamplePeaks, frameFromOffsetX, pixelForFrame } from '../waveform'
-
-describe('downsamplePeaks', () => {
-  it('降到指定桶数', () => {
-    const ch = new Float32Array(1000).fill(0.5)
-    expect(downsamplePeaks(ch, 10)).toHaveLength(10)
-  })
-
-  it('每桶取绝对值最大', () => {
-    const ch = new Float32Array([0.1, -0.9, 0.2, 0.3])
-    // 2 桶:[0.1,-0.9] -> 0.9, [0.2,0.3] -> 0.3
-    // Float32 精度下值非精确(-0.9 存为 0.89999997),用 toBeCloseTo 逐元素比较
-    const peaks = downsamplePeaks(ch, 2)
-    expect(peaks).toHaveLength(2)
-    expect(peaks[0]).toBeCloseTo(0.9)
-    expect(peaks[1]).toBeCloseTo(0.3)
-  })
-
-  it('空输入返回全 0 数组', () => {
-    expect(downsamplePeaks(new Float32Array(0), 3)).toEqual([0, 0, 0])
-  })
-})
+import { frameFromOffsetX, pixelForFrame } from '../waveform'
 
 describe('frameFromOffsetX', () => {
   it('左缘 → 0 帧', () => {
