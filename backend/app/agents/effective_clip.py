@@ -64,20 +64,32 @@ def effective_clip_paths(shots: list, tmp_dir: str) -> list[str]:
     freshly-baked temp clip under tmp_dir. Caller owns tmp_dir cleanup.
 
     Each shot must expose .project_id, .shot_id, .trim_frames, .vc_audio_path.
+    If vc_audio_path is set but the file does not exist on disk, the shot is
+    treated as no-vc (falls back to source audio) and a warning is logged.
     """
     out: list[str] = []
     for s in shots:
         source = shot_source_path(s.project_id, s.shot_id)
         if source is None:
             raise FileNotFoundError(f"Shot {s.shot_id}: no source video")
-        if not s.trim_frames and not s.vc_audio_path:
+
+        vc_audio = s.vc_audio_path
+        if vc_audio and not Path(vc_audio).exists():
+            logger.warning(
+                "Shot %s: vc_audio_path %r does not exist on disk — falling back to source audio",
+                s.shot_id,
+                vc_audio,
+            )
+            vc_audio = None
+
+        if not s.trim_frames and not vc_audio:
             out.append(str(source))
             continue
         clip = str(Path(tmp_dir) / f"eff_{s.shot_id}_{ts_uuid_name('.mp4')}")
         build_effective_clip(
             str(source),
             trim_frames=s.trim_frames,
-            vc_audio_path=s.vc_audio_path,
+            vc_audio_path=vc_audio,
             out_path=clip,
         )
         out.append(clip)
