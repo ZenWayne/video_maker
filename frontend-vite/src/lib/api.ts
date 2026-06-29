@@ -328,7 +328,14 @@ export const api = {
   },
 
   // 视频元信息
-  getVideoInfo: (projectId: string, shotId: number): Promise<{ fps: number; total_frames: number; duration: number; has_backup: boolean }> => {
+  getVideoInfo: (projectId: string, shotId: number): Promise<{
+    fps: number
+    total_frames: number
+    duration: number
+    has_backup: boolean
+    speech_end_frame: number | null
+    speech_end_sec: number | null
+  }> => {
     return request('GET', `/api/projects/${projectId}/shots/${shotId}/video-info`)
   },
 
