@@ -955,7 +955,7 @@ async def _do_voice_convert_one(
     Extracts original audio from the shot, calls CosyVoice VC service,
     and remuxes the result back into the video.
     """
-    from app.agents.audio_extractor import extract_audio_wav, remux_video_with_audio
+    from app.agents.audio_extractor import extract_audio_wav
     from app.services.cosyvoice_client import voice_convert
 
     async with session_factory() as session:
@@ -974,26 +974,21 @@ async def _do_voice_convert_one(
         )
 
         try:
-            # 1. Extract original audio (always from unmodified video)
-            original_video = get_original_video_for_audio(project_id, shot_id)
-            src_audio = str(shot_audio_original_path(project_id, shot_id))
-            extract_audio_wav(str(original_video), src_audio)
+            # 1. Extract full source audio (trim-independent)
+            source_video = get_original_video_for_audio(project_id, shot_id)
+            src_audio = str(shot_dir(project_id, shot_id) / f"audio_in_{ts_uuid_name('.wav')}")
+            extract_audio_wav(str(source_video), src_audio)
 
-            # 2. Call CosyVoice VC service
-            vc_audio = str(shot_audio_vc_path(project_id, shot_id))
+            # 2. CosyVoice VC → a NEW uniquely-named wav (never overwrite)
+            vc_audio = str(shot_dir(project_id, shot_id) / f"audio_vc_{ts_uuid_name('.wav')}")
             await voice_convert(src_audio, ref_audio_path, vc_audio)
 
-            # 3. Remux the un-VC'd video stream + converted audio → a NEW vc_ file.
-            #    No backup copy: the non-VC predecessor (original_video) stays on disk
-            #    for revert and as the audio source. Only drop a prior vc_ output.
-            vc_out = shot_dir(project_id, shot_id) / f"vc_{ts_uuid_name('.mp4')}"
-            remux_video_with_audio(str(original_video), vc_audio, str(vc_out))
-            video_path = Path(shot.video_path)
-            if video_path.name.startswith("vc_"):
-                video_path.unlink(missing_ok=True)
-            shot.video_path = str(vc_out)
-
-            # 5. Update DB
+            # 3. Metadata only: drop a prior vc audio, point at the new one.
+            #    Source video is NOT touched; video_path stays the source.
+            if shot.vc_audio_path:
+                Path(shot.vc_audio_path).unlink(missing_ok=True)
+            Path(src_audio).unlink(missing_ok=True)
+            shot.vc_audio_path = vc_audio
             shot.vc_status = "done"
             shot.vc_error_message = None
             session.add(shot)
@@ -1006,7 +1001,7 @@ async def _do_voice_convert_one(
                     "type": "vc_completed",
                     "data": {
                         "shot_id": shot_id,
-                        "video_path": to_media_url(str(video_path)),
+                        "vc_audio_url": to_media_url(vc_audio),
                         "version": int(_time.time()),
                     },
                 },
