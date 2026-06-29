@@ -265,7 +265,11 @@ describe('downsamplePeaks', () => {
   it('每桶取绝对值最大', () => {
     const ch = new Float32Array([0.1, -0.9, 0.2, 0.3])
     // 2 桶:[0.1,-0.9] -> 0.9, [0.2,0.3] -> 0.3
-    expect(downsamplePeaks(ch, 2)).toEqual([0.9, 0.3])
+    // Float32 精度下值非精确(-0.9 存为 0.89999997),用 toBeCloseTo 逐元素比较
+    const peaks = downsamplePeaks(ch, 2)
+    expect(peaks).toHaveLength(2)
+    expect(peaks[0]).toBeCloseTo(0.9)
+    expect(peaks[1]).toBeCloseTo(0.3)
   })
 
   it('空输入返回全 0 数组', () => {
