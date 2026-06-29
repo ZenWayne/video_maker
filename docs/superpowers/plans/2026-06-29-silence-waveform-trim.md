@@ -31,7 +31,7 @@
 **Interfaces:**
 - Consumes: 既有 `detect_speech_end(video_path) -> float | None`、`get_video_info(video_path) -> dict`(键 `fps/total_frames/duration`)。
 - Produces:
-  - `speech_end_frame(video_path: str, fps: float) -> int | None` —— 尾部静音起点对应的帧号,无尾部静音返回 `None`。
+  - `speech_end_info(video_path: str, fps: float) -> tuple[float | None, int | None]` —— 返回 (尾部静音起点秒, 对应帧号);无尾部静音返回 `(None, None)`。**生产端点与单测都调用它**(避免死代码、单次 ffmpeg 调用)。
   - `video-info` 端点响应新增键:`speech_end_sec: float | None`、`speech_end_frame: int | None`。
 
 - [ ] **Step 1: 写失败测试**
@@ -50,7 +50,7 @@ from pathlib import Path
 
 from ffmpeg import FFmpeg
 
-from app.agents.video_trimmer import speech_end_frame, get_video_info
+from app.agents.video_trimmer import speech_end_info, get_video_info
 
 pytestmark = pytest.mark.skipif(
     shutil.which("ffmpeg") is None,
@@ -98,8 +98,9 @@ def test_returns_frame_near_speech_end(tmp_path):
     _make_video_trailing_silence(video, speech=1.5, total=2.5)
     fps = get_video_info(str(video))["fps"]
 
-    frame = speech_end_frame(str(video), fps)
+    sec, frame = speech_end_info(str(video), fps)
 
+    assert sec is not None
     assert frame is not None
     # 说话约在 1.5s 结束,24fps → ~36 帧,给静音检测留 ±0.4s 容差
     assert 26 <= frame <= 46
@@ -110,29 +111,29 @@ def test_returns_none_when_no_trailing_silence(tmp_path):
     _make_video_full_speech(video, total=2.0)
     fps = get_video_info(str(video))["fps"]
 
-    assert speech_end_frame(str(video), fps) is None
+    assert speech_end_info(str(video), fps) == (None, None)
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `uv run --project backend pytest backend/tests/unit/test_speech_end_frame.py -v`
-Expected: FAIL —— `ImportError: cannot import name 'speech_end_frame'`(若本机无 ffmpeg 则全部 SKIP,需在有 ffmpeg 的环境跑)。
+Expected: FAIL —— `ImportError: cannot import name 'speech_end_info'`(若本机无 ffmpeg 则全部 SKIP,需在有 ffmpeg 的环境跑)。
 
-- [ ] **Step 3: 实现 `speech_end_frame`**
+- [ ] **Step 3: 实现 `speech_end_info`**
 
 在 `backend/app/agents/video_trimmer.py` 的 `detect_speech_end` 函数之后追加:
 
 ```python
-def speech_end_frame(video_path: str, fps: float) -> int | None:
-    """尾部静音起点(说话结束)对应的帧号;无尾部静音返回 None。
+def speech_end_info(video_path: str, fps: float) -> tuple[float | None, int | None]:
+    """(尾部静音起点秒, 对应帧号);无尾部静音返回 (None, None)。
 
     复用 detect_speech_end(-30dB / 0.3s),与「智能校准」同一套检测,
     便于前端波形上对比手动裁剪点与自动裁剪点。
     """
     sec = detect_speech_end(video_path)
     if sec is None:
-        return None
-    return int(sec * fps)
+        return None, None
+    return sec, int(sec * fps)
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -145,7 +146,7 @@ Expected: PASS(2 passed)。
 修改 `backend/app/api/pipeline.py` 的 `get_shot_video_info`(约 1109-1124 行)。导入处与函数体改为:
 
 ```python
-    from app.agents.video_trimmer import get_video_info, speech_end_frame
+    from app.agents.video_trimmer import get_video_info, speech_end_info
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -158,24 +159,22 @@ Expected: PASS(2 passed)。
     info = get_video_info(shot.video_path)
     backup = Path(shot.video_path).with_name("output_original.mp4")
     info["has_backup"] = backup.exists()
-    sec = None
     try:
-        from app.agents.video_trimmer import detect_speech_end
-        sec = detect_speech_end(shot.video_path)
+        sec, frame = speech_end_info(shot.video_path, info["fps"])
     except Exception:  # 静音检测失败不应阻塞裁剪元数据返回
-        sec = None
+        sec, frame = None, None
     info["speech_end_sec"] = sec
-    info["speech_end_frame"] = int(sec * info["fps"]) if sec is not None else None
+    info["speech_end_frame"] = frame
     return info
 ```
 
-> 说明:端点已有 `info["fps"]`,直接内联 `int(sec * fps)`,避免 `speech_end_frame` 内重复 ffprobe;`speech_end_frame` helper 保留供单测与未来复用。`detect_speech_end` 包在 try/except 内,静音检测异常时降级为 `None`,不影响 fps/frames/duration。
+> 说明:`speech_end_info` 同时被生产端点与单测调用(无死代码),内部只跑一次 `detect_speech_end`;端点已有 `info["fps"]` 直接传入。整体包在 try/except 内,静音检测异常时降级为 `(None, None)`,不影响 fps/frames/duration。
 
 - [ ] **Step 6: 提交**
 
 ```bash
 git add backend/app/agents/video_trimmer.py backend/app/api/pipeline.py backend/tests/unit/test_speech_end_frame.py
-git commit -m "feat(trim): video-info 暴露 speech_end_frame(复用 detect_speech_end)"
+git commit -m "feat(trim): video-info 暴露 speech_end_frame/sec(复用 detect_speech_end)"
 ```
 
 ---
@@ -840,4 +839,4 @@ Run: `make dev`(或 `cd frontend-vite && npm run dev`),浏览器打开某个有 
 
 **2. Placeholder scan:** 无 TBD/TODO;每个代码步骤含完整可运行代码与预期输出。✓
 
-**3. Type consistency:** `speech_end_frame`/`speech_end_sec` 命名在 Task 1(后端键)、Task 2(TS 类型)、Task 5(读取 `info.speech_end_frame`)一致;`downsamplePeaks`/`frameFromOffsetX`/`pixelForFrame` 在 Task 3 定义、Task 4 消费,签名一致;`WaveformTrackProps`(videoSrc/totalFrames/endFrame/speechEndFrame/onScrub)在 Task 4 定义、Task 5 传参一致。✓
+**3. Type consistency:** helper `speech_end_info` 在 Task 1 定义、端点与单测共用;响应键 `speech_end_frame`/`speech_end_sec` 在 Task 1(后端键)、Task 2(TS 类型)、Task 5(读取 `info.speech_end_frame`)一致;`downsamplePeaks`/`frameFromOffsetX`/`pixelForFrame` 在 Task 3 定义、Task 4 消费,签名一致;`WaveformTrackProps`(videoSrc/totalFrames/endFrame/speechEndFrame/onScrub)在 Task 4 定义、Task 5 传参一致。✓
