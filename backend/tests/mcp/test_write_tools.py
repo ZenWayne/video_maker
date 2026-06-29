@@ -18,6 +18,44 @@ def server(backend):
     return create_server(backend)
 
 
+async def test_create_project(server, db_session_factory):
+    async with Client(server) as c:
+        res = await c.call_tool("create_project",
+                                {"title": "My Film", "theme_text": "a quiet story",
+                                 "aspect_ratio": "9:16"})
+    data = _payload(res)
+    assert data["id"]
+    assert data["title"] == "My Film"
+    assert data["status"] == "draft"
+    assert data["aspect_ratio"] == "9:16"
+    # verify it is discoverable + persisted
+    from app.models.project import Project
+    async with db_session_factory() as s:
+        proj = (await s.execute(select(Project).where(Project.id == data["id"]))).scalar_one()
+    assert proj.theme_text == "a quiet story"
+    assert proj.aspect_ratio == "9:16"
+
+
+async def test_create_project_defaults_aspect_ratio(server, db_session_factory):
+    async with Client(server) as c:
+        res = await c.call_tool("create_project",
+                                {"title": "Default AR", "theme_text": "t"})
+    assert _payload(res)["aspect_ratio"] == "16:9"
+
+
+async def test_create_project_rejects_empty_title(server, db_session_factory):
+    async with Client(server) as c:
+        with pytest.raises(Exception, match="title"):
+            await c.call_tool("create_project", {"title": "  ", "theme_text": "t"})
+
+
+async def test_create_project_rejects_bad_aspect_ratio(server, db_session_factory):
+    async with Client(server) as c:
+        with pytest.raises(Exception, match="aspect_ratio"):
+            await c.call_tool("create_project",
+                              {"title": "x", "theme_text": "t", "aspect_ratio": "4:3"})
+
+
 async def test_update_dialogue(server, db_session_factory):
     pid = await seed_project(db_session_factory)
     async with Client(server) as c:

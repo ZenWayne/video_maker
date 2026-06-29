@@ -40,10 +40,11 @@ network.  All backend calls are sent with a fixed `X-User-Name: mcp-agent` heade
 | `get_shot` | `project_id: str`, `shot_id: int` | Get one shot with prev/next dialogue context and word-count target. |
 | `get_authoring_guidelines` | _(none)_ | Return dialogue and motion authoring conventions (language, word targets, lip-sync rules). |
 
-### Write tools (4)
+### Write tools (5)
 
 | Tool | Arguments | Description |
 |---|---|---|
+| `create_project` | `title: str`, `theme_text: str`, `aspect_ratio: str = "16:9"` | Create a new project (status `draft`). `title` = 项目标题, `theme_text` = 主题描述, `aspect_ratio` = 画面比例 (`16:9`/`9:16`). Returns `{id, title, status, aspect_ratio}`. Character reference images (主题角色) are image uploads and must be added via the web UI, not here. |
 | `update_dialogue` | `project_id: str`, `shot_id: int`, `text: str` | Set a shot's dialogue (`text` / 台词). Rejects empty text; word count is advisory. Returns updated shot + word-count report. |
 | `update_motion` | `project_id: str`, `shot_id: int`, `motion_prompt: str`, `sync_lip_marker: bool = True` | Set a shot's `motion_prompt` (动作). When `sync_lip_marker=True` the lip-sync marker (`The character says: "..."`) is kept in sync with the current dialogue automatically. |
 | `batch_update_shots` | `project_id: str`, `updates: list[dict]` | Apply many edits in one call. Each update: `{shot_id, text?, motion_prompt?}`. Partial success is allowed — each item reports `"ok": true/false` independently. |

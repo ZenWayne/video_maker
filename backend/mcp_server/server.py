@@ -48,6 +48,33 @@ def create_server(backend: BackendClient) -> FastMCP:
         return AUTHORING_GUIDELINES
 
     @mcp.tool
+    async def create_project(
+        title: str, theme_text: str, aspect_ratio: str = "16:9"
+    ) -> dict:
+        """Create a new project (status=draft). Returns id/title/status/aspect_ratio.
+
+        - title: project title (项目标题).
+        - theme_text: theme / description the script is generated from (主题描述).
+        - aspect_ratio: "16:9" or "9:16" (画面比例); defaults to "16:9".
+
+        Character reference images (主题角色) are uploaded separately as image
+        files and cannot be set through this MCP — add them via the web UI.
+        """
+        if not title or not title.strip():
+            raise ValueError("title must not be empty")
+        if not theme_text or not theme_text.strip():
+            raise ValueError("theme_text must not be empty")
+        if aspect_ratio not in ("16:9", "9:16"):
+            raise ValueError('aspect_ratio must be "16:9" or "9:16"')
+        created = await backend.create_project(title, theme_text, aspect_ratio)
+        return {
+            "id": created["id"],
+            "title": created.get("title"),
+            "status": created.get("status"),
+            "aspect_ratio": created.get("aspect_ratio"),
+        }
+
+    @mcp.tool
     async def update_dialogue(project_id: str, shot_id: int, text: str) -> dict:
         """Set a shot's dialogue (text/台词). Rejects empty text; word count is advisory."""
         if not text or not text.strip():

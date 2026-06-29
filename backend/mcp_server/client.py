@@ -54,6 +54,15 @@ class BackendClient:
     async def get_project(self, project_id: str) -> dict:
         return await self._request("GET", f"/api/projects/{project_id}")
 
+    async def create_project(
+        self, title: str, theme_text: str, aspect_ratio: str = "16:9"
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/api/projects",
+            json={"title": title, "theme_text": theme_text, "aspect_ratio": aspect_ratio},
+        )
+
     async def patch_shot(self, project_id: str, shot_id: int, body: dict) -> dict:
         return await self._request(
             "PATCH", f"/api/projects/{project_id}/shots/{shot_id}", json=body
