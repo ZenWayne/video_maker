@@ -29,6 +29,7 @@
 - 不做波形缩放/平移、不做逐采样精度的频谱图。
 - 不在前端复刻静音检测算法(必须复用后端,见 §4.2)。
 - 不改动 `trim` / `restore-trim` / `align-tail-frame` 端点的现有行为。
+  - **例外(2026-06-29 实施中确认)**:实现波形复用 `detect_speech_end` 时发现该函数存在既有 bug——AAC 编码视频的尾部静音检测(旧条件 `len(starts) > len(ends)`)恒为 False,导致生产视频上 `detect_speech_end` 恒返回 `None`。因波形「说话结束」线必须复用同一检测,**已在 Task 1 修复此 bug**(新增 `ends[-1] >= duration - 0.15s` 判定)。副作用:`align-tail-frame`(智能校准)与 `suggest_silence_trim` 在 AAC 视频上从"空操作"恢复为正常生效——这是它们本应有的行为。该例外已获用户确认接受,并补充中间静音误判分支的回归测试。
 
 ## 3. 三个核心元素及其数据来源
 
