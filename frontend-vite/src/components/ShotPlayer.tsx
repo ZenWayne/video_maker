@@ -1,5 +1,5 @@
 // frontend-vite/src/components/ShotPlayer.tsx
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useShotSync } from '../hooks/useShotSync'
 
 export interface ShotPlayerProps {
@@ -34,6 +34,13 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl }: ShotPlayerProps) 
 
   // effective end = the trim point when set, else the full source duration
   const end = trimEndSec != null && trimEndSec > 0 ? trimEndSec : fullDuration
+
+  // Autoplay on mount — the parent only mounts this after the user clicks the
+  // thumbnail, so that click gesture permits playback (restores the old UX where
+  // clicking the thumbnail played immediately instead of showing a paused frame).
+  useEffect(() => {
+    videoRef.current?.play()?.catch(() => {})
+  }, [])
 
   const togglePlay = useCallback(() => {
     const v = videoRef.current

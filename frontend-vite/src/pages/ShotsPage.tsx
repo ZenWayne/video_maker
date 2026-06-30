@@ -1005,6 +1005,7 @@ export default function ShotsPage() {
               </Button>
             </div>
             <video
+              key={joinPreviewUrl}
               src={joinPreviewUrl}
               controls
               autoPlay
