@@ -694,7 +694,12 @@ async def join_preview(
     import shutil as _shutil
     from app.agents.effective_clip import effective_clip_paths
 
-    output_path = str(join_preview_path(project_id))
+    # Unique filename per preview (+ clean old) so the browser never serves a
+    # stale cached preview from a fixed path.
+    previews_dir = join_preview_path(project_id).parent
+    for _old in list(previews_dir.glob("join_preview*.mp4")) + list(previews_dir.glob("join_preview*.txt")):
+        _old.unlink(missing_ok=True)
+    output_path = str(previews_dir / f"join_preview_{ts_uuid_name('.mp4')}")
     tmp_dir = tempfile.mkdtemp(prefix=f"joinpreview_{project_id}_")
     try:
         ordered_paths = effective_clip_paths(ordered_shots, tmp_dir)

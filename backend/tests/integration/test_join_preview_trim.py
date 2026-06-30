@@ -38,7 +38,10 @@ async def test_join_preview_applies_trim(client, db_session_factory):
     )
     assert r.status_code == 200, r.text
 
-    out = str(join_preview_path(pid))
+    # preview is written with a unique filename (join_preview_<ts_uuid>.mp4)
+    previews = sorted(join_preview_path(pid).parent.glob("join_preview*.mp4"))
+    assert previews, "no join preview produced"
+    out = str(previews[-1])
     total = get_video_info(out)["total_frames"]
     # trimmed preview ≈ 50 + 40 = 90 (allow ±2 for concat re-encode rounding);
     # the bug stitched the full sources → ~240.

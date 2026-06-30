@@ -72,11 +72,12 @@ async def test_join_preview_success(client, db_session_factory, add_shot_with_vi
 
     assert r.status_code == 200, r.text
     url = r.json()["preview_url"]
-    assert "/api/media/" in url and "join_preview.mp4" in url
+    # unique filename per preview: join_preview_<ts_uuid>.mp4
+    assert "/api/media/" in url and "join_preview" in url and url.split("?")[0].endswith(".mp4")
     assert "?t=" in url
     # 实际输出文件已生成
-    out = Path(settings.storage_root) / "projects" / pid / "previews" / "join_preview.mp4"
-    assert out.is_file() and out.stat().st_size > 0
+    previews = list((Path(settings.storage_root) / "projects" / pid / "previews").glob("join_preview*.mp4"))
+    assert previews and previews[0].stat().st_size > 0
 
 
 @pytest.mark.asyncio
