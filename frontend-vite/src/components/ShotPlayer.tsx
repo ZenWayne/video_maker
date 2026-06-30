@@ -69,18 +69,34 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl }: ShotPlayerProps) 
 
   return (
     <div className="shot-player">
-      <video
-        ref={videoRef}
-        src={videoUrl}
-        muted={audioEnabled}
-        onLoadedMetadata={(e) => setFullDuration((e.currentTarget as HTMLVideoElement).duration)}
-        onPlay={() => { onPlay(); setPlaying(true) }}
-        onPause={() => { onPause(); setPlaying(false) }}
-        onSeeked={onSeeked}
-        onTimeUpdate={handleTimeUpdate}
-        onClick={togglePlay}
-        style={{ width: '100%' }}
-      />
+      <div className="relative">
+        <video
+          ref={videoRef}
+          src={videoUrl}
+          muted={audioEnabled}
+          onLoadedMetadata={(e) => setFullDuration((e.currentTarget as HTMLVideoElement).duration)}
+          onPlay={() => { onPlay(); setPlaying(true) }}
+          onPause={() => { onPause(); setPlaying(false) }}
+          onSeeked={onSeeked}
+          onTimeUpdate={handleTimeUpdate}
+          onClick={togglePlay}
+          style={{ width: '100%', display: 'block' }}
+        />
+        {/* prominent center play button while paused (matches the thumbnail) */}
+        {!playing && (
+          <button
+            type="button"
+            data-testid="center-play"
+            onClick={togglePlay}
+            aria-label="播放"
+            className="absolute inset-0 flex items-center justify-center bg-black/25 group-hover:bg-black/15 transition-colors"
+          >
+            <span className="flex items-center justify-center w-14 h-14 rounded-full bg-black/45">
+              <svg viewBox="0 0 24 24" className="w-7 h-7 fill-white ml-0.5"><path d="M8 5v14l11-7z" /></svg>
+            </span>
+          </button>
+        )}
+      </div>
 
       {/* custom controls scaled to the trimmed (effective) duration */}
       <div className="flex items-center gap-2 mt-1">
