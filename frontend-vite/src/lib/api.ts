@@ -473,6 +473,11 @@ export const api = {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/extract-first-frame`)
   },
 
+  // 提取上一分镜末帧 → 本镜首帧（拷贝上一镜当前尾帧，已反映裁剪）
+  usePrevLastFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; custom_first_frame_path: string }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/use-prev-last-frame`)
+  },
+
   // 提取本镜尾帧 → 尾帧配置
   extractLastFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; target_last_frame_path: string; tf_status: string }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/extract-last-frame`)

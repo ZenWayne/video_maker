@@ -241,3 +241,45 @@ async def test_extract_last_frame_404_shot_missing(client, db_session_factory):
         headers=HEADERS,
     )
     assert r.status_code == 404, r.text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# use-prev-last-frame  (提取上一镜末帧 → 本镜首帧)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def test_use_prev_last_frame_copies_prev_tail(client, db_session_factory, tmp_path):
+    """200; shot 2's custom_first_frame_path = a fresh copy of shot 1's last frame."""
+    pid = await _make_project(db_session_factory, status="shot_review")
+    prev_tail = _write_source_file(tmp_path, "prev_last_frame.png")
+    await _seed_shot(db_session_factory, pid, shot_id=1, last_frame_path=str(prev_tail))
+    await _seed_shot(db_session_factory, pid, shot_id=2)
+
+    r = await client.post(f"/api/projects/{pid}/shots/2/use-prev-last-frame", headers=HEADERS)
+    assert r.status_code == 200, r.text
+    url = r.json()["custom_first_frame_path"]
+    assert TS_UUID_RE.search(url), f"URL {url!r} not ts_uuid"
+
+    shot2 = await _get_shot(db_session_factory, pid, shot_id=2)
+    assert shot2.custom_first_frame_path and Path(shot2.custom_first_frame_path).exists()
+    # It's a distinct copy, and the previous shot's last frame is untouched.
+    assert Path(shot2.custom_first_frame_path) != prev_tail
+    assert prev_tail.exists()
+
+
+async def test_use_prev_last_frame_first_shot_400(client, db_session_factory):
+    """Shot 1 has no previous shot → 400."""
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _seed_shot(db_session_factory, pid, shot_id=1)
+
+    r = await client.post(f"/api/projects/{pid}/shots/1/use-prev-last-frame", headers=HEADERS)
+    assert r.status_code == 400, r.text
+
+
+async def test_use_prev_last_frame_prev_no_tail_400(client, db_session_factory):
+    """Previous shot has no last frame → 400."""
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _seed_shot(db_session_factory, pid, shot_id=1)  # no last_frame_path
+    await _seed_shot(db_session_factory, pid, shot_id=2)
+
+    r = await client.post(f"/api/projects/{pid}/shots/2/use-prev-last-frame", headers=HEADERS)
+    assert r.status_code == 400, r.text

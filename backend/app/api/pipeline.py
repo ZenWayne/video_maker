@@ -1276,6 +1276,48 @@ async def extract_first_frame(
     return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
 
 
+@router.post("/projects/{project_id}/shots/{shot_id}/use-prev-last-frame")
+async def use_prev_last_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Copy the PREVIOUS shot's current last frame into this shot's custom_first_frame_path.
+
+    The previous shot's last_frame_path already reflects any trim (trim re-extracts
+    it), so this picks up the trimmed tail. Stored as a stable per-shot copy under
+    custom_frames/ — a genuine user override that survives the previous shot's
+    regeneration and is preserved by the auto-continuity logic.
+    """
+    await _get_project_or_404(project_id, session)
+    if shot_id <= 1:
+        raise HTTPException(status_code=400, detail="No previous shot")
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    prev_result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id - 1)
+    )
+    prev = prev_result.scalar_one_or_none()
+    src_str = prev.last_frame_path if prev else None
+    if not src_str or not Path(src_str).exists():
+        raise HTTPException(status_code=400, detail="Previous shot has no last frame")
+
+    dest_dir = shot_custom_frames_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
+    shutil.copy2(src_str, str(dest))
+
+    shot.custom_first_frame_path = str(dest)
+    await session.commit()
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+
+
 @router.post("/projects/{project_id}/shots/{shot_id}/extract-last-frame")
 async def extract_last_frame(
     project_id: str,
