@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { TrimDialog } from '../TrimDialog'
+import { api } from '@/lib/api'
 import type { Shot } from '@/lib/types'
 
 // Mock api module
@@ -10,7 +11,11 @@ vi.mock('@/lib/api', () => ({
       fps: 24,
       total_frames: 240,
       duration: 10.0,
+      has_backup: false,
+      speech_end_frame: 180,
+      speech_end_sec: 7.5,
     }),
+    getWaveform: vi.fn().mockResolvedValue({ peaks: [0.2, 0.6, 0.4, 0.8, 0.3] }),
     trimShot: vi.fn(),
   },
 }))
@@ -81,10 +86,16 @@ beforeEach(() => {
   HTMLMediaElement.prototype.pause = vi.fn(function (this: HTMLMediaElement) {
     Object.defineProperty(this, 'paused', { value: true, writable: true, configurable: true })
   })
+
+  // canvas 2d context stub (WaveformTrack draws to canvas)
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+    clearRect: vi.fn(), fillRect: vi.fn(), fillStyle: '',
+  } as unknown as CanvasRenderingContext2D)
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 function getVideo(): HTMLVideoElement {
@@ -200,6 +211,34 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     expect(screen.getByText('-1').closest('button')).not.toBeDisabled()
   })
 
+  it('停止后再次预览从暂停处续播(不回到 0),并显示播放帧数', async () => {
+    await renderReady()
+    const video = getVideo()
+
+    // 裁剪到 120 帧 → endSec = 5.0s
+    fireEvent.change(screen.getByRole('slider'), { target: { value: '120' } })
+
+    // 开始预览(从头 → 归零)
+    fireEvent.click(screen.getByText('预览').closest('button')!)
+    expect(video.currentTime).toBe(0)
+
+    // 播到 2.5s(第 60 帧)——未到裁剪点
+    Object.defineProperty(video, 'currentTime', { value: 2.5, writable: true, configurable: true })
+    act(() => flushRAF())
+
+    // 播放帧数显示当前帧
+    expect(screen.getByText(/播放\s*61/)).toBeInTheDocument()
+
+    // 手动停止 → 暂停位置保留(计数器仍在)
+    fireEvent.click(screen.getByText('停止').closest('button')!)
+    expect(video.pause).toHaveBeenCalled()
+    expect(screen.getByText(/播放\s*61/)).toBeInTheDocument()
+
+    // 再次预览 → 从 2.5s 续播,不回到 0
+    fireEvent.click(screen.getByText('预览').closest('button')!)
+    expect(video.currentTime).toBe(2.5)
+  })
+
   it('does not trim until user clicks confirm — preview is non-destructive', async () => {
     const { onTrimmed } = await renderReady()
     const video = getVideo()
@@ -262,5 +301,22 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     // Move back to max → nothing to trim again
     fireEvent.change(screen.getByRole('slider'), { target: { value: '240' } })
     expect(screen.getByText('确认裁剪').closest('button')).toBeDisabled()
+  })
+
+  it('加载后渲染声纹波形轨', async () => {
+    render(
+      <TrimDialog
+        shot={mockShot}
+        projectId="proj-1"
+        open={true}
+        onOpenChange={() => {}}
+        onTrimmed={() => {}}
+      />,
+    )
+    expect(await screen.findByText('声纹波形')).toBeInTheDocument()
+    // 确认波形数据确实经 api.getWaveform 拉取(而非仅渲染 loading 标签)
+    await waitFor(() =>
+      expect(api.getWaveform).toHaveBeenCalledWith('proj-1', 1),
+    )
   })
 })

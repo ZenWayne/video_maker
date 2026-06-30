@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/dialog'
 import { api } from '@/lib/api'
 import type { AspectRatio, Shot } from '@/lib/types'
+import WaveformTrack from '@/components/WaveformTrack'
 
 interface TrimDialogProps {
   shot: Shot
@@ -36,19 +37,21 @@ export function TrimDialog({
   const [totalFrames, setTotalFrames] = useState(0)
   const [duration, setDuration] = useState(0)
   const [endFrame, setEndFrame] = useState(0)
+  const [speechEndFrame, setSpeechEndFrame] = useState<number | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isTrimming, setIsTrimming] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
   const [isAligning, setIsAligning] = useState(false)
   const [isDetectingSilence, setIsDetectingSilence] = useState(false)
+  const [peaks, setPeaks] = useState<number[] | null>(null)
   const [notice, setNotice] = useState('')
   const [isPreviewing, setIsPreviewing] = useState(false)
+  const [playheadFrame, setPlayheadFrame] = useState<number | null>(null)
   const [hasBackup, setHasBackup] = useState(false)
   const [error, setError] = useState('')
   const minFrames = 24
 
   const rvfcRef = useRef<number>(0)
-  const endFrameRef = useRef(0)
 
   const stopPreview = useCallback(() => {
     const v = videoRef.current
@@ -62,6 +65,7 @@ export function TrimDialog({
     }
     v?.pause()
     setIsPreviewing(false)
+    // 保留 playheadFrame(暂停位置)以便续播;清除交给重新打开/播完
   }, [])
 
   const handlePreview = useCallback(() => {
@@ -71,39 +75,35 @@ export function TrimDialog({
     }
     const v = videoRef.current
     if (!v || fps <= 0) return
-    endFrameRef.current = endFrame
-    v.currentTime = 0
+    const endSec = endFrame / fps
+    // 从头播 or 续播:已到/超过裁剪点(或尚未开始)→ 从 0;否则从当前暂停处续播
+    if (v.currentTime >= endSec - 0.5 / fps || v.currentTime <= 0.001) {
+      v.currentTime = 0
+    }
     v.play()
     setIsPreviewing(true)
+    setPlayheadFrame(Math.round(v.currentTime * fps))
 
-    let framesShown = 0
-    const onFrame = () => {
-      framesShown++
-      if (!videoRef.current || framesShown >= endFrameRef.current) {
-        videoRef.current?.pause()
+    const useRvfc = 'requestVideoFrameCallback' in v
+    const tick = () => {
+      const vid = videoRef.current
+      if (!vid) return
+      if (!useRvfc && vid.paused) return
+      setPlayheadFrame(Math.round(vid.currentTime * fps))
+      // 播到裁剪点即停(留半帧余量避免过冲)
+      if (vid.currentTime >= endSec - 0.5 / fps) {
+        vid.pause()
         setIsPreviewing(false)
+        setPlayheadFrame(null) // 播完清除播放头
         return
       }
-      rvfcRef.current = (videoRef.current as any).requestVideoFrameCallback(onFrame)
+      rvfcRef.current = useRvfc
+        ? (vid as any).requestVideoFrameCallback(tick)
+        : requestAnimationFrame(tick)
     }
-
-    if ('requestVideoFrameCallback' in v) {
-      rvfcRef.current = (v as any).requestVideoFrameCallback(onFrame)
-    } else {
-      // Fallback: use time-based check with half-frame offset to avoid overshoot
-      const endSec = (endFrame - 0.5) / fps
-      const checkEnd = () => {
-        if (!videoRef.current) return
-        if (videoRef.current.paused) return
-        if (videoRef.current.currentTime >= endSec) {
-          videoRef.current.pause()
-          setIsPreviewing(false)
-          return
-        }
-        rvfcRef.current = requestAnimationFrame(checkEnd)
-      }
-      rvfcRef.current = requestAnimationFrame(checkEnd)
-    }
+    rvfcRef.current = useRvfc
+      ? (v as any).requestVideoFrameCallback(tick)
+      : requestAnimationFrame(tick)
   }, [isPreviewing, stopPreview, endFrame, fps])
 
   useEffect(() => {
@@ -124,17 +124,21 @@ export function TrimDialog({
     setIsLoading(true)
     setError('')
     setNotice('')
+    setPeaks(null)
+    setPlayheadFrame(null)
     api.getVideoInfo(projectId, shot.shot_id).then((info) => {
       setFps(info.fps)
       setTotalFrames(info.total_frames)
       setDuration(info.duration)
       setEndFrame(info.total_frames)
       setHasBackup(info.has_backup)
+      setSpeechEndFrame(info.speech_end_frame)
       setIsLoading(false)
     }).catch((e) => {
       setError(e instanceof Error ? e.message : 'Failed to load video info')
       setIsLoading(false)
     })
+    api.getWaveform(projectId, shot.shot_id).then((r) => setPeaks(r.peaks)).catch(() => setPeaks([]))
   }, [open, projectId, shot.shot_id])
 
   const seekToFrame = (frame: number) => {
@@ -268,6 +272,18 @@ export function TrimDialog({
               />
             </div>
 
+            {/* Waveform track — 与下方滑块共享时间轴 */}
+            <div className="shrink-0">
+              <WaveformTrack
+                peaks={peaks}
+                totalFrames={totalFrames}
+                endFrame={endFrame}
+                speechEndFrame={speechEndFrame}
+                playheadFrame={playheadFrame}
+                onScrub={handleSliderChange}
+              />
+            </div>
+
             {/* Slider with trim indicator */}
             <div className="shrink-0 space-y-1">
               <div className="relative h-3 bg-zinc-200 rounded-full overflow-hidden">
@@ -292,16 +308,21 @@ export function TrimDialog({
             </div>
 
             {/* Frame info */}
-            <div className="shrink-0 flex items-center justify-between text-sm text-zinc-600">
-              <span>
+            <div className="shrink-0 flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5 text-sm text-zinc-600">
+              <span className="whitespace-nowrap">
                 帧: {endFrame} / {totalFrames}
                 {endFrame < totalFrames && (
                   <span className="text-red-500 ml-2">
                     裁掉 {totalFrames - endFrame} 帧
                   </span>
                 )}
+                {playheadFrame != null && (
+                  <span className="text-green-700 ml-2">
+                    ▶ 播放 {Math.min(playheadFrame + 1, totalFrames)}
+                  </span>
+                )}
               </span>
-              <span>
+              <span className="whitespace-nowrap">
                 时间: {currentTime}s / {duration.toFixed(2)}s
               </span>
             </div>

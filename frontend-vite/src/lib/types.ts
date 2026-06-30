@@ -4,6 +4,8 @@ export interface VideoInfo {
   fps: number
   total_frames: number
   duration: number
+  speech_end_frame: number | null
+  speech_end_sec: number | null
 }
 
 export type ProjectStatus =
