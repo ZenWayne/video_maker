@@ -4,7 +4,7 @@
 
 import { useState, useRef, useEffect } from 'react'
 import type { ComponentType } from 'react'
-import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Play, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User, ChevronDown, Crop, Upload } from 'lucide-react'
+import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User, ChevronDown, Crop, Upload } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -24,6 +24,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { TrimDialog } from '@/components/TrimDialog'
+import { ShotPlayer } from './ShotPlayer'
 import type { AspectRatio, Shot, ShotStatus } from '@/lib/types'
 
 interface ShotCardProps {
@@ -32,7 +33,6 @@ interface ShotCardProps {
   projectId?: string
   aspectRatio?: AspectRatio
   selected?: boolean
-  prevLastFramePath?: string | null
   isReferenceVoice?: boolean
   hasReferenceVoice?: boolean
   autoVoiceCalibrate?: boolean
@@ -184,7 +184,6 @@ export function ShotCard({
   projectId,
   aspectRatio,
   selected,
-  prevLastFramePath,
   onSelect,
   onEditScript,
   onEditPrompt,
@@ -215,7 +214,6 @@ export function ShotCard({
   const [promptAiInstruction, setPromptAiInstruction] = useState('')
   const [isPromptAiLoading, setIsPromptAiLoading] = useState(false)
   const [isPromptRewriting, setIsPromptRewriting] = useState(false)
-  const [isPlaying, setIsPlaying] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
@@ -401,15 +399,9 @@ export function ShotCard({
       ? [shot.custom_first_frame_path]
       : []
 
-  // 首帧槽显示：用户上传/提取的首帧（落在 custom_frames/）为真实覆盖，直接显示；
-  // 否则连续镜头显示上一镜头的“当前”末帧（prevLastFramePath 带 ?t= 缓存戳，会随上一镜重生成自动刷新），
-  // 兜底回到 custom_first_frame_path（覆盖 shot 1 的角色参考图，无上一镜）。
-  const firstFrameIsUserOverride = !!shot.custom_first_frame_path?.includes('custom_frames')
-  const firstFrameUrl = firstFrameIsUserOverride
-    ? shot.custom_first_frame_path
-    : shot.use_prev_last_frame && prevLastFramePath
-      ? prevLastFramePath
-      : shot.custom_first_frame_path
+  // 首帧槽显示 custom_first_frame_path：由「提取本镜首帧」/「上传首帧」
+  // 或连续性初始化显式写入(不再依赖会失灵的 use_prev_last_frame live 链接)。
+  const firstFrameUrl = shot.custom_first_frame_path
 
   // Edit dialog (shared between script and review variants)
   const editDialog = (
@@ -704,31 +696,15 @@ export function ShotCard({
             </div>
           </div>
 
-          {/* 视频播放器 */}
-          {shot.video_path && isPlaying && (
+          {/* 视频播放器 — 始终渲染，进度条一直显示（暂停时显示首帧 + 中央播放按钮） */}
+          {shot.video_path && (
             <div className="relative rounded-lg overflow-hidden">
-              <video
-                src={shot.video_path}
-                controls
-                autoPlay
-                className="w-full"
+              <ShotPlayer
+                videoUrl={shot.video_path}
+                trimEndSec={shot.trim_end_sec ?? null}
+                audioUrl={shot.vc_audio_url ?? null}
+                poster={shot.last_frame_path || shot.first_frame_path || null}
               />
-            </div>
-          )}
-
-          {shot.video_path && !isPlaying && (
-            <div
-              className="relative rounded-lg overflow-hidden cursor-pointer group"
-              onClick={() => setIsPlaying(true)}
-            >
-              <img
-                src={shot.last_frame_path || shot.first_frame_path || undefined}
-                alt={`Shot ${shot.shot_id}`}
-                className="w-full"
-              />
-              <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/20 transition-colors">
-                <Play className="w-12 h-12 text-white opacity-80" />
-              </div>
             </div>
           )}
 
@@ -764,27 +740,6 @@ export function ShotCard({
               <div className="text-xs text-amber-700 bg-amber-50 p-2 rounded">
                 {shot.reference_image_hint}
               </div>
-            )}
-            {!shot.align_with_previous && prevLastFramePath && (
-              <label className="flex items-center gap-2 text-xs text-zinc-600 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={shot.use_prev_last_frame}
-                  onChange={async (e) => {
-                    if (!projectId) return
-                    const val = e.target.checked
-                    try {
-                      await api.patchShot(projectId, shot.shot_id, { use_prev_last_frame: val })
-                      onShotUpdated?.(shot.shot_id, { use_prev_last_frame: val })
-                    } catch { /* handled by parent */ }
-                  }}
-                  className="rounded border-zinc-300"
-                />
-                使用上一镜头末帧作为首张参考图
-                {shot.use_prev_last_frame && (
-                  <img src={prevLastFramePath} alt="上一镜头末帧" className="w-12 h-12 object-cover rounded border ml-1 cursor-pointer" onClick={() => setPreviewUrl(prevLastFramePath!)} />
-                )}
-              </label>
             )}
             {/* 参考图上传 */}
             <div className="flex items-center gap-2">
@@ -1128,12 +1083,13 @@ export function ShotCard({
           aspectRatio={aspectRatio}
           open={isTrimOpen}
           onOpenChange={setIsTrimOpen}
-          onTrimmed={({ video_path, last_frame_path, version }) => {
+          onTrimmed={({ video_path, last_frame_path, trim_frames, trim_end_sec, version }) => {
             setVideoVersion(version)
-            setIsPlaying(false)
             onShotUpdated?.(shot.shot_id, {
               video_path: `${video_path}?v=${version}`,
               last_frame_path: `${last_frame_path}?v=${version}`,
+              trim_frames,
+              trim_end_sec,
             })
           }}
         />

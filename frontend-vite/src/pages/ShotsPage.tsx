@@ -634,9 +634,8 @@ export default function ShotsPage() {
           )}
 
           <div data-testid="shots-list" className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-4">
-            {shots.map((shot, idx) => {
+            {shots.map((shot) => {
               const isActive = shot.status === 'prompt_generating' || shot.status === 'video_generating'
-              const prevShot = idx > 0 ? shots[idx - 1] : null
               return isActive ? (
                 <ShotCard key={shot.id} shot={shot} variant="generating" />
               ) : (
@@ -646,7 +645,6 @@ export default function ShotsPage() {
                   variant="review"
                   projectId={projectId!}
                   aspectRatio={currentProject?.aspect_ratio}
-                  prevLastFramePath={prevShot?.last_frame_path}
                   isReferenceVoice={referenceVoiceShotId === shot.shot_id}
                   hasReferenceVoice={referenceVoiceShotId != null}
                   onEditPrompt={handleEditPrompt}
@@ -804,8 +802,7 @@ export default function ShotsPage() {
 
         {/* Shots Grid */}
         <div data-testid="shots-list" className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {shots.map((shot, idx) => {
-            const prevShot = idx > 0 ? shots[idx - 1] : null
+          {shots.map((shot) => {
             return (
               <ShotCard
                 key={shot.id || shot.shot_id}
@@ -814,7 +811,6 @@ export default function ShotsPage() {
                 projectId={projectId}
                 aspectRatio={currentProject?.aspect_ratio}
                 selected={selectedShotIds.has(shot.shot_id)}
-                prevLastFramePath={prevShot?.last_frame_path}
                 isReferenceVoice={referenceVoiceShotId === shot.shot_id}
                 hasReferenceVoice={referenceVoiceShotId != null}
                 autoVoiceCalibrate={autoVoiceCalibrate}
@@ -1009,6 +1005,7 @@ export default function ShotsPage() {
               </Button>
             </div>
             <video
+              key={joinPreviewUrl}
               src={joinPreviewUrl}
               controls
               autoPlay

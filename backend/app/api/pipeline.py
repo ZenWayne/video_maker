@@ -585,6 +585,10 @@ async def rewrite_motion_prompt(
         visual_description = shot.visual_description
         text = shot.text
         duration = shot.shot_duration
+        object_ref_paths = (
+            json.loads(shot.custom_reference_paths)
+            if shot.custom_reference_paths else None
+        )
 
     provider = GeminiProvider(
         project=settings.gemini_project, location=settings.gemini_location
@@ -599,6 +603,7 @@ async def rewrite_motion_prompt(
                 text=text,
                 duration=duration,
                 llm_provider=provider,
+                reference_image_paths=object_ref_paths,
             )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Director agent failed: {e}")
@@ -668,7 +673,7 @@ async def join_preview(
     )
     shots_by_id = {s.shot_id: s for s in result.scalars().all()}
 
-    ordered_paths: list[str] = []
+    ordered_shots: list = []
     for sid in body.shot_ids:
         shot = shots_by_id.get(sid)
         if shot is None:
@@ -681,13 +686,30 @@ async def join_preview(
             raise HTTPException(
                 status_code=400, detail=f"镜头 {sid} 缺少视频文件"
             )
-        ordered_paths.append(shot.video_path)
+        ordered_shots.append(shot)
 
-    output_path = str(join_preview_path(project_id))
+    # Apply the non-destructive EDL (trim + VC) before stitching, so the
+    # continuity preview reflects the trimmed clips — not the full source.
+    import tempfile
+    import shutil as _shutil
+    from app.agents.effective_clip import effective_clip_paths
+
+    # Unique filename per preview (+ clean old) so the browser never serves a
+    # stale cached preview from a fixed path.
+    previews_dir = join_preview_path(project_id).parent
+    for _old in list(previews_dir.glob("join_preview*.mp4")) + list(previews_dir.glob("join_preview*.txt")):
+        _old.unlink(missing_ok=True)
+    output_path = str(previews_dir / f"join_preview_{ts_uuid_name('.mp4')}")
+    tmp_dir = tempfile.mkdtemp(prefix=f"joinpreview_{project_id}_")
     try:
+        ordered_paths = effective_clip_paths(ordered_shots, tmp_dir)
         merge_shots(ordered_paths, output_path)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"拼接失败: {e}")
+    finally:
+        _shutil.rmtree(tmp_dir, ignore_errors=True)
 
     media_url = to_media_url(output_path)
     # cache-busting：用输出文件修改时间(纳秒)，避免浏览器/video 缓存旧预览
@@ -1289,8 +1311,11 @@ async def get_shot_video_info(
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
     info = get_video_info(shot.video_path)
-    backup = Path(shot.video_path).with_name("output_original.mp4")
-    info["has_backup"] = backup.exists()
+    # Restore is possible when a pristine output_ exists and the current clip is a
+    # derived (trimmed_/vc_) file, i.e. not the pristine itself.
+    from app.services.storage import pristine_video_path
+    pristine = pristine_video_path(project_id, shot_id)
+    info["has_backup"] = pristine is not None and Path(shot.video_path) != pristine
     try:
         sec, frame = speech_end_info(shot.video_path, info["fps"])
     except Exception:  # 静音检测失败不应阻塞裁剪元数据返回
@@ -1323,15 +1348,6 @@ async def get_shot_waveform(
     return {"peaks": peaks}
 
 
-def _ensure_pristine_backup(video_path: Path) -> Path:
-    """Copy the current video to output_original.mp4 once (pristine pre-trim source)."""
-    backup = video_path.with_name("output_original.mp4")
-    if not backup.exists():
-        import shutil
-        shutil.copy2(str(video_path), str(backup))
-    return backup
-
-
 async def _repoint_next_first_frame(
     project_id: str, shot_id: int, last_frame_path: str, session: AsyncSession
 ) -> None:
@@ -1357,17 +1373,18 @@ async def _repoint_next_first_frame(
 async def _commit_new_current_video(
     project_id: str, shot: Shot, new_video: Path, session: AsyncSession
 ) -> None:
-    """Point shot at a freshly-written unique video, refresh its unique last frame,
-    and re-point the next shot's first frame.
+    """Point shot at a video (a freshly-written trimmed_/vc_ file, or the pristine
+    output_ on restore), refresh its unique last frame, and re-point the next shot.
 
-    Deletes the previous current video and stale last_frame files (keeps the
-    output_original.mp4 / output_pre_vc.mp4 and last_frame_pre_cc.png backups).
+    Deletes the previous current ONLY if it is a derived file (trimmed_/vc_); the
+    pristine output_<ts>_<uuid>.mp4 is never deleted here so restore-trim can recover
+    it. Stale last_frame files are cleared (keeps the last_frame_pre_cc.png backup).
     """
     from app.agents.frame_porter import extract_last_frame
 
     s_dir = new_video.parent
     old = Path(shot.video_path) if shot.video_path else None
-    if old and old != new_video and old.name not in ("output_original.mp4", "output_pre_vc.mp4"):
+    if old and old != new_video and old.name.startswith(("trimmed_", "vc_")):
         old.unlink(missing_ok=True)
     shot.video_path = str(new_video)
 
@@ -1389,9 +1406,15 @@ async def trim_shot_video(
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Trim video to end at the given frame number (inclusive)."""
-    from app.agents.video_trimmer import get_video_info, trim_video
-    from app.agents.frame_porter import extract_last_frame
+    """Non-destructive trim: record trim_frames and refresh the last frame.
+
+    The source output_*.mp4 is never modified. Trimming changes the effective
+    last frame (index N-1 of the source) → re-extract it and reset CC. VC is
+    untouched (the vc audio is full-length and independent of trim length).
+    """
+    from app.agents.video_trimmer import get_video_info
+    from app.agents.frame_porter import extract_frame_at
+    from app.services.storage import shot_source_path
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1403,39 +1426,36 @@ async def trim_shot_video(
     if shot.status != "completed":
         raise HTTPException(status_code=409, detail="Shot is not completed")
 
-    video_path = Path(shot.video_path)
-    info = get_video_info(str(video_path))
+    source = shot_source_path(project_id, shot_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source video not found")
+    info = get_video_info(str(source))
+    total = info["total_frames"]
 
     if body.end_frame < 24:
         raise HTTPException(status_code=400, detail="Must keep at least 24 frames")
-    if body.end_frame >= info["total_frames"]:
-        raise HTTPException(status_code=400, detail="end_frame must be less than total frames")
+    n = min(body.end_frame, total)  # clamp; full length is a no-op trim
 
-    # Backup pristine original once, then trim it → a NEW unique current video so
-    # the URL changes (browser can't replay a stale cached copy of an in-place file).
-    backup = _ensure_pristine_backup(video_path)
-    new_video = video_path.parent / f"output_{ts_uuid_name('.mp4')}"
-    # Trim (use frame count, not time — avoids float rounding ±1 frame)
-    trim_video(str(backup), str(new_video), body.end_frame)
-    await _commit_new_current_video(project_id, shot, new_video, session)
+    # 1. Metadata only — source file is never touched
+    shot.trim_frames = n if n < total else None
+    shot.video_path = str(source)   # always the immutable source
+    shot.source_fps = info["fps"]
+    shot.source_frames = total
 
-    # Reset character calibration since last frame changed
+    # 2. Refresh last frame = source frame N-1 (or full last frame when no trim)
+    s_dir = shot_dir(project_id, shot_id)
+    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
+        _old.unlink(missing_ok=True)
+    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
+    frame_idx = (n - 1) if n < total else (total - 1)
+    extract_frame_at(str(source), frame_idx, str(new_lf))
+    shot.last_frame_path = str(new_lf)
+    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+
+    # 3. Last frame changed → reset CC. VC is untouched.
+    # Note: last_frame_pre_cc.png is already removed by the glob above.
     shot.cc_status = None
     shot.cc_error_message = None
-
-    # Remove stale pre-CC backup so next calibration creates a fresh one
-    from app.services.storage import shot_pre_cc_last_frame_path
-    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
-    if pre_cc.exists():
-        pre_cc.unlink()
-
-    # Remove stale pre-VC backup — audio length no longer matches trimmed video
-    from app.services.storage import shot_pre_vc_video_path
-    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
-    if pre_vc.exists():
-        pre_vc.unlink()
-    shot.vc_status = None
-    shot.vc_error_message = None
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
@@ -1443,8 +1463,10 @@ async def trim_shot_video(
     return {
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
+        "trim_frames": shot.trim_frames,
+        "trim_end_sec": (shot.trim_frames / info["fps"]) if shot.trim_frames else None,
         "version": ts,
-        **get_video_info(shot.video_path),
+        **get_video_info(str(source)),
     }
 
 
@@ -1455,9 +1477,12 @@ async def restore_trim(
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Restore the original video before any trimming."""
+    """Clear the trim: trim_frames=None, refresh last frame to the source's final frame."""
     from app.agents.video_trimmer import get_video_info
-    from app.agents.frame_porter import extract_last_frame
+    from app.agents.frame_porter import extract_frame_at
+    from app.services.storage import (
+        shot_source_path, ts_uuid_name, shot_dir,
+    )
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1467,43 +1492,38 @@ async def restore_trim(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    video_path = Path(shot.video_path)
-    backup = video_path.with_name("output_original.mp4")
-    if not backup.exists():
-        raise HTTPException(status_code=404, detail="No backup found — video was never trimmed")
+    source = shot_source_path(project_id, shot_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source video not found")
+    info = get_video_info(str(source))
+    total = info["total_frames"]
 
-    # Restore pristine original → a NEW unique current video, then drop the backup.
-    import shutil
-    new_video = video_path.parent / f"output_{ts_uuid_name('.mp4')}"
-    shutil.copy2(str(backup), str(new_video))
-    backup.unlink()
-    await _commit_new_current_video(project_id, shot, new_video, session)
+    shot.trim_frames = None
+    shot.video_path = str(source)
+    shot.source_fps = info["fps"]
+    shot.source_frames = total
 
-    # Reset character calibration since last frame changed
+    s_dir = shot_dir(project_id, shot_id)
+    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
+        _old.unlink(missing_ok=True)
+    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
+    extract_frame_at(str(source), total - 1, str(new_lf))
+    shot.last_frame_path = str(new_lf)
+    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+
+    # Note: last_frame_pre_cc.png is already removed by the glob above.
     shot.cc_status = None
     shot.cc_error_message = None
 
-    from app.services.storage import shot_pre_cc_last_frame_path
-    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
-    if pre_cc.exists():
-        pre_cc.unlink()
-
-    # Remove stale pre-VC backup — audio length no longer matches restored video
-    from app.services.storage import shot_pre_vc_video_path
-    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
-    if pre_vc.exists():
-        pre_vc.unlink()
-    shot.vc_status = None
-    shot.vc_error_message = None
-
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
-
     return {
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
+        "trim_frames": None,
+        "trim_end_sec": None,
         "version": ts,
-        **get_video_info(shot.video_path),
+        **get_video_info(str(source)),
     }
 
 
@@ -1514,9 +1534,11 @@ async def align_tail_frame(
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Auto-trim video to the frame that best matches the target tail frame (SSIM)."""
-    from app.agents.video_trimmer import find_best_tail_frame, get_video_info, trim_video
-    from app.agents.frame_porter import extract_last_frame
+    """Non-destructive auto-trim: update trim_frames metadata to the frame that best
+    matches the target tail frame (SSIM). Source output_*.mp4 is never modified."""
+    from app.agents.video_trimmer import find_best_tail_frame, get_video_info
+    from app.agents.frame_porter import extract_frame_at
+    from app.services.storage import shot_source_path
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1528,39 +1550,37 @@ async def align_tail_frame(
     if not shot.target_last_frame_path:
         raise HTTPException(status_code=400, detail="No target tail frame for this shot")
 
-    best_frames = find_best_tail_frame(shot.video_path, shot.target_last_frame_path)
-    if best_frames is None:
-        # Already optimal — return current info without trimming
-        info = get_video_info(shot.video_path)
-        return {
-            "video_path": to_media_url(shot.video_path),
-            "last_frame_path": to_media_url(shot.last_frame_path),
-            "version": int(datetime.utcnow().timestamp()),
-            "aligned_to_frame": info["total_frames"],
-            **info,
-        }
+    source = shot_source_path(project_id, shot_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source video not found")
+    info = get_video_info(str(source))
+    total = info["total_frames"]
 
-    video_path = Path(shot.video_path)
+    best = find_best_tail_frame(str(source), shot.target_last_frame_path)
+    n = total if best is None else min(best, total)
 
-    # Backup pristine original once, then trim it → a NEW unique current video.
-    backup = _ensure_pristine_backup(video_path)
-    new_video = video_path.parent / f"output_{ts_uuid_name('.mp4')}"
-    trim_video(str(backup), str(new_video), best_frames)
-    await _commit_new_current_video(project_id, shot, new_video, session)
+    # 1. Metadata only — source file is never touched
+    shot.trim_frames = n if n < total else None
+    shot.video_path = str(source)
+    shot.source_fps = info["fps"]
+    shot.source_frames = total
 
-    # Reset character calibration since last frame changed
+    # 2. Refresh last frame (same pattern as /trim)
+    s_dir = shot_dir(project_id, shot_id)
+    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
+        _old.unlink(missing_ok=True)
+    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
+    frame_idx = (n - 1) if n < total else (total - 1)
+    extract_frame_at(str(source), frame_idx, str(new_lf))
+    shot.last_frame_path = str(new_lf)
+    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+
+    # 3. Last frame changed → reset CC. VC is untouched (consistent with /trim).
     shot.cc_status = None
     shot.cc_error_message = None
     pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
     if pre_cc.exists():
         pre_cc.unlink()
-
-    # Remove stale pre-VC backup
-    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
-    if pre_vc.exists():
-        pre_vc.unlink()
-    shot.vc_status = None
-    shot.vc_error_message = None
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
@@ -1568,9 +1588,11 @@ async def align_tail_frame(
     return {
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
+        "trim_frames": shot.trim_frames,
+        "trim_end_sec": (shot.trim_frames / info["fps"]) if shot.trim_frames else None,
         "version": ts,
-        "aligned_to_frame": best_frames,
-        **get_video_info(shot.video_path),
+        "aligned_to_frame": n,
+        **get_video_info(str(source)),
     }
 
 
@@ -1731,10 +1753,16 @@ async def character_calibrate_revert(
     if shot.cc_status != "done":
         raise HTTPException(status_code=400, detail="Shot has not been character-calibrated")
 
-    # Restore pre-CC last frame
-    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
-    if pre_cc.exists() and shot.last_frame_path:
-        shutil.copy2(str(pre_cc), shot.last_frame_path)
+    # Revert by pointing last_frame_path back at the pristine (un-calibrated)
+    # last_frame_; drop the calibrated cc_ file. No fixed-name backup.
+    from app.services.storage import pristine_last_frame_path
+    pristine = pristine_last_frame_path(project_id, shot_id)
+    if pristine is not None and shot.last_frame_path != str(pristine):
+        old = Path(shot.last_frame_path) if shot.last_frame_path else None
+        if old and old.name.startswith("cc_"):
+            old.unlink(missing_ok=True)
+        shot.last_frame_path = str(pristine)
+        await _repoint_next_first_frame(project_id, shot_id, str(pristine), session)
 
     shot.cc_status = None
     shot.cc_error_message = None

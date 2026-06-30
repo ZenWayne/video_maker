@@ -70,17 +70,20 @@ async def calibrate_face(
     prompt = settings.cc_prompt
     model = settings.cc_model
 
-    # Build contents: [Image 1] target frame (BASE) + [Image 2..N] identity refs + prompt
+    # Build contents: identity ref(s) FIRST, then the BASE frame LAST, then prompt.
+    # The model anchors "edit-this-image" onto the LAST image and copies its pose —
+    # so the frame must be last (its pose is preserved) and the reference first
+    # (identity only). Frame-first made the model copy the REFERENCE's pose.
     contents: list = []
 
-    # [Image 1] — target frame (BASE image, preserve pose/hands/background)
-    frame_data = Path(source_frame_path).read_bytes()
-    contents.append(types.Part.from_bytes(data=frame_data, mime_type=_mime_for(source_frame_path)))
-
-    # [Image 2..N] — identity reference(s) (only extract face features)
+    # Identity reference(s) — only facial features are taken from these.
     for ref_path in reference_image_paths:
         data = Path(ref_path).read_bytes()
         contents.append(types.Part.from_bytes(data=data, mime_type=_mime_for(ref_path)))
+
+    # BASE frame LAST (the image to edit; pose/hands/body preserved).
+    frame_data = Path(source_frame_path).read_bytes()
+    contents.append(types.Part.from_bytes(data=frame_data, mime_type=_mime_for(source_frame_path)))
 
     # Prompt text
     contents.append(types.Part(text=prompt))

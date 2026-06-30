@@ -97,6 +97,28 @@ def extract_last_frame(video_path: str, output_path: str) -> None:
     logger.debug(f"Extracted last frame from {video_path} to {output_path}")
 
 
+def extract_frame_at(video_path: str, frame_index: int, output_path: str) -> None:
+    """Extract the single frame at 0-based *frame_index* as a lossless PNG.
+
+    Used to refresh last_frame.png after a metadata-only trim: trimming to N
+    frames keeps frames 0..N-1, so the new last frame is index N-1. PNG output
+    is lossless, so md5 of the same (video, index) is byte-stable.
+    """
+    (
+        FFmpeg()
+        .option("y")
+        .input(video_path)
+        .output(
+            output_path,
+            vf=f"select='eq(n\\,{frame_index})'",
+            vframes=1,
+            vsync="0",
+        )
+    ).execute()
+    if not Path(output_path).exists():
+        raise RuntimeError(f"extract_frame_at: no frame {frame_index} in {video_path}")
+
+
 def extract_frame_at_time(video_path: str, output_path: str, time_seconds: float) -> None:
     """
     Extract a frame at a specific time from a video file.

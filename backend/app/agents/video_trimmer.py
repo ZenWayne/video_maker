@@ -244,11 +244,13 @@ def find_best_tail_frame(
 
 
 def _backup_and_trim(video_path: str, num_frames: int) -> dict:
-    """Back up the original (once) then trim the video in-place to *num_frames*."""
+    """Trim the video in-place to *num_frames* (generation-time auto-trim).
+
+    No fixed-name backup is kept: the generated output_<ts>_<uuid>.mp4 is the
+    pristine baseline (manual trims layer trimmed_<...> on top and restore returns
+    here), so a separate output_original.mp4 is unnecessary.
+    """
     vp = Path(video_path)
-    backup = vp.with_name("output_original.mp4")
-    if not backup.exists():
-        shutil.copy2(str(vp), str(backup))
     tmp_out = vp.with_suffix(".trimmed.mp4")
     try:
         trim_video(video_path, str(tmp_out), num_frames)

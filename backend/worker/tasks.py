@@ -33,6 +33,7 @@ from app.services.storage import (
     shot_pre_cc_last_frame_path,
     shot_target_last_frame_path,
     get_original_video_for_audio,
+    pristine_last_frame_path,
     ts_uuid_name,
 )
 from app.services.events import publish_event
@@ -334,6 +335,10 @@ async def run_shot_pipeline(
                     text=shot.text,
                     duration=shot.shot_duration,
                     llm_provider=provider,
+                    reference_image_paths=(
+                        json.loads(shot.custom_reference_paths)
+                        if shot.custom_reference_paths else None
+                    ),
                 )
 
                 # Refresh shot from DB to pick up any reference images
@@ -391,15 +396,14 @@ async def run_shot_pipeline(
             # Ensure shot directory
             ensure_shot_dir(project_id, shot.shot_id)
             s_dir = shot_dir(project_id, shot.shot_id)
-            # Name the generated video uniquely (timestamp + uuid) so a regenerated
-            # video is always a new URL — the browser can never replay a cached copy
-            # of an overwritten-in-place file. Remove the prior current video first
-            # (legacy output.mp4 or an earlier unique file); keep the trim/VC backups,
-            # which the regenerate / voice-convert flows manage separately.
-            for _old in s_dir.glob("output*.mp4"):
-                if _old.name not in ("output_original.mp4", "output_pre_vc.mp4"):
-                    _old.unlink(missing_ok=True)
-            video_out = s_dir / f"output_{int(datetime.utcnow().timestamp())}_{uuid.uuid4().hex[:8]}.mp4"
+            # Name the generated video uniquely (output_<ts>_<uuid>.mp4) so a
+            # regenerated video is always a new URL — the browser can never replay a
+            # cached copy. A fresh generation is a clean slate: delete EVERY prior
+            # video (output_/trimmed_/vc_ — all uniquely named, no fixed backups), so
+            # no stale trim/VC predecessor can survive and be sourced later.
+            for _old in s_dir.glob("*.mp4"):
+                _old.unlink(missing_ok=True)
+            video_out = s_dir / f"output_{ts_uuid_name('.mp4')}"
 
             video_model = (
                 settings.kie_veo_model
@@ -430,6 +434,12 @@ async def run_shot_pipeline(
                 )
                 video_out.write_bytes(video_bytes)
                 shot.video_path = str(video_out)
+                from app.agents.video_trimmer import get_video_info as _gvi
+                _src_info = _gvi(str(video_out))
+                shot.source_fps = _src_info["fps"]
+                shot.source_frames = _src_info["total_frames"]
+                shot.trim_frames = None
+                shot.vc_audio_path = None
                 observability.update_span(
                     vid_gen,
                     output={
@@ -463,10 +473,11 @@ async def run_shot_pipeline(
 
             # Extract last frame to a UNIQUE name so its URL changes on every
             # (re)generation — a stable last_frame.png would be replayed from the
-            # browser cache (stale poster + stale next-shot first frame).
-            for _old in s_dir.glob("last_frame*.png"):
-                if _old.name != "last_frame_pre_cc.png":
-                    _old.unlink(missing_ok=True)
+            # browser cache (stale poster + stale next-shot first frame). Delete ALL
+            # prior last_frame*.png, including the pre-CC backup: a fresh generation
+            # makes the old extracted frames AND calibrated (cc_) frames stale too.
+            for _old in list(s_dir.glob("last_frame*.png")) + list(s_dir.glob("cc_*.png")):
+                _old.unlink(missing_ok=True)
             last_frame_out = s_dir / f"last_frame_{ts_uuid_name('.png')}"
             extract_last_frame(str(video_out), str(last_frame_out))
             shot.last_frame_path = str(last_frame_out)
@@ -564,22 +575,23 @@ async def _pick_first_frame(
     """
     Pick the first frame for a shot.
 
-    Returns None when the shot has custom_reference_paths (multi-image mode).
-    For disconnected shots with custom_first_frame_path: use that image.
-    For disconnected shots (shot_id > 1) without custom images: raise ValueError.
+    The 首帧 slot (custom_first_frame_path) is AUTHORITATIVE when set — it anchors
+    the character's identity for the whole clip, so it wins over multi-image mode.
+    Only when there is no explicit first frame does a shot with custom_reference_paths
+    fall into multi-image mode (return None → caller uses reference_images).
     For shot 1 without custom images: fall back to project character reference.
-    For connected shots: use previous shot's last frame.
+    For connected shots without a first frame: use previous shot's last frame.
     """
-    # Multi-image reference mode → return None (caller uses reference_images)
-    # Only for disconnected shots; connected shots use custom refs for tail frame generation
-    if shot.custom_reference_paths and not shot.align_with_previous:
-        return None
-
-    # Single custom first frame
+    # Single custom first frame (the 首帧 slot) — authoritative; anchors identity.
     if shot.custom_first_frame_path:
         custom = Path(shot.custom_first_frame_path)
         if custom.exists():
             return custom
+
+    # Multi-image reference mode → return None (caller uses reference_images).
+    # Only when there is NO explicit first frame above.
+    if shot.custom_reference_paths and not shot.align_with_previous:
+        return None
 
     # Try to get previous shot's last frame (for both connected and disconnected shots)
     if shot.shot_id > 1:
@@ -741,8 +753,15 @@ async def run_tail_frame_pipeline(
             first_frame = await _pick_first_frame(project_id, shot, session)
             shot.first_frame_path = str(first_frame) if first_frame else None
 
-            # 2. Director → generate motion_prompt (skip if already exists)
-            if shot.motion_prompt:
+            # 2. Director → generate motion_prompt. Reuse the stored prompt, EXCEPT
+            #    when the shot has reference props — those must be woven into the
+            #    motion, so regenerate to pick them up (a prop-less stored prompt
+            #    would otherwise leave the prop out of the tail frame).
+            obj_refs = (
+                json.loads(shot.custom_reference_paths)
+                if shot.custom_reference_paths else None
+            )
+            if shot.motion_prompt and not obj_refs:
                 motion_prompt = shot.motion_prompt
                 logger.info("Reusing existing motion_prompt for shot %d", shot_id)
             else:
@@ -757,8 +776,11 @@ async def run_tail_frame_pipeline(
                     text=shot.text,
                     duration=shot.shot_duration,
                     llm_provider=provider,
+                    reference_image_paths=obj_refs,
                 )
                 shot.motion_prompt = motion_prompt
+                if obj_refs:
+                    logger.info("Regenerated motion_prompt for shot %d (%d ref prop)", shot_id, len(obj_refs))
 
             # 3. Generate target tail frame
             shot.tf_status = "generating"
@@ -766,11 +788,6 @@ async def run_tail_frame_pipeline(
             await session.commit()
 
             char_refs = await _get_character_ref_paths(project_id, session)
-
-            # Object reference images (from custom_reference_paths on connected shots)
-            obj_refs = None
-            if shot.custom_reference_paths:
-                obj_refs = json.loads(shot.custom_reference_paths)
 
             ensure_shot_dir(project_id, shot.shot_id)
             tf_output = str(shot_target_last_frame_path(project_id, shot.shot_id))
@@ -875,55 +892,46 @@ async def run_merger(
         )
         shots = shots_result.scalars().all()
 
-        shot_paths = [s.video_path for s in shots if s.video_path]
-
-        if not shot_paths:
+        if not shots:
             raise ValueError("No completed shots to merge")
 
         final_path = final_video_path(project_id)
         final_path.parent.mkdir(parents=True, exist_ok=True)
 
+        import tempfile, shutil as _shutil
+        from app.agents.effective_clip import effective_clip_paths
+        tmp_dir = tempfile.mkdtemp(prefix=f"export_{project_id}_")
         try:
+            shot_paths = effective_clip_paths(list(shots), tmp_dir)
+            if not shot_paths:
+                raise ValueError("No completed shots to merge")
             cf = crossfade_duration if crossfade_duration is not None else settings.crossfade_duration
             merge_shots_with_crossfade(shot_paths, str(final_path), crossfade_duration=cf)
 
             project.final_video_path = str(final_path)
             session.add(project)
-
             await transition_project_status(
                 project, ProjectStatus.EXPORTED, "system:worker", session, redis
             )
-
             await publish_event(
-                redis,
-                project_id,
-                {
-                    "type": "export_done",
-                    "data": {
-                        "final_video_path": f"/api/projects/{project_id}/final.mp4"
-                    },
-                },
+                redis, project_id,
+                {"type": "export_done",
+                 "data": {"final_video_path": f"/api/projects/{project_id}/final.mp4"}},
             )
-
             logger.info(f"Merger completed for project {project_id}")
-
         except Exception as e:
             logger.error(f"Merger failed for project {project_id}: {e}")
             project.error_message = str(e)
             session.add(project)
-
             await transition_project_status(
                 project, ProjectStatus.FAILED, "system:worker", session, redis
             )
-
             await publish_event(
-                redis,
-                project_id,
-                {
-                    "type": "pipeline_failed",
-                    "data": {"error_message": str(e)},
-                },
+                redis, project_id,
+                {"type": "pipeline_failed", "data": {"error_message": str(e)}},
             )
+        finally:
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 async def _do_voice_convert_one(
@@ -936,9 +944,10 @@ async def _do_voice_convert_one(
     """Voice-convert a single shot using the given reference audio.
 
     Extracts original audio from the shot, calls CosyVoice VC service,
-    and remuxes the result back into the video.
+    and stores the result as a new uniquely-named wav file. The source
+    video is never touched; only shot.vc_audio_path is updated (metadata-only).
     """
-    from app.agents.audio_extractor import extract_audio_wav, remux_video_with_audio
+    from app.agents.audio_extractor import extract_audio_wav
     from app.services.cosyvoice_client import voice_convert
 
     async with session_factory() as session:
@@ -957,32 +966,21 @@ async def _do_voice_convert_one(
         )
 
         try:
-            # 1. Extract original audio (always from unmodified video)
-            original_video = get_original_video_for_audio(project_id, shot_id)
-            src_audio = str(shot_audio_original_path(project_id, shot_id))
-            extract_audio_wav(str(original_video), src_audio)
+            # 1. Extract full source audio (trim-independent)
+            source_video = get_original_video_for_audio(project_id, shot_id)
+            src_audio = str(shot_dir(project_id, shot_id) / f"audio_in_{ts_uuid_name('.wav')}")
+            extract_audio_wav(str(source_video), src_audio)
 
-            # 2. Call CosyVoice VC service
-            vc_audio = str(shot_audio_vc_path(project_id, shot_id))
+            # 2. CosyVoice VC → a NEW uniquely-named wav (never overwrite)
+            vc_audio = str(shot_dir(project_id, shot_id) / f"audio_vc_{ts_uuid_name('.wav')}")
             await voice_convert(src_audio, ref_audio_path, vc_audio)
 
-            # 3. Backup current video before VC (if not already backed up)
-            pre_vc = shot_pre_vc_video_path(project_id, shot_id)
-            video_path = Path(shot.video_path)
-            if not pre_vc.exists():
-                import shutil
-                shutil.copy2(str(video_path), str(pre_vc))
-
-            # 4. Remux video stream from backup + converted audio → a NEW unique
-            #    output so the URL changes (browser can't replay a stale copy).
-            #    Drop the old current file; keep the output_pre_vc.mp4 backup.
-            vc_out = shot_dir(project_id, shot_id) / f"output_{ts_uuid_name('.mp4')}"
-            remux_video_with_audio(str(pre_vc), vc_audio, str(vc_out))
-            if video_path.name not in ("output_original.mp4", "output_pre_vc.mp4"):
-                video_path.unlink(missing_ok=True)
-            shot.video_path = str(vc_out)
-
-            # 5. Update DB
+            # 3. Metadata only: drop a prior vc audio, point at the new one.
+            #    Source video is NOT touched; video_path stays the source.
+            if shot.vc_audio_path:
+                Path(shot.vc_audio_path).unlink(missing_ok=True)
+            Path(src_audio).unlink(missing_ok=True)
+            shot.vc_audio_path = vc_audio
             shot.vc_status = "done"
             shot.vc_error_message = None
             session.add(shot)
@@ -995,7 +993,7 @@ async def _do_voice_convert_one(
                     "type": "vc_completed",
                     "data": {
                         "shot_id": shot_id,
-                        "video_path": to_media_url(str(video_path)),
+                        "vc_audio_url": to_media_url(vc_audio),
                         "version": int(_time.time()),
                     },
                 },
@@ -1122,23 +1120,24 @@ async def _do_character_calibrate_one(
         )
 
         try:
-            import shutil
-            last_frame = Path(shot.last_frame_path)
-            pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
+            s_dir = shot_dir(project_id, shot_id)
+            # Calibrate from the un-calibrated pristine frame (never stack onto an
+            # already-calibrated one); write the result to a NEW unique cc_ file so
+            # its URL changes — no in-place overwrite, no fixed-name backup.
+            pristine = pristine_last_frame_path(project_id, shot_id) or Path(shot.last_frame_path)
+            cc_out = s_dir / f"cc_{ts_uuid_name('.png')}"
+            await calibrate_face(ref_image_paths, str(pristine), str(cc_out))
 
-            if pre_cc.exists():
-                # Restore original frame before re-calibrating
-                shutil.copy2(str(pre_cc), str(last_frame))
-            else:
-                # First time — backup the original
-                shutil.copy2(str(last_frame), str(pre_cc))
+            # Drop the previous calibrated frame(s); keep the pristine last_frame_.
+            for _old in s_dir.glob("cc_*.png"):
+                if _old != cc_out:
+                    _old.unlink(missing_ok=True)
 
-            # Run face calibration (overwrites last_frame in place)
-            await calibrate_face(ref_image_paths, str(last_frame), str(last_frame))
-
-            # Update DB
+            shot.last_frame_path = str(cc_out)
             shot.cc_status = "done"
             shot.cc_error_message = None
+            # Next shot's first frame should reflect the calibrated face.
+            await _propagate_first_frame_to_next(project_id, shot, str(cc_out), session)
             session.add(shot)
             await session.commit()
 
@@ -1148,7 +1147,7 @@ async def _do_character_calibrate_one(
                     "type": "cc_completed",
                     "data": {
                         "shot_id": shot_id,
-                        "last_frame_path": to_media_url(str(last_frame)),
+                        "last_frame_path": to_media_url(str(cc_out)),
                     },
                 },
             )

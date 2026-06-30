@@ -69,25 +69,51 @@ def shot_target_last_frame_path(project_id: str, shot_id: int) -> Path:
     return shot_dir(project_id, shot_id) / "target_last_frame.png"
 
 
-def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
-    """Get the un-VC'd video to extract audio from.
+def pristine_video_path(project_id: str, shot_id: int) -> Optional[Path]:
+    """The full generated video (output_<ts>_<uuid>.mp4) — the restore-trim target.
 
-    Priority: output_pre_vc.mp4 (VC backup, post-trim) > newest
-    output_<ts>_<uuid>.mp4 (current, uniquely-named).
-    NOT output_original.mp4 — that is the pre-trim backup and has different
-    duration, which would cause lip sync mismatch after trimming.
+    No fixed-name backups exist anymore; every file is uniquely named with a role
+    prefix (output_ = pristine, trimmed_ = trimmed, vc_ = voice-converted) and a
+    regeneration wipes the whole shot dir, so the newest output_* is always current.
     """
     s_dir = shot_dir(project_id, shot_id)
-    pre_vc = s_dir / "output_pre_vc.mp4"
-    if pre_vc.exists():
-        return pre_vc
-    uniques = [
-        p for p in s_dir.glob("output_*.mp4")
-        if p.name not in ("output_original.mp4", "output_pre_vc.mp4")
+    outs = sorted(s_dir.glob("output_*.mp4"), key=lambda p: p.stat().st_mtime)
+    return outs[-1] if outs else None
+
+
+def pristine_last_frame_path(project_id: str, shot_id: int) -> Optional[Path]:
+    """The un-calibrated extracted last frame (last_frame_<ts>_<uuid>.png).
+
+    Character-calibration writes a separate cc_<ts>_<uuid>.png and never overwrites
+    this, so it is the revert target (mirrors pristine_video_path for video).
+    """
+    s_dir = shot_dir(project_id, shot_id)
+    fs = [
+        p for p in s_dir.glob("last_frame_*.png")
+        if p.name != "last_frame_pre_cc.png"
     ]
-    if uniques:
-        return max(uniques, key=lambda p: p.stat().st_mtime)
-    raise FileNotFoundError(f"No video found in {s_dir}")
+    return max(fs, key=lambda p: p.stat().st_mtime) if fs else None
+
+
+def shot_source_path(project_id: str, shot_id: int) -> Optional[Path]:
+    """The immutable source video (output_<ts>_<uuid>.mp4).
+
+    In the non-destructive model this is the ONLY video file; trim/VC never
+    write trimmed_/vc_ files. Alias of pristine_video_path for intent clarity.
+    """
+    return pristine_video_path(project_id, shot_id)
+
+
+def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
+    """Return the immutable source video to extract VC input audio from.
+
+    Non-destructive model: there is exactly one video (output_*.mp4); VC reads
+    its full audio and never depends on trim length.
+    """
+    src = shot_source_path(project_id, shot_id)
+    if src is None:
+        raise FileNotFoundError(f"No source video in {shot_dir(project_id, shot_id)}")
+    return src
 
 
 def final_dir(project_id: str) -> Path:

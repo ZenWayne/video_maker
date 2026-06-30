@@ -20,7 +20,7 @@ from app.main import get_redis
 from app.models.project import Shot
 from app.models.schemas import ReferenceVoiceRequest, AutoVoiceCalibrateRequest
 from app.services.state_machine import ShotStatus
-from app.services.storage import to_media_url, shot_pre_vc_video_path
+from app.services.storage import to_media_url
 from app.api.pipeline import _require_user, _get_project_or_404, _get_arq_redis
 
 router = APIRouter()
@@ -260,12 +260,11 @@ async def voice_revert_shot(
     if shot.vc_status != "done":
         raise HTTPException(status_code=400, detail="Shot has not been voice-converted")
 
-    # Restore pre-VC video
-    pre_vc = shot_pre_vc_video_path(project_id, shot_id)
-    if pre_vc.exists():
-        video_path = Path(shot.video_path)
-        shutil.copy2(str(pre_vc), str(video_path))
-
+    # Non-destructive: just drop the vc audio + clear the pointer. video_path
+    # already points at the immutable source, so nothing else changes.
+    if shot.vc_audio_path:
+        Path(shot.vc_audio_path).unlink(missing_ok=True)
+    shot.vc_audio_path = None
     shot.vc_status = None
     shot.vc_error_message = None
     session.add(shot)
@@ -275,6 +274,6 @@ async def voice_revert_shot(
     return {
         "shot_id": shot_id,
         "vc_status": None,
-        "video_path": to_media_url(shot.video_path),
+        "vc_audio_url": None,
         "version": ts,
     }

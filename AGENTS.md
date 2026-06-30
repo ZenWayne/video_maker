@@ -110,23 +110,46 @@ client = genai.Client(vertexai=True, project=settings.project, location=settings
 client = genai.Client(api_key=settings.gemini_api_key)
 ```
 
-## Playwright Tests — AI Endpoint Mocking
+## E2E Tests — NEVER fake the data or flow under test
 
-**Always mock AI-triggering backend endpoints in Playwright tests to avoid billing.**
+**E2E (Playwright) tests MUST exercise the REAL backend, REAL DB, REAL serialization, and the REAL endpoint flow being tested. NEVER fake them.**
 
-Endpoints that trigger AI workers (mock with `route.fulfill`):
-- `POST /api/projects/{id}/start`
-- `POST /api/projects/{id}/approve-script`
-- `POST /api/projects/{id}/regenerate-script`
-- `POST /api/projects/{id}/regenerate-shots`
-- `POST /api/projects/{id}/shots/{shot_id}/generate-tail-frame`
-- `POST /api/projects/{id}/shots/{shot_id}/confirm-tail-frame`
-- `POST /api/projects/{id}/export`
+A faked e2e gives false confidence: a test that `route.fulfill`s a hardcoded
+project/shot JSON (with fields like `trim_end_sec`/`vc_audio_url` pre-baked) is
+NOT testing the feature — it only tests that the frontend renders the values you
+handed it. Such a test passes even when the real `POST /trim → DB → serializer →
+player` chain is broken. This actually happened on the non-destructive editing
+work: mocked e2e were green while real trimming didn't apply. Do not do this.
+
+**Rules:**
+- Drive the real UI against the running stack; let requests hit the real backend.
+- Seed test data the REAL way, maximizing chain realism while NEVER calling an
+  LLM/model. Preferred: REUSE an existing already-generated asset — copy a real
+  `output_<ts>_<uuid>.mp4` produced by a past generation into a FRESH, isolated
+  test project's shot dir, and insert the matching `Shot` row (status=completed)
+  + project (status=shot_review) directly in the real DB — e.g. via `podman exec`
+  into the backend container. This gives a real video, real row, real
+  serialization, and real endpoints, with only the billed generation skipped.
+  Use an isolated test project (not a user's real project) so the test can mutate
+  freely and be deleted in teardown.
+- Assert on the REAL post-action state: after clicking trim, the real `/trim`
+  ran, the real `GET /api/projects/{id}` reflects `trim_frames`/`trim_end_sec`,
+  and the player clamps. Never assert on values you injected via a route mock.
+
+**The ONLY thing you may stub is the actual AI MODEL invocation, purely to avoid billing** — and even then, stub at the model/worker boundary, not by substituting whole API responses. You may `route.fulfill` an AI-*triggering* endpoint ONLY to stop a click from kicking off a billed worker (return its real `202` shape); you may NOT use it to feed the data the test asserts on.
+
+AI-triggering endpoints (safe to short-circuit to their real queued response):
+- `POST /api/projects/{id}/start`, `/approve-script`, `/regenerate-script`,
+  `/regenerate-shots`, `/export`
+- `POST /api/projects/{id}/shots/{shot_id}/generate-tail-frame`, `/confirm-tail-frame`, `/voice-convert`
 
 ```typescript
-await page.route('**/api/projects/*/start', async (route) => {
-  await route.fulfill({ status: 202, body: JSON.stringify({ status: 'queued' }) })
-})
+// OK: stop a billed worker from running, return its real shape
+await page.route('**/api/projects/*/start', (route) =>
+  route.fulfill({ status: 202, body: JSON.stringify({ status: 'queued' }) }))
+
+// FORBIDDEN: faking the data/flow under test
+// await page.route('**/api/projects/*', (route) => route.fulfill({ body: JSON.stringify(FAKE_PROJECT) }))
 ```
 
 ## No Hardcoded Absolute Paths

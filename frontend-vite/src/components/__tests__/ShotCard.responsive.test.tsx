@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render } from '@testing-library/react'
 import { ShotCard } from '../ShotCard'
 import type { Shot, AspectRatio } from '@/lib/types'
 
@@ -50,13 +50,12 @@ function renderShotCard(aspectRatio?: AspectRatio) {
   )
 }
 
-function getPreviewContainer(): HTMLElement {
-  const img = screen.getByAltText(`Shot ${baseShot.shot_id}`)
-  return img.closest('div[class*="rounded-lg"]')!
+function getPreviewVideo(): HTMLElement {
+  return document.querySelector('video')!
 }
 
-function getPreviewImage(): HTMLElement {
-  return screen.getByAltText(`Shot ${baseShot.shot_id}`)
+function getPreviewContainer(): HTMLElement {
+  return getPreviewVideo().closest('div[class*="rounded-lg"]')!
 }
 
 describe('ShotCard — preview adaptive sizing', () => {
@@ -75,15 +74,15 @@ describe('ShotCard — preview adaptive sizing', () => {
     expect(container.className).not.toContain('bg-black')
   })
 
-  it('preview image uses w-full to fill container width', () => {
+  it('preview video uses w-full to fill container width', () => {
     renderShotCard('16:9')
-    const img = getPreviewImage()
+    const img = getPreviewVideo()
     expect(img.className).toContain('w-full')
   })
 
-  it('preview image has no fixed aspect-ratio or max-h constraints', () => {
+  it('preview video has no fixed aspect-ratio or max-h constraints', () => {
     renderShotCard('16:9')
-    const img = getPreviewImage()
+    const img = getPreviewVideo()
     const container = getPreviewContainer()
     // No forced aspect ratio — container adapts to image's natural ratio
     expect(container.className).not.toContain('aspect-video')
@@ -92,9 +91,9 @@ describe('ShotCard — preview adaptive sizing', () => {
     expect(img.className).not.toMatch(/max-h-/)
   })
 
-  it('9:16 preview image also uses w-full (same adaptive behavior)', () => {
+  it('9:16 preview video also uses w-full (same adaptive behavior)', () => {
     renderShotCard('9:16')
-    const img = getPreviewImage()
+    const img = getPreviewVideo()
     expect(img.className).toContain('w-full')
   })
 

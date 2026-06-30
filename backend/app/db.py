@@ -107,3 +107,12 @@ async def _run_migrations(conn):
         await conn.execute(
             sa.text("ALTER TABLE shots ADD COLUMN auto_trim BOOLEAN NOT NULL DEFAULT 1")
         )
+
+    for col, typ in [
+        ("trim_frames", "INTEGER"),
+        ("source_fps", "FLOAT"),
+        ("source_frames", "INTEGER"),
+        ("vc_audio_path", "TEXT"),
+    ]:
+        if not await _has_column("shots", col):
+            await conn.execute(sa.text(f"ALTER TABLE shots ADD COLUMN {col} {typ}"))

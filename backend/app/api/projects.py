@@ -17,9 +17,54 @@ from app.models.schemas import (
 )
 from app.services.storage import project_dir, delete_project_storage, to_media_url
 from app.services.state_machine import ProjectStatus, InvalidTransitionError
-from app.main import get_redis
 
 router = APIRouter()
+
+
+def _shot_to_dict(s) -> dict:
+    """Serialize a Shot for the API, including the non-destructive playback descriptor."""
+    trim_end_sec = None
+    if s.trim_frames and s.source_fps:
+        trim_end_sec = s.trim_frames / s.source_fps
+    return {
+        "id": s.id,
+        "shot_id": s.shot_id,
+        "text": s.text,
+        "shot_type": s.shot_type,
+        "visual_description": s.visual_description,
+        "shot_duration": s.shot_duration,
+        "status": s.status,
+        "align_with_previous": s.align_with_previous,
+        "motion_prompt": s.motion_prompt,
+        "first_frame_path": to_media_url(s.first_frame_path),
+        "video_path": to_media_url(s.video_path),
+        "last_frame_path": to_media_url(s.last_frame_path),
+        "word_count_warning": s.word_count_warning,
+        "error_message": s.error_message,
+        "custom_first_frame_path": to_media_url(s.custom_first_frame_path),
+        "custom_reference_paths": (
+            [to_media_url(p) for p in json.loads(s.custom_reference_paths)]
+            if s.custom_reference_paths else None
+        ),
+        "reference_image_hint": s.reference_image_hint,
+        "use_prev_last_frame": s.use_prev_last_frame,
+        "vc_status": s.vc_status,
+        "vc_error_message": s.vc_error_message,
+        "cc_status": s.cc_status,
+        "cc_error_message": s.cc_error_message,
+        "target_last_frame_path": to_media_url(s.target_last_frame_path),
+        "tf_status": s.tf_status,
+        "tf_error_message": s.tf_error_message,
+        "tf_confirmed": bool(s.tf_confirmed),
+        # --- 非破坏式播放描述 ---
+        "trim_frames": s.trim_frames,
+        "source_fps": s.source_fps,
+        "source_frames": s.source_frames,
+        "trim_end_sec": trim_end_sec,
+        "vc_audio_url": to_media_url(s.vc_audio_path),
+        "created_at": s.created_at,
+        "updated_at": s.updated_at,
+    }
 
 
 def _require_user(x_user_name: Optional[str] = Header(default=None)) -> str:
@@ -162,42 +207,7 @@ async def create_project(
             }
             for r in project.reference_images
         ],
-        shots=[
-            {
-                "id": s.id,
-                "shot_id": s.shot_id,
-                "text": s.text,
-                "shot_type": s.shot_type,
-                "visual_description": s.visual_description,
-                "shot_duration": s.shot_duration,
-                "status": s.status,
-                "align_with_previous": s.align_with_previous,
-                "motion_prompt": s.motion_prompt,
-                "first_frame_path": to_media_url(s.first_frame_path),
-                "video_path": to_media_url(s.video_path),
-                "last_frame_path": to_media_url(s.last_frame_path),
-                "word_count_warning": s.word_count_warning,
-                "error_message": s.error_message,
-                "custom_first_frame_path": to_media_url(s.custom_first_frame_path),
-                "custom_reference_paths": (
-                    [to_media_url(p) for p in json.loads(s.custom_reference_paths)]
-                    if s.custom_reference_paths else None
-                ),
-                "reference_image_hint": s.reference_image_hint,
-                "use_prev_last_frame": s.use_prev_last_frame,
-                "vc_status": s.vc_status,
-                "vc_error_message": s.vc_error_message,
-                "cc_status": s.cc_status,
-                "cc_error_message": s.cc_error_message,
-                "target_last_frame_path": to_media_url(s.target_last_frame_path),
-                "tf_status": s.tf_status,
-                "tf_error_message": s.tf_error_message,
-                "tf_confirmed": bool(s.tf_confirmed),
-                "created_at": s.created_at,
-                "updated_at": s.updated_at,
-            }
-            for s in project.shots
-        ],
+        shots=[_shot_to_dict(s) for s in project.shots],
         reference_voice_shot_id=project.reference_voice_shot_id,
         reference_voice_path=to_media_url(project.reference_voice_path),
         auto_voice_calibrate=project.auto_voice_calibrate,
@@ -256,42 +266,7 @@ async def get_project(
             }
             for r in project.reference_images
         ],
-        shots=[
-            {
-                "id": s.id,
-                "shot_id": s.shot_id,
-                "text": s.text,
-                "shot_type": s.shot_type,
-                "visual_description": s.visual_description,
-                "shot_duration": s.shot_duration,
-                "status": s.status,
-                "align_with_previous": s.align_with_previous,
-                "motion_prompt": s.motion_prompt,
-                "first_frame_path": to_media_url(s.first_frame_path),
-                "video_path": to_media_url(s.video_path),
-                "last_frame_path": to_media_url(s.last_frame_path),
-                "word_count_warning": s.word_count_warning,
-                "error_message": s.error_message,
-                "custom_first_frame_path": to_media_url(s.custom_first_frame_path),
-                "custom_reference_paths": (
-                    [to_media_url(p) for p in json.loads(s.custom_reference_paths)]
-                    if s.custom_reference_paths else None
-                ),
-                "reference_image_hint": s.reference_image_hint,
-                "use_prev_last_frame": s.use_prev_last_frame,
-                "vc_status": s.vc_status,
-                "vc_error_message": s.vc_error_message,
-                "cc_status": s.cc_status,
-                "cc_error_message": s.cc_error_message,
-                "target_last_frame_path": to_media_url(s.target_last_frame_path),
-                "tf_status": s.tf_status,
-                "tf_error_message": s.tf_error_message,
-                "tf_confirmed": bool(s.tf_confirmed),
-                "created_at": s.created_at,
-                "updated_at": s.updated_at,
-            }
-            for s in project.shots
-        ],
+        shots=[_shot_to_dict(s) for s in project.shots],
         reference_voice_shot_id=project.reference_voice_shot_id,
         reference_voice_path=to_media_url(project.reference_voice_path),
         auto_voice_calibrate=project.auto_voice_calibrate,

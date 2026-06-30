@@ -84,16 +84,24 @@ class GeminiProvider:
         user_message: str,
         temperature: float = 0.7,
         operation: Optional[str] = None,
+        image_paths: Optional[List[str]] = None,
     ) -> str:
+        # Multimodal when image_paths given: text part + each image as image_file.
+        # Missing files are skipped by _build_contents (path.exists() check).
+        contents = user_message
+        if image_paths:
+            parts: List[Dict[str, Any]] = [{"type": "text", "data": user_message}]
+            parts += [{"type": "image_file", "data": p} for p in image_paths]
+            contents = self._build_contents(parts)
         with observability.generation(
             name=operation or "gemini-generate-text",
             model=model,
-            input={"system": system_prompt, "user": user_message},
+            input={"system": system_prompt, "user": user_message, "num_images": len(image_paths or [])},
             model_parameters={"temperature": temperature},
         ) as gen:
             response = await self.client.aio.models.generate_content(
                 model=model,
-                contents=user_message,
+                contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     temperature=temperature,
