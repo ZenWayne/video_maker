@@ -673,7 +673,7 @@ async def join_preview(
     )
     shots_by_id = {s.shot_id: s for s in result.scalars().all()}
 
-    ordered_paths: list[str] = []
+    ordered_shots: list = []
     for sid in body.shot_ids:
         shot = shots_by_id.get(sid)
         if shot is None:
@@ -686,13 +686,25 @@ async def join_preview(
             raise HTTPException(
                 status_code=400, detail=f"镜头 {sid} 缺少视频文件"
             )
-        ordered_paths.append(shot.video_path)
+        ordered_shots.append(shot)
+
+    # Apply the non-destructive EDL (trim + VC) before stitching, so the
+    # continuity preview reflects the trimmed clips — not the full source.
+    import tempfile
+    import shutil as _shutil
+    from app.agents.effective_clip import effective_clip_paths
 
     output_path = str(join_preview_path(project_id))
+    tmp_dir = tempfile.mkdtemp(prefix=f"joinpreview_{project_id}_")
     try:
+        ordered_paths = effective_clip_paths(ordered_shots, tmp_dir)
         merge_shots(ordered_paths, output_path)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"拼接失败: {e}")
+    finally:
+        _shutil.rmtree(tmp_dir, ignore_errors=True)
 
     media_url = to_media_url(output_path)
     # cache-busting：用输出文件修改时间(纳秒)，避免浏览器/video 缓存旧预览

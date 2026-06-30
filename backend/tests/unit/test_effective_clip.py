@@ -151,6 +151,7 @@ def test_effective_clip_paths_missing_vc_audio_falls_back(tmp_path, monkeypatch)
     class FakeShot:
         project_id = "proj1"
         shot_id = 1
+        video_path = str(src)  # DB source-of-truth path (the immutable source)
         trim_frames = None
         vc_audio_path = str(tmp_path / "nonexistent_vc.wav")  # does NOT exist
 

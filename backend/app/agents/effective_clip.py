@@ -69,9 +69,15 @@ def effective_clip_paths(shots: list, tmp_dir: str) -> list[str]:
     """
     out: list[str] = []
     for s in shots:
-        source = shot_source_path(s.project_id, s.shot_id)
-        if source is None:
+        # The DB field is the source of truth (the immutable output_*.mp4); fall
+        # back to the prefix-glob only if it's unset.
+        source_path = s.video_path if (s.video_path and Path(s.video_path).exists()) else None
+        if source_path is None:
+            sp = shot_source_path(s.project_id, s.shot_id)
+            source_path = str(sp) if sp else None
+        if source_path is None:
             raise FileNotFoundError(f"Shot {s.shot_id}: no source video")
+        source = source_path
 
         vc_audio = s.vc_audio_path
         if vc_audio and not Path(vc_audio).exists():
