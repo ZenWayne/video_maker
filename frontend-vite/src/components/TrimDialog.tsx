@@ -308,8 +308,8 @@ export function TrimDialog({
             </div>
 
             {/* Frame info */}
-            <div className="shrink-0 flex items-center justify-between text-sm text-zinc-600">
-              <span>
+            <div className="shrink-0 flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5 text-sm text-zinc-600">
+              <span className="whitespace-nowrap">
                 帧: {endFrame} / {totalFrames}
                 {endFrame < totalFrames && (
                   <span className="text-red-500 ml-2">
@@ -322,7 +322,7 @@ export function TrimDialog({
                   </span>
                 )}
               </span>
-              <span>
+              <span className="whitespace-nowrap">
                 时间: {currentTime}s / {duration.toFixed(2)}s
               </span>
             </div>
