@@ -227,12 +227,12 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     act(() => flushRAF())
 
     // 播放帧数显示当前帧
-    expect(screen.getByText(/播放\s*60/)).toBeInTheDocument()
+    expect(screen.getByText(/播放\s*61/)).toBeInTheDocument()
 
     // 手动停止 → 暂停位置保留(计数器仍在)
     fireEvent.click(screen.getByText('停止').closest('button')!)
     expect(video.pause).toHaveBeenCalled()
-    expect(screen.getByText(/播放\s*60/)).toBeInTheDocument()
+    expect(screen.getByText(/播放\s*61/)).toBeInTheDocument()
 
     // 再次预览 → 从 2.5s 续播,不回到 0
     fireEvent.click(screen.getByText('预览').closest('button')!)

@@ -318,7 +318,7 @@ export function TrimDialog({
                 )}
                 {playheadFrame != null && (
                   <span className="text-green-700 ml-2">
-                    ▶ 播放 {playheadFrame}
+                    ▶ 播放 {Math.min(playheadFrame + 1, totalFrames)}
                   </span>
                 )}
               </span>
