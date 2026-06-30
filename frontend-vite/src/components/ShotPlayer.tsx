@@ -1,11 +1,12 @@
 // frontend-vite/src/components/ShotPlayer.tsx
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useShotSync } from '../hooks/useShotSync'
 
 export interface ShotPlayerProps {
   videoUrl: string
   trimEndSec: number | null
   audioUrl: string | null
+  poster?: string | null
 }
 
 function fmt(t: number): string {
@@ -19,7 +20,7 @@ function fmt(t: number): string {
  *  present a CUSTOM timeline scaled to the trimmed range (trimEndSec): the
  *  progress bar, time label and seeking are all bounded to it, and playback stops
  *  at the trim point — native <video controls> would show the full source length. */
-export function ShotPlayer({ videoUrl, trimEndSec, audioUrl }: ShotPlayerProps) {
+export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, poster }: ShotPlayerProps) {
   const hasVc = !!audioUrl
   const [useVc, setUseVc] = useState(true)
   const [audioError, setAudioError] = useState(false)
@@ -34,13 +35,6 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl }: ShotPlayerProps) 
 
   // effective end = the trim point when set, else the full source duration
   const end = trimEndSec != null && trimEndSec > 0 ? trimEndSec : fullDuration
-
-  // Autoplay on mount — the parent only mounts this after the user clicks the
-  // thumbnail, so that click gesture permits playback (restores the old UX where
-  // clicking the thumbnail played immediately instead of showing a paused frame).
-  useEffect(() => {
-    videoRef.current?.play()?.catch(() => {})
-  }, [])
 
   const togglePlay = useCallback(() => {
     const v = videoRef.current
@@ -73,6 +67,8 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl }: ShotPlayerProps) 
         <video
           ref={videoRef}
           src={videoUrl}
+          poster={poster ?? undefined}
+          preload="none"
           muted={audioEnabled}
           onLoadedMetadata={(e) => setFullDuration((e.currentTarget as HTMLVideoElement).duration)}
           onPlay={() => { onPlay(); setPlaying(true) }}
@@ -80,7 +76,7 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl }: ShotPlayerProps) 
           onSeeked={onSeeked}
           onTimeUpdate={handleTimeUpdate}
           onClick={togglePlay}
-          style={{ width: '100%', display: 'block' }}
+          className="w-full block"
         />
         {/* prominent center play button while paused (matches the thumbnail) */}
         {!playing && (

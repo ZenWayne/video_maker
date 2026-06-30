@@ -4,7 +4,7 @@
 
 import { useState, useRef, useEffect } from 'react'
 import type { ComponentType } from 'react'
-import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Play, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User, ChevronDown, Crop, Upload } from 'lucide-react'
+import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User, ChevronDown, Crop, Upload } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -214,7 +214,6 @@ export function ShotCard({
   const [promptAiInstruction, setPromptAiInstruction] = useState('')
   const [isPromptAiLoading, setIsPromptAiLoading] = useState(false)
   const [isPromptRewriting, setIsPromptRewriting] = useState(false)
-  const [isPlaying, setIsPlaying] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
@@ -697,30 +696,15 @@ export function ShotCard({
             </div>
           </div>
 
-          {/* 视频播放器 */}
-          {shot.video_path && isPlaying && (
+          {/* 视频播放器 — 始终渲染，进度条一直显示（暂停时显示首帧 + 中央播放按钮） */}
+          {shot.video_path && (
             <div className="relative rounded-lg overflow-hidden">
               <ShotPlayer
                 videoUrl={shot.video_path}
                 trimEndSec={shot.trim_end_sec ?? null}
                 audioUrl={shot.vc_audio_url ?? null}
+                poster={shot.last_frame_path || shot.first_frame_path || null}
               />
-            </div>
-          )}
-
-          {shot.video_path && !isPlaying && (
-            <div
-              className="relative rounded-lg overflow-hidden cursor-pointer group"
-              onClick={() => setIsPlaying(true)}
-            >
-              <img
-                src={shot.last_frame_path || shot.first_frame_path || undefined}
-                alt={`Shot ${shot.shot_id}`}
-                className="w-full"
-              />
-              <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/20 transition-colors">
-                <Play className="w-12 h-12 text-white opacity-80" />
-              </div>
             </div>
           )}
 
@@ -1101,7 +1085,6 @@ export function ShotCard({
           onOpenChange={setIsTrimOpen}
           onTrimmed={({ video_path, last_frame_path, trim_frames, trim_end_sec, version }) => {
             setVideoVersion(version)
-            setIsPlaying(false)
             onShotUpdated?.(shot.shot_id, {
               video_path: `${video_path}?v=${version}`,
               last_frame_path: `${last_frame_path}?v=${version}`,
