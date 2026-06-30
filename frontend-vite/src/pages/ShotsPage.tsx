@@ -949,15 +949,16 @@ export default function ShotsPage() {
 
                 {hasPendingShots ? (
                   <Button
+                    data-testid="continue-generation-button"
                     onClick={handleContinueGeneration}
-                    disabled={isContinuing || completedCount === 0}
+                    disabled={isContinuing}
                   >
                     {isContinuing ? (
                       <>处理中...</>
                     ) : (
                       <>
                         <CheckCircle className="w-4 h-4 mr-2" />
-                        继续下一个（{completedCount}/{shots.length}）
+                        {completedCount === 0 ? '开始生成' : '继续下一个'}（{completedCount}/{shots.length}）
                       </>
                     )}
                   </Button>
