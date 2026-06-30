@@ -1443,24 +1443,34 @@ async def get_shot_waveform(
 
 async def _repoint_next_first_frame(
     project_id: str, shot_id: int, last_frame_path: str, session: AsyncSession
-) -> None:
+) -> tuple[int, str] | None:
     """Point the NEXT shot's auto first-frame at last_frame_path (preserve user overrides).
 
     Mirrors worker.tasks._propagate_first_frame_to_next: re-point when the next shot's
     custom_first_frame_path is empty or itself an auto-propagated last frame; never
-    clobber a genuine user override stored under custom_frames/.
+    clobber a genuine user override stored under custom_frames/. Only touches the next
+    shot while it is still un-generated.
+
+    Returns (next_shot_id, last_frame_path) when it actually repointed, else None — so
+    callers (e.g. trim) can surface the change to the frontend without a full refetch.
     """
     res = await session.execute(
         select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id + 1)
     )
     nxt = res.scalar_one_or_none()
     if nxt is None or not nxt.use_prev_last_frame:
-        return
+        return None
+    # Only auto-adjust the next shot while it is still un-generated; never touch
+    # the first frame of an already-rendered shot.
+    if nxt.video_path:
+        return None
     existing = nxt.custom_first_frame_path
     is_user_override = bool(existing) and "custom_frames" in existing
     if not is_user_override and existing != last_frame_path:
         nxt.custom_first_frame_path = last_frame_path
         session.add(nxt)
+        return (nxt.shot_id, last_frame_path)
+    return None
 
 
 async def _commit_new_current_video(
@@ -1543,7 +1553,7 @@ async def trim_shot_video(
     frame_idx = (n - 1) if n < total else (total - 1)
     extract_frame_at(str(source), frame_idx, str(new_lf))
     shot.last_frame_path = str(new_lf)
-    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+    repointed = await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
 
     # 3. Last frame changed → reset CC. VC is untouched.
     # Note: last_frame_pre_cc.png is already removed by the glob above.
@@ -1553,7 +1563,7 @@ async def trim_shot_video(
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
 
-    return {
+    resp = {
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "trim_frames": shot.trim_frames,
@@ -1561,6 +1571,14 @@ async def trim_shot_video(
         "version": ts,
         **get_video_info(str(source)),
     }
+    # If the next (un-generated) shot's first frame was auto-repointed to the new
+    # trimmed last frame, surface it so the UI updates without a full refetch.
+    if repointed:
+        resp["next_shot"] = {
+            "shot_id": repointed[0],
+            "custom_first_frame_path": to_media_url(repointed[1]),
+        }
+    return resp
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/restore-trim")

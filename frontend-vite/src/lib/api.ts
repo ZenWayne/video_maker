@@ -349,7 +349,7 @@ export const api = {
     projectId: string,
     shotId: number,
     endFrame: number
-  ): Promise<{ video_path: string; last_frame_path: string; trim_frames: number | null; trim_end_sec: number | null; version: number; fps: number; total_frames: number; duration: number }> => {
+  ): Promise<{ video_path: string; last_frame_path: string; trim_frames: number | null; trim_end_sec: number | null; version: number; fps: number; total_frames: number; duration: number; next_shot?: { shot_id: number; custom_first_frame_path: string } }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/trim`, { end_frame: endFrame })
   },
 

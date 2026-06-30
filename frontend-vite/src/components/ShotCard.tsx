@@ -1083,7 +1083,7 @@ export function ShotCard({
           aspectRatio={aspectRatio}
           open={isTrimOpen}
           onOpenChange={setIsTrimOpen}
-          onTrimmed={({ video_path, last_frame_path, trim_frames, trim_end_sec, version }) => {
+          onTrimmed={({ video_path, last_frame_path, trim_frames, trim_end_sec, version, next_shot }) => {
             setVideoVersion(version)
             onShotUpdated?.(shot.shot_id, {
               video_path: `${video_path}?v=${version}`,
@@ -1091,6 +1091,13 @@ export function ShotCard({
               trim_frames,
               trim_end_sec,
             })
+            // The next (un-generated) shot's first frame was auto-repointed to this
+            // shot's new trimmed last frame — reflect it without a full refetch.
+            if (next_shot) {
+              onShotUpdated?.(next_shot.shot_id, {
+                custom_first_frame_path: `${next_shot.custom_first_frame_path}?v=${version}`,
+              })
+            }
           }}
         />
       )}
