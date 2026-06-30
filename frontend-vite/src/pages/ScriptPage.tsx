@@ -8,9 +8,10 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { ShotCard } from '@/components/ShotCard'
 import { ProgressStream } from '@/components/ProgressStream'
+import { ReferenceAssetsPanel } from '@/components/ReferenceAssetsPanel'
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/state'
-import type { ProjectStatus, Shot } from '@/lib/types'
+import type { ProjectStatus, ReferenceImage, Shot } from '@/lib/types'
 
 export default function ScriptPage() {
   const navigate = useNavigate()
@@ -26,6 +27,7 @@ export default function ScriptPage() {
 
   const [status, setStatus] = useState<ProjectStatus>('scripting')
   const [sceneOverview, setSceneOverview] = useState('')
+  const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([])
   const [isSaving, setIsSaving] = useState(false)
   const [isApproving, setIsApproving] = useState(false)
 
@@ -40,6 +42,7 @@ export default function ScriptPage() {
         setStatus(project.status as ProjectStatus)
         setSceneOverview(project.scene_overview || '')
         setShots(project.shots || [])
+        setReferenceImages(project.reference_images || [])
       } catch (error) {
         addToast({
           type: 'error',
@@ -214,6 +217,13 @@ export default function ScriptPage() {
             placeholder="描述整体场景氛围..."
           />
         </div>
+
+        {/* Reference assets (images only on the script-review page) */}
+        {referenceImages.length > 0 && (
+          <div className="mb-6">
+            <ReferenceAssetsPanel images={referenceImages} />
+          </div>
+        )}
 
         {/* Shots List */}
         <div className="space-y-4">

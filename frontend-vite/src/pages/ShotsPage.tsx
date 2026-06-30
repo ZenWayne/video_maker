@@ -23,6 +23,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { ShotCard } from '@/components/ShotCard'
 import { ProgressStream } from '@/components/ProgressStream'
 import { VoiceCalibrationPanel } from '@/components/VoiceCalibrationPanel'
+import { ReferenceAssetsPanel } from '@/components/ReferenceAssetsPanel'
 import {
   Tooltip,
   TooltipContent,
@@ -31,7 +32,7 @@ import {
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/state'
 import { versionShotMedia } from '@/lib/media'
-import type { ProjectStatus, Shot } from '@/lib/types'
+import type { ProjectStatus, ReferenceImage, Shot } from '@/lib/types'
 
 // 计算断层警告
 function computeCascadeWarnings(
@@ -88,6 +89,7 @@ export default function ShotsPage() {
   const [isVcConverting, setIsVcConverting] = useState(false)
   const [isCcCalibrating, setIsCcCalibrating] = useState(false)
   const [hasCharacterRefs, setHasCharacterRefs] = useState(false)
+  const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([])
   const [joinPreviewUrl, setJoinPreviewUrl] = useState<string | null>(null)
   const [isJoining, setIsJoining] = useState(false)
 
@@ -134,6 +136,7 @@ export default function ShotsPage() {
         setReferenceVoicePath(project.reference_voice_path ?? null)
         setAutoVoiceCalibrate(project.auto_voice_calibrate ?? false)
         setHasCharacterRefs(project.reference_images?.some((r) => r.kind === 'character') ?? false)
+        setReferenceImages(project.reference_images ?? [])
       } catch (error) {
         addToast({
           type: 'error',
@@ -733,17 +736,25 @@ export default function ShotsPage() {
           </div>
         )}
 
-        {/* Voice Calibration Panel (top of page) */}
-        {status === 'shot_review' && (
+        {/* Reference assets panel: 参考图 (always) + 音色校准 (shot_review only) */}
+        {(referenceImages.length > 0 || status === 'shot_review') && (
           <div className="mb-6">
-            <VoiceCalibrationPanel
-              referenceVoicePath={referenceVoicePath}
-              referenceVoiceShotId={referenceVoiceShotId}
-              autoVoiceCalibrate={autoVoiceCalibrate}
-              onUpload={handleUploadReferenceVoice}
-              onRemove={handleRemoveReferenceVoice}
-              onToggleAuto={handleToggleAutoCalibrate}
-              onCalibrateAll={handleVoiceConvertAll}
+            <ReferenceAssetsPanel
+              images={referenceImages}
+              voice={
+                status === 'shot_review' ? (
+                  <VoiceCalibrationPanel
+                    embedded
+                    referenceVoicePath={referenceVoicePath}
+                    referenceVoiceShotId={referenceVoiceShotId}
+                    autoVoiceCalibrate={autoVoiceCalibrate}
+                    onUpload={handleUploadReferenceVoice}
+                    onRemove={handleRemoveReferenceVoice}
+                    onToggleAuto={handleToggleAutoCalibrate}
+                    onCalibrateAll={handleVoiceConvertAll}
+                  />
+                ) : undefined
+              }
             />
           </div>
         )}
