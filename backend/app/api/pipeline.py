@@ -1447,6 +1447,7 @@ async def trim_shot_video(
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "trim_frames": shot.trim_frames,
+        "trim_end_sec": (shot.trim_frames / info["fps"]) if shot.trim_frames else None,
         "version": ts,
         **get_video_info(str(source)),
     }
@@ -1503,6 +1504,7 @@ async def restore_trim(
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "trim_frames": None,
+        "trim_end_sec": None,
         "version": ts,
         **get_video_info(str(source)),
     }
@@ -1570,6 +1572,7 @@ async def align_tail_frame(
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "trim_frames": shot.trim_frames,
+        "trim_end_sec": (shot.trim_frames / info["fps"]) if shot.trim_frames else None,
         "version": ts,
         "aligned_to_frame": n,
         **get_video_info(str(source)),

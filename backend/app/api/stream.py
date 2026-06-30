@@ -86,6 +86,13 @@ async def event_generator(
                         "tf_status": s.tf_status,
                         "tf_error_message": s.tf_error_message,
                         "tf_confirmed": bool(s.tf_confirmed),
+                        # Non-destructive editing (EDL) — must match the GET /projects serializer,
+                        # else the SSE snapshot strips these on load and the player can't clamp.
+                        "trim_frames": s.trim_frames,
+                        "source_fps": s.source_fps,
+                        "source_frames": s.source_frames,
+                        "trim_end_sec": (s.trim_frames / s.source_fps) if (s.trim_frames and s.source_fps) else None,
+                        "vc_audio_url": to_media_url(s.vc_audio_path),
                     }
                     for s in shots
                 ],
