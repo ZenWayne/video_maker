@@ -349,7 +349,7 @@ export const api = {
     projectId: string,
     shotId: number,
     endFrame: number
-  ): Promise<{ video_path: string; last_frame_path: string; version: number; fps: number; total_frames: number; duration: number }> => {
+  ): Promise<{ video_path: string; last_frame_path: string; trim_frames: number | null; trim_end_sec: number | null; version: number; fps: number; total_frames: number; duration: number }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/trim`, { end_frame: endFrame })
   },
 
@@ -357,7 +357,7 @@ export const api = {
   restoreTrim: (
     projectId: string,
     shotId: number
-  ): Promise<{ video_path: string; last_frame_path: string; version: number; fps: number; total_frames: number; duration: number }> => {
+  ): Promise<{ video_path: string; last_frame_path: string; trim_frames: number | null; trim_end_sec: number | null; version: number; fps: number; total_frames: number; duration: number }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/restore-trim`)
   },
 
@@ -365,7 +365,7 @@ export const api = {
   alignTailFrame: (
     projectId: string,
     shotId: number
-  ): Promise<{ video_path: string; last_frame_path: string; version: number; fps: number; total_frames: number; duration: number; aligned_to_frame: number }> => {
+  ): Promise<{ video_path: string; last_frame_path: string; trim_frames: number | null; trim_end_sec: number | null; version: number; fps: number; total_frames: number; duration: number; aligned_to_frame: number }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/align-tail-frame`)
   },
 

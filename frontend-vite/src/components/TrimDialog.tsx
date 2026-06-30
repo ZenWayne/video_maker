@@ -20,6 +20,8 @@ interface TrimDialogProps {
   onTrimmed: (updates: {
     video_path: string
     last_frame_path: string
+    trim_frames: number | null
+    trim_end_sec: number | null
     version: number
   }) => void
 }
@@ -130,7 +132,8 @@ export function TrimDialog({
       setFps(info.fps)
       setTotalFrames(info.total_frames)
       setDuration(info.duration)
-      setEndFrame(info.total_frames)
+      // Reflect the current (non-destructive) trim point, not the full source length
+      setEndFrame(shot.trim_frames ?? info.total_frames)
       setHasBackup(info.has_backup)
       setSpeechEndFrame(info.speech_end_frame)
       setIsLoading(false)
@@ -168,6 +171,8 @@ export function TrimDialog({
       onTrimmed({
         video_path: result.video_path,
         last_frame_path: result.last_frame_path,
+        trim_frames: result.trim_frames,
+        trim_end_sec: result.trim_end_sec,
         version: result.version,
       })
       setTotalFrames(result.total_frames)
@@ -189,6 +194,8 @@ export function TrimDialog({
       onTrimmed({
         video_path: result.video_path,
         last_frame_path: result.last_frame_path,
+        trim_frames: result.trim_frames,
+        trim_end_sec: result.trim_end_sec,
         version: result.version,
       })
       setTotalFrames(result.total_frames)
@@ -211,6 +218,8 @@ export function TrimDialog({
       onTrimmed({
         video_path: result.video_path,
         last_frame_path: result.last_frame_path,
+        trim_frames: result.trim_frames,
+        trim_end_sec: result.trim_end_sec,
         version: result.version,
       })
       setTotalFrames(result.total_frames)
