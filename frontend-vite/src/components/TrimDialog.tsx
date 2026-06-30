@@ -46,6 +46,7 @@ export function TrimDialog({
   const [peaks, setPeaks] = useState<number[] | null>(null)
   const [notice, setNotice] = useState('')
   const [isPreviewing, setIsPreviewing] = useState(false)
+  const [playheadFrame, setPlayheadFrame] = useState<number | null>(null)
   const [hasBackup, setHasBackup] = useState(false)
   const [error, setError] = useState('')
   const minFrames = 24
@@ -65,6 +66,7 @@ export function TrimDialog({
     }
     v?.pause()
     setIsPreviewing(false)
+    setPlayheadFrame(null)
   }, [])
 
   const handlePreview = useCallback(() => {
@@ -79,12 +81,17 @@ export function TrimDialog({
     v.play()
     setIsPreviewing(true)
 
+    setPlayheadFrame(0)
     let framesShown = 0
     const onFrame = () => {
       framesShown++
+      if (videoRef.current) {
+        setPlayheadFrame(Math.round(videoRef.current.currentTime * fps))
+      }
       if (!videoRef.current || framesShown >= endFrameRef.current) {
         videoRef.current?.pause()
         setIsPreviewing(false)
+        setPlayheadFrame(null)
         return
       }
       rvfcRef.current = (videoRef.current as any).requestVideoFrameCallback(onFrame)
@@ -98,9 +105,11 @@ export function TrimDialog({
       const checkEnd = () => {
         if (!videoRef.current) return
         if (videoRef.current.paused) return
+        setPlayheadFrame(Math.round(videoRef.current.currentTime * fps))
         if (videoRef.current.currentTime >= endSec) {
           videoRef.current.pause()
           setIsPreviewing(false)
+          setPlayheadFrame(null)
           return
         }
         rvfcRef.current = requestAnimationFrame(checkEnd)
@@ -281,6 +290,7 @@ export function TrimDialog({
                 totalFrames={totalFrames}
                 endFrame={endFrame}
                 speechEndFrame={speechEndFrame}
+                playheadFrame={playheadFrame}
                 onScrub={handleSliderChange}
               />
             </div>

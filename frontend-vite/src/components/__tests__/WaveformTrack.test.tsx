@@ -3,14 +3,21 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import WaveformTrack from '../WaveformTrack'
 
 let ctx2d: { clearRect: ReturnType<typeof vi.fn>; fillRect: ReturnType<typeof vi.fn>; fillStyle: string }
+// 记录每次 fillRect 时的 fillStyle,用于断言画了哪些颜色(如绿色播放头)
+let fillStyleLog: string[]
 
 beforeEach(() => {
   // jsdom lacks setPointerCapture/releasePointerCapture
   HTMLElement.prototype.setPointerCapture = vi.fn()
   HTMLElement.prototype.releasePointerCapture = vi.fn()
 
-  // canvas 2d context stub
-  ctx2d = { clearRect: vi.fn(), fillRect: vi.fn(), fillStyle: '' }
+  // canvas 2d context stub — fillRect 记录当时的 fillStyle
+  fillStyleLog = []
+  ctx2d = {
+    clearRect: vi.fn(),
+    fillRect: vi.fn(() => { fillStyleLog.push(ctx2d.fillStyle) }),
+    fillStyle: '',
+  }
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(
     ctx2d as unknown as CanvasRenderingContext2D,
   )
@@ -63,6 +70,33 @@ describe('WaveformTrack', () => {
     )
     expect(screen.getByText('声纹波形')).toBeInTheDocument()
     expect(screen.getByText('波形加载中…')).toBeInTheDocument()
+  })
+
+  it('playheadFrame 非空时绘制绿色播放头线', () => {
+    render(
+      <WaveformTrack
+        peaks={samplePeaks}
+        totalFrames={240}
+        endFrame={240}
+        speechEndFrame={null}
+        playheadFrame={60}
+        onScrub={() => {}}
+      />,
+    )
+    expect(fillStyleLog).toContain('#15803D') // green-700 播放头
+  })
+
+  it('playheadFrame 缺省时不绘制播放头', () => {
+    render(
+      <WaveformTrack
+        peaks={samplePeaks}
+        totalFrames={240}
+        endFrame={240}
+        speechEndFrame={null}
+        onScrub={() => {}}
+      />,
+    )
+    expect(fillStyleLog).not.toContain('#15803D')
   })
 
   it('点击波形上报对应帧', () => {

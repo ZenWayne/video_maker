@@ -6,6 +6,8 @@ interface WaveformTrackProps {
   totalFrames: number
   endFrame: number
   speechEndFrame: number | null
+  /** 预览播放时的当前播放位置(帧);非播放时为 null,不绘制播放头。 */
+  playheadFrame?: number | null
   onScrub: (frame: number) => void
 }
 
@@ -17,6 +19,7 @@ export default function WaveformTrack({
   totalFrames,
   endFrame,
   speechEndFrame,
+  playheadFrame = null,
   onScrub,
 }: WaveformTrackProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -58,7 +61,14 @@ export default function WaveformTrack({
     g.fillRect(cx, 0, width - cx, TRACK_HEIGHT)
     g.fillStyle = '#EF4444' // red-500
     g.fillRect(cx - 1, 0, 3, TRACK_HEIGHT)
-  }, [peaks, endFrame, speechEndFrame, totalFrames])
+
+    // 播放头(预览播放时跟随 currentTime)
+    if (playheadFrame != null) {
+      const px = pixelForFrame(playheadFrame, width, totalFrames)
+      g.fillStyle = '#15803D' // green-700
+      g.fillRect(px - 1, 0, 2, TRACK_HEIGHT)
+    }
+  }, [peaks, endFrame, speechEndFrame, totalFrames, playheadFrame])
 
   // ---- 交互:点击/拖拽设裁剪点 ----
   const scrubTo = useCallback(
@@ -79,7 +89,7 @@ export default function WaveformTrack({
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold text-zinc-600">声纹波形</span>
         <span className="text-[11px] text-zinc-400">
-          蓝=人声 · 黄线=说话结束 · 红线=裁剪点
+          蓝=人声 · 黄线=说话结束 · 红线=裁剪点 · 绿线=播放
         </span>
       </div>
       <canvas
