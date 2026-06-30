@@ -66,6 +66,12 @@ class ShotResponse(BaseModel):
     tf_error_message: Optional[str] = None
     tf_confirmed: bool = False
     auto_trim: bool = True
+    # Non-destructive editing (EDL) playback descriptor
+    trim_frames: Optional[int] = None
+    source_fps: Optional[float] = None
+    source_frames: Optional[int] = None
+    trim_end_sec: Optional[float] = None
+    vc_audio_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
