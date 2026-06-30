@@ -56,6 +56,39 @@ async def test_create_project_rejects_bad_aspect_ratio(server, db_session_factor
                               {"title": "x", "theme_text": "t", "aspect_ratio": "4:3"})
 
 
+async def test_upload_reference_images_by_path(server, db_session_factory, tmp_path):
+    pid = await seed_project(db_session_factory)
+    img = tmp_path / "stella.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n fake png bytes")
+    async with Client(server) as c:
+        res = await c.call_tool("upload_reference_images",
+                                {"project_id": pid, "kind": "character", "paths": [str(img)]})
+    data = _payload(res)
+    assert len(data["uploaded"]) == 1
+    assert data["uploaded"][0]["kind"] == "character"
+    assert data["uploaded"][0]["filename"] == "stella.png"
+    # verify it is now on the project
+    from app.models.project import ReferenceImage
+    async with db_session_factory() as s:
+        rows = (await s.execute(select(ReferenceImage).where(ReferenceImage.project_id == pid))).scalars().all()
+    assert [r.kind for r in rows] == ["character"]
+
+
+async def test_upload_reference_images_bad_kind(server, db_session_factory, tmp_path):
+    pid = await seed_project(db_session_factory)
+    async with Client(server) as c:
+        with pytest.raises(Exception, match="kind"):
+            await c.call_tool("upload_reference_images",
+                              {"project_id": pid, "kind": "bogus", "paths": ["/x"]})
+
+
+async def test_upload_reference_images_requires_source(server, db_session_factory):
+    pid = await seed_project(db_session_factory)
+    async with Client(server) as c:
+        with pytest.raises(Exception, match="path or url"):
+            await c.call_tool("upload_reference_images", {"project_id": pid, "kind": "character"})
+
+
 async def test_update_dialogue(server, db_session_factory):
     pid = await seed_project(db_session_factory)
     async with Client(server) as c:

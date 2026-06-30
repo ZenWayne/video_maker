@@ -29,9 +29,10 @@ class BackendClient:
         if self._owns_client and self._client is not None:
             await self._client.aclose()
 
-    async def _request(self, method: str, path: str, json: Any = None) -> Any:
+    async def _request(self, method: str, path: str, json: Any = None,
+                       data: Any = None, files: Any = None) -> Any:
         client = await self._http()
-        resp = await client.request(method, path, json=json, headers=HEADERS)
+        resp = await client.request(method, path, json=json, data=data, files=files, headers=HEADERS)
         if resp.status_code >= 400:
             try:
                 detail = resp.json().get("detail", resp.text)
@@ -53,6 +54,23 @@ class BackendClient:
 
     async def get_project(self, project_id: str) -> dict:
         return await self._request("GET", f"/api/projects/{project_id}")
+
+    async def upload_reference_images(
+        self, project_id: str, kind: str, files: list[tuple[str, bytes]]
+    ) -> list[dict]:
+        """files: list of (filename, content_bytes) -> multipart POST."""
+        multipart = [("files", (name, content, "application/octet-stream")) for name, content in files]
+        return await self._request(
+            "POST", f"/api/projects/{project_id}/reference-images",
+            data={"kind": kind}, files=multipart,
+        )
+
+    async def fetch_bytes(self, url: str) -> bytes:
+        """Download an external URL (used to forward image URLs as uploads)."""
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            resp = await c.get(url)
+            resp.raise_for_status()
+            return resp.content
 
     async def create_project(
         self, title: str, theme_text: str, aspect_ratio: str = "16:9"

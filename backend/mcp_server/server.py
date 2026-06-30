@@ -1,3 +1,6 @@
+import os
+from urllib.parse import urlparse
+
 from fastmcp import FastMCP
 
 from app.agents.director import postprocess_motion_prompt
@@ -73,6 +76,35 @@ def create_server(backend: BackendClient) -> FastMCP:
             "status": created.get("status"),
             "aspect_ratio": created.get("aspect_ratio"),
         }
+
+    @mcp.tool
+    async def upload_reference_images(
+        project_id: str, kind: str = "character",
+        paths: list[str] | None = None, urls: list[str] | None = None,
+    ) -> dict:
+        """Upload reference images for a project. Provide local `paths` (readable by
+        the MCP server) and/or `urls` (downloaded server-side); both are forwarded
+        as multipart. kind is "character" (主题角色) or "scene".
+
+        Character images are the candidates for shot first frames, and at least one
+        is required before the backend's /start (script generation) will run.
+        """
+        if kind not in ("character", "scene"):
+            raise ValueError('kind must be "character" or "scene"')
+        files: list[tuple[str, bytes]] = []
+        for p in paths or []:
+            with open(p, "rb") as f:
+                files.append((os.path.basename(p) or "image", f.read()))
+        for u in urls or []:
+            data = await backend.fetch_bytes(u)
+            files.append((os.path.basename(urlparse(u).path) or "image", data))
+        if not files:
+            raise ValueError("provide at least one path or url")
+        created = await backend.upload_reference_images(project_id, kind, files)
+        return {"uploaded": [
+            {"id": r.get("id"), "kind": r.get("kind"), "filename": r.get("filename")}
+            for r in created
+        ]}
 
     @mcp.tool
     async def update_dialogue(project_id: str, shot_id: int, text: str) -> dict:
