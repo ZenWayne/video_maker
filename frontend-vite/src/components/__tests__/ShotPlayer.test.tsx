@@ -46,4 +46,10 @@ describe('ShotPlayer', () => {
     expect(screen.getByTestId('audio-error-msg')).toBeTruthy()
     expect(screen.getByTestId('audio-error-msg').textContent).toContain('配音音轨加载失败')
   })
+
+  it('timeline shows the TRIMMED duration, not the full source', () => {
+    render(<ShotPlayer videoUrl="/v.mp4" trimEndSec={125} audioUrl={null} />)
+    // 125s → 2:05; the custom timeline is scaled to trimEndSec
+    expect(screen.getByTestId('time-label').textContent).toContain('/ 2:05')
+  })
 })

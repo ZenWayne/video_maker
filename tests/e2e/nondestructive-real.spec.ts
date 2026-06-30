@@ -118,6 +118,16 @@ test('real trim: UI trim persists AND the dialog reopens at the trimmed length',
   await expect(range2).toBeVisible({ timeout: 8_000 })
   await expect.poll(async () => Number(await range2.inputValue())).toBe(target)
   expect(Number(await range2.inputValue())).toBeLessThan(total)
+
+  // (c) THE PLAYER must present the TRIMMED timeline, not the full source.
+  await page.getByRole('button', { name: '取消' }).click()           // close dialog
+  await expect(page.locator('input[type="range"]')).toHaveCount(0)
+  await card.locator(`div.cursor-pointer:has(img[alt="Shot ${shotA}"])`).click() // enter play mode
+  const fmt = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`
+  const label = card.getByTestId('time-label')
+  await expect(label).toBeVisible({ timeout: 6_000 })
+  // total shown = trimmed duration (e.g. 0:04), never the full source length
+  await expect(label).toContainText(`/ ${fmt(s.trim_end_sec)}`)
 })
 
 test('real continuity preview: stitches TRIMMED clips, not the full source', async ({ page }) => {
