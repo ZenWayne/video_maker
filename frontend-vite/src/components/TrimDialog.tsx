@@ -52,7 +52,6 @@ export function TrimDialog({
   const minFrames = 24
 
   const rvfcRef = useRef<number>(0)
-  const endFrameRef = useRef(0)
 
   const stopPreview = useCallback(() => {
     const v = videoRef.current
@@ -66,7 +65,7 @@ export function TrimDialog({
     }
     v?.pause()
     setIsPreviewing(false)
-    setPlayheadFrame(null)
+    // 保留 playheadFrame(暂停位置)以便续播;清除交给重新打开/播完
   }, [])
 
   const handlePreview = useCallback(() => {
@@ -76,46 +75,35 @@ export function TrimDialog({
     }
     const v = videoRef.current
     if (!v || fps <= 0) return
-    endFrameRef.current = endFrame
-    v.currentTime = 0
+    const endSec = endFrame / fps
+    // 从头播 or 续播:已到/超过裁剪点(或尚未开始)→ 从 0;否则从当前暂停处续播
+    if (v.currentTime >= endSec - 0.5 / fps || v.currentTime <= 0.001) {
+      v.currentTime = 0
+    }
     v.play()
     setIsPreviewing(true)
+    setPlayheadFrame(Math.round(v.currentTime * fps))
 
-    setPlayheadFrame(0)
-    let framesShown = 0
-    const onFrame = () => {
-      framesShown++
-      if (videoRef.current) {
-        setPlayheadFrame(Math.round(videoRef.current.currentTime * fps))
-      }
-      if (!videoRef.current || framesShown >= endFrameRef.current) {
-        videoRef.current?.pause()
+    const useRvfc = 'requestVideoFrameCallback' in v
+    const tick = () => {
+      const vid = videoRef.current
+      if (!vid) return
+      if (!useRvfc && vid.paused) return
+      setPlayheadFrame(Math.round(vid.currentTime * fps))
+      // 播到裁剪点即停(留半帧余量避免过冲)
+      if (vid.currentTime >= endSec - 0.5 / fps) {
+        vid.pause()
         setIsPreviewing(false)
-        setPlayheadFrame(null)
+        setPlayheadFrame(null) // 播完清除播放头
         return
       }
-      rvfcRef.current = (videoRef.current as any).requestVideoFrameCallback(onFrame)
+      rvfcRef.current = useRvfc
+        ? (vid as any).requestVideoFrameCallback(tick)
+        : requestAnimationFrame(tick)
     }
-
-    if ('requestVideoFrameCallback' in v) {
-      rvfcRef.current = (v as any).requestVideoFrameCallback(onFrame)
-    } else {
-      // Fallback: use time-based check with half-frame offset to avoid overshoot
-      const endSec = (endFrame - 0.5) / fps
-      const checkEnd = () => {
-        if (!videoRef.current) return
-        if (videoRef.current.paused) return
-        setPlayheadFrame(Math.round(videoRef.current.currentTime * fps))
-        if (videoRef.current.currentTime >= endSec) {
-          videoRef.current.pause()
-          setIsPreviewing(false)
-          setPlayheadFrame(null)
-          return
-        }
-        rvfcRef.current = requestAnimationFrame(checkEnd)
-      }
-      rvfcRef.current = requestAnimationFrame(checkEnd)
-    }
+    rvfcRef.current = useRvfc
+      ? (v as any).requestVideoFrameCallback(tick)
+      : requestAnimationFrame(tick)
   }, [isPreviewing, stopPreview, endFrame, fps])
 
   useEffect(() => {
@@ -137,6 +125,7 @@ export function TrimDialog({
     setError('')
     setNotice('')
     setPeaks(null)
+    setPlayheadFrame(null)
     api.getVideoInfo(projectId, shot.shot_id).then((info) => {
       setFps(info.fps)
       setTotalFrames(info.total_frames)
@@ -325,6 +314,11 @@ export function TrimDialog({
                 {endFrame < totalFrames && (
                   <span className="text-red-500 ml-2">
                     裁掉 {totalFrames - endFrame} 帧
+                  </span>
+                )}
+                {playheadFrame != null && (
+                  <span className="text-green-700 ml-2">
+                    ▶ 播放 {playheadFrame}
                   </span>
                 )}
               </span>

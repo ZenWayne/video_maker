@@ -211,6 +211,34 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     expect(screen.getByText('-1').closest('button')).not.toBeDisabled()
   })
 
+  it('停止后再次预览从暂停处续播(不回到 0),并显示播放帧数', async () => {
+    await renderReady()
+    const video = getVideo()
+
+    // 裁剪到 120 帧 → endSec = 5.0s
+    fireEvent.change(screen.getByRole('slider'), { target: { value: '120' } })
+
+    // 开始预览(从头 → 归零)
+    fireEvent.click(screen.getByText('预览').closest('button')!)
+    expect(video.currentTime).toBe(0)
+
+    // 播到 2.5s(第 60 帧)——未到裁剪点
+    Object.defineProperty(video, 'currentTime', { value: 2.5, writable: true, configurable: true })
+    act(() => flushRAF())
+
+    // 播放帧数显示当前帧
+    expect(screen.getByText(/播放\s*60/)).toBeInTheDocument()
+
+    // 手动停止 → 暂停位置保留(计数器仍在)
+    fireEvent.click(screen.getByText('停止').closest('button')!)
+    expect(video.pause).toHaveBeenCalled()
+    expect(screen.getByText(/播放\s*60/)).toBeInTheDocument()
+
+    // 再次预览 → 从 2.5s 续播,不回到 0
+    fireEvent.click(screen.getByText('预览').closest('button')!)
+    expect(video.currentTime).toBe(2.5)
+  })
+
   it('does not trim until user clicks confirm — preview is non-destructive', async () => {
     const { onTrimmed } = await renderReady()
     const video = getVideo()
