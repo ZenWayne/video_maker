@@ -28,9 +28,12 @@ def build_effective_clip(
 ) -> None:
     """Render <source> with trim + audio-substitution applied into out_path.
 
-    - trim_frames: keep frames 0..trim_frames-1 (frame-precise via -vframes);
-      -shortest bounds the audio stream to the trimmed video length.
-    - vc_audio_path: replace the audio with this full-length wav (clamped by -shortest).
+    - trim_frames: keep frames 0..trim_frames-1 (frame-precise via -vframes); the
+      audio is cut to the SAME duration (trim_frames/fps) via an atrim filter —
+      -shortest alone does NOT bound audio when -vframes caps the video, leaving
+      a full-length (uncut) audio track.
+    - vc_audio_path: replace the audio with this wav (bounded by -shortest when not
+      trimming, or by atrim when trimming).
     - No edits → straight copy of the source bytes.
     """
     if not trim_frames and not vc_audio_path:
@@ -43,13 +46,18 @@ def build_effective_clip(
         ff = ff.input(vc_audio_path)
         audio_map = "1:a"
 
-    opts: dict = {"map": ["0:v", audio_map], "vcodec": vcodec, "acodec": acodec,
-                  "shortest": None}  # always bound audio to video duration
+    opts: dict = {"map": ["0:v", audio_map], "vcodec": vcodec, "acodec": acodec}
     if vcodec == "libx264":
         opts["preset"] = "fast"
         opts["crf"] = crf
     if trim_frames:
-        opts["vframes"] = trim_frames
+        from app.agents.video_trimmer import get_video_info
+        fps = get_video_info(source_path)["fps"]
+        opts["vframes"] = trim_frames                       # exact video frame count
+        # cut the audio to match the trimmed video duration (the actual fix)
+        opts["af"] = f"atrim=end={trim_frames / fps:.6f},asetpts=PTS-STARTPTS"
+    elif vc_audio_path:
+        opts["shortest"] = None  # vc-only: bound the substituted audio to the video
 
     ff.output(out_path, **opts).execute()
     if not Path(out_path).exists():

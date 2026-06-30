@@ -166,3 +166,35 @@ def test_effective_clip_paths_missing_vc_audio_falls_back(tmp_path, monkeypatch)
     # Verify output is a valid video
     info = get_video_info(result[0])
     assert info["total_frames"] == 60
+
+
+def test_trim_cuts_audio_to_video_duration(tmp_path):
+    """Regression: trimming must cut the AUDIO to the video duration, not leave a
+    full-length (uncut) audio track (which made the stitched preview too long)."""
+    import subprocess
+    from app.agents.effective_clip import build_effective_clip
+
+    src = tmp_path / "src.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=30",
+         "-f", "lavfi", "-i", "sine=frequency=440",
+         "-frames:v", "120", "-pix_fmt", "yuv420p",
+         "-c:v", "libx264", "-c:a", "aac", "-shortest", str(src)],
+        check=True, capture_output=True,
+    )
+    out = tmp_path / "clip.mp4"
+    build_effective_clip(str(src), trim_frames=60, vc_audio_path=None, out_path=str(out))
+
+    def stream_dur(stream: str) -> float:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", stream,
+             "-show_entries", "stream=duration", "-of", "csv=p=0", str(out)],
+            capture_output=True, text=True,
+        )
+        return float(r.stdout.strip())
+
+    vdur, adur = stream_dur("v:0"), stream_dur("a:0")
+    # video ≈ 60/30 = 2.0s; audio must be cut to ~the same, not the full ~4.0s
+    assert abs(adur - vdur) < 0.2, f"audio {adur}s not aligned to video {vdur}s"
+    assert adur < 2.6, f"audio not cut — {adur}s (full source was ~4s)"
