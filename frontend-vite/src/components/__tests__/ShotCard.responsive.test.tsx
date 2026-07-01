@@ -20,7 +20,6 @@ const baseShot: Shot = {
   align_with_previous: false,
   use_prev_last_frame: false,
   motion_prompt: null,
-  first_frame_path: '/fake/first.jpg',
   video_path: '/fake/video.mp4',
   last_frame_path: '/fake/last.jpg',
   word_count_warning: false,

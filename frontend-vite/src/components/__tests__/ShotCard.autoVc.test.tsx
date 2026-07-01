@@ -7,7 +7,7 @@ const shot: any = {
   id: 1, project_id: 'p', shot_id: 1, text: 't', shot_type: 'Medium Shot',
   visual_description: 'v', shot_duration: 6, status: 'completed',
   align_with_previous: false, use_prev_last_frame: false, motion_prompt: null,
-  first_frame_path: null, video_path: '/v.mp4', last_frame_path: null,
+  video_path: '/v.mp4', last_frame_path: null,
   word_count_warning: false, error_message: null, custom_first_frame_path: null,
   custom_reference_paths: null, reference_image_hint: null,
   vc_status: 'converting', vc_error_message: null, cc_status: null,

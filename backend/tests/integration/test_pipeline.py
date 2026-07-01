@@ -160,10 +160,10 @@ async def test_regenerate_shots_success(client, project_in_shot_review):
 
 
 async def test_regenerate_shots_preserves_director_inputs(client, db_session_factory):
-    """Regenerate must KEEP the cached motion_prompt / first_frame so the
-    re-run reuses the existing director take and first frame instead of
-    regenerating them. Path-as-truth: target_last_frame_path is left
-    EXACTLY as stored regardless of whether the file exists on disk."""
+    """Regenerate must KEEP the cached motion_prompt so the re-run reuses the
+    existing director take instead of regenerating it. The first frame is not
+    stored — it is re-resolved at gen time. Path-as-truth: target_last_frame_path
+    is left EXACTLY as stored regardless of whether the file exists on disk."""
     from sqlalchemy import select
     from app.models.project import Shot
 
@@ -173,7 +173,6 @@ async def test_regenerate_shots_preserves_director_inputs(client, db_session_fac
     async with db_session_factory() as s:
         shot = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalar_one()
         shot.motion_prompt = "old camera pan"
-        shot.first_frame_path = "/tmp/does/not/matter/first.png"
         shot.target_last_frame_path = "/tmp/does/not/exist/tail.png"  # missing on disk
         shot.tf_confirmed = True
         s.add(shot)
@@ -189,7 +188,6 @@ async def test_regenerate_shots_preserves_director_inputs(client, db_session_fac
     async with db_session_factory() as s:
         shot = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalar_one()
         assert shot.motion_prompt == "old camera pan"            # reused, not regenerated
-        assert shot.first_frame_path == "/tmp/does/not/matter/first.png"  # reused
         # Path-as-truth: path left as stored even if file is missing on disk
         assert shot.target_last_frame_path == "/tmp/does/not/exist/tail.png"
         assert shot.tf_confirmed is True
@@ -450,7 +448,6 @@ async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis
             status="completed",
             video_path=f"{storage}/projects/{pid}/shots/shot_1/output.mp4",
             last_frame_path=f"{storage}/projects/{pid}/shots/shot_1/last_frame.png",
-            first_frame_path=f"{storage}/projects/{pid}/reference_images/ref.jpg",
         ))
         await s.commit()
 
@@ -466,8 +463,6 @@ async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis
         f"video_path should be a media URL, got: {shot['video_path']}"
     assert shot["last_frame_path"].startswith("/api/media/"), \
         f"last_frame_path should be a media URL, got: {shot['last_frame_path']}"
-    assert shot["first_frame_path"].startswith("/api/media/"), \
-        f"first_frame_path should be a media URL, got: {shot['first_frame_path']}"
 
 
 # ── GET /projects/{id}/final.mp4 ─────────────────────────────────────────────

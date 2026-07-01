@@ -47,7 +47,7 @@ function shot(shot_id: number, status: string) {
     id: shot_id, project_id: 'p1', shot_id, text: 't', shot_type: 'Medium Shot',
     visual_description: 'v', shot_duration: 8, status,
     align_with_previous: false, use_prev_last_frame: false, motion_prompt: 'm',
-    first_frame_path: null, video_path: null, last_frame_path: null,
+    video_path: null, last_frame_path: null,
     word_count_warning: false, error_message: null, custom_first_frame_path: null,
     custom_reference_paths: null, reference_image_hint: null,
     vc_status: null, vc_error_message: null, cc_status: null, cc_error_message: null,

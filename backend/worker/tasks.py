@@ -20,6 +20,10 @@ from app.services.state_machine import (
     transition_project_status,
     InvalidTransitionError,
 )
+from app.services.first_frame import (
+    pick_first_frame,
+    init_shot1_first_frame,
+)
 from app.services.storage import (
     storyboard_path,
     shot_dir,
@@ -211,7 +215,7 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
             )
             session.add(shot)
             # Eagerly populate shot 1's first frame for frontend visibility.
-            await _init_shot1_first_frame(project_id, shot, session)
+            await init_shot1_first_frame(project_id, shot, session)
 
         # Transition to SCRIPT_REVIEW
         await transition_project_status(
@@ -318,10 +322,10 @@ async def run_shot_pipeline(
         )
 
         try:
-            # If motion_prompt and first_frame are already set, reuse them
-            if shot.motion_prompt and shot.first_frame_path:
+            # Reuse the existing director take (the expensive LLM call) when a
+            # motion_prompt is already stored; otherwise run the director now.
+            if shot.motion_prompt:
                 motion_prompt = shot.motion_prompt
-                first_frame = Path(shot.first_frame_path) if shot.first_frame_path else None
             else:
                 # Run director
                 shot.status = ShotStatus.PROMPT_GENERATING.value
@@ -350,9 +354,12 @@ async def run_shot_pipeline(
                 await session.refresh(shot)
                 shot.motion_prompt = motion_prompt
 
-                # Pick first frame (None = multi-image reference mode)
-                first_frame = await _pick_first_frame(project_id, shot, session)
-                shot.first_frame_path = str(first_frame) if first_frame else None
+            # SINGLE SOURCE OF TRUTH for the first frame: resolve it fresh every run
+            # from the one stored field (custom_first_frame_path) plus continuity
+            # (prev last frame → refs). There is no persisted "resolved" copy to go
+            # stale, so a re-uploaded 首帧 is always honored.
+            # (None = multi-image reference mode.)
+            first_frame = await pick_first_frame(project_id, shot, session)
 
             # Resolve reference image paths for multi-image mode
             ref_paths: Optional[list[str]] = None
@@ -569,97 +576,6 @@ async def run_shot_pipeline(
         )
 
 
-async def _pick_first_frame(
-    project_id: str, shot: Shot, session: AsyncSession
-) -> Optional[Path]:
-    """
-    Pick the first frame for a shot.
-
-    The 首帧 slot (custom_first_frame_path) is AUTHORITATIVE when set — it anchors
-    the character's identity for the whole clip, so it wins over multi-image mode.
-    Only when there is no explicit first frame does a shot with custom_reference_paths
-    fall into multi-image mode (return None → caller uses reference_images).
-    For shot 1 without custom images: fall back to project character reference.
-    For connected shots without a first frame: use previous shot's last frame.
-    """
-    # Single custom first frame (the 首帧 slot) — authoritative; anchors identity.
-    if shot.custom_first_frame_path:
-        custom = Path(shot.custom_first_frame_path)
-        if custom.exists():
-            return custom
-
-    # Multi-image reference mode → return None (caller uses reference_images).
-    # Only when there is NO explicit first frame above.
-    if shot.custom_reference_paths and not shot.align_with_previous:
-        return None
-
-    # Try to get previous shot's last frame (for both connected and disconnected shots)
-    if shot.shot_id > 1:
-        prev_result = await session.execute(
-            select(Shot).where(
-                Shot.project_id == project_id, Shot.shot_id == shot.shot_id - 1
-            )
-        )
-        prev_shot = prev_result.scalar_one_or_none()
-        if prev_shot and prev_shot.last_frame_path:
-            prev_path = Path(prev_shot.last_frame_path)
-            if prev_path.exists():
-                return prev_path
-
-    # Fallback to character reference
-    return await _get_first_character_ref(project_id, session)
-
-
-async def _get_first_character_ref(project_id: str, session: AsyncSession) -> Path:
-    """Get first character reference image for a project."""
-    result = await session.execute(
-        select(ReferenceImage)
-        .where(
-            ReferenceImage.project_id == project_id, ReferenceImage.kind == "character"
-        )
-        .order_by(ReferenceImage.order_index)
-        .limit(1)
-    )
-    ref = result.scalar_one_or_none()
-
-    if not ref:
-        raise ValueError("No character reference image found")
-
-    path = Path(ref.storage_path)
-    if not path.exists():
-        raise ValueError(f"Reference image not found: {path}")
-
-    return path
-
-
-async def _init_shot1_first_frame(
-    project_id: str, shot: Shot, session: AsyncSession
-) -> None:
-    """Eagerly populate shot 1's custom_first_frame_path from the first character ref.
-
-    Write-only-when-empty: if the field is already set (e.g. via upload), leave it.
-    Non-raising: if no character ref exists or the field is already set, do nothing.
-    This is for frontend visibility only — _pick_first_frame remains authoritative at
-    gen-time.
-    """
-    if shot.shot_id != 1 or shot.custom_first_frame_path:
-        return
-
-    result = await session.execute(
-        select(ReferenceImage)
-        .where(
-            ReferenceImage.project_id == project_id,
-            ReferenceImage.kind == "character",
-        )
-        .order_by(ReferenceImage.order_index)
-        .limit(1)
-    )
-    ref = result.scalar_one_or_none()
-    if ref:
-        shot.custom_first_frame_path = ref.storage_path
-        session.add(shot)
-
-
 async def _propagate_first_frame_to_next(
     project_id: str, shot: Shot, last_frame_path: str, session: AsyncSession
 ) -> None:
@@ -754,9 +670,8 @@ async def run_tail_frame_pipeline(
         )
 
         try:
-            # 1. Pick first frame
-            first_frame = await _pick_first_frame(project_id, shot, session)
-            shot.first_frame_path = str(first_frame) if first_frame else None
+            # 1. Pick first frame (single source of truth; nothing persisted)
+            first_frame = await pick_first_frame(project_id, shot, session)
 
             # 2. Director → generate motion_prompt. Reuse the stored prompt, EXCEPT
             #    when the shot has reference props — those must be woven into the

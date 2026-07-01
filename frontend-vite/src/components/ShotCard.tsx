@@ -711,7 +711,7 @@ export function ShotCard({
                 videoUrl={shot.video_path}
                 trimEndSec={shot.trim_end_sec ?? null}
                 audioUrl={shot.vc_audio_url ?? null}
-                poster={shot.last_frame_path || shot.first_frame_path || null}
+                poster={shot.last_frame_path || shot.custom_first_frame_path || null}
               />
             </div>
           )}
@@ -915,7 +915,7 @@ export function ShotCard({
                 onPreview={setPreviewUrl}
                 onDelete={handleDeleteFirstFrame}
                 menuItems={[
-                  { icon: Crop, label: '提取本镜首帧', disabled: !shot.first_frame_path, onClick: handleExtractFirstFrame },
+                  { icon: Crop, label: '提取本镜首帧', disabled: shot.status !== 'completed', onClick: handleExtractFirstFrame },
                   { icon: ArrowLeftToLine, label: '提取上一镜末帧', disabled: shot.shot_id <= 1, onClick: handleUsePrevLastFrame },
                   { icon: Upload, label: '上传首帧', onClick: () => firstFrameInputRef.current?.click() },
                 ]}

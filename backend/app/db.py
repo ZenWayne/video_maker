@@ -103,6 +103,15 @@ async def _run_migrations(conn):
             sa.text("ALTER TABLE shots DROP COLUMN skip_tail_frame")
         )
 
+    # first_frame_path removed (single-source): custom_first_frame_path is the ONLY
+    # stored first-frame field; the frame fed to the model is resolved on demand by
+    # services.first_frame.pick_first_frame. The old persisted "resolved" copy was a
+    # cache that went stale when a 首帧 was re-uploaded. Drop the dead column.
+    if await _has_column("shots", "first_frame_path"):
+        await conn.execute(
+            sa.text("ALTER TABLE shots DROP COLUMN first_frame_path")
+        )
+
     if not await _has_column("shots", "auto_trim"):
         await conn.execute(
             sa.text("ALTER TABLE shots ADD COLUMN auto_trim BOOLEAN NOT NULL DEFAULT 1")
