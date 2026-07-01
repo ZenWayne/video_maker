@@ -4,7 +4,7 @@
 
 import { useState, useRef, useEffect } from 'react'
 import type { ComponentType } from 'react'
-import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User, ChevronDown, Crop, Upload } from 'lucide-react'
+import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User, ChevronDown, Crop, Upload, ArrowLeftToLine } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -253,6 +253,14 @@ export function ShotCard({
     try {
       const r = await api.extractFirstFrame(projectId, shot.shot_id)
       onShotUpdated?.(shot.shot_id, { custom_first_frame_path: r.custom_first_frame_path })
+    } catch { /* handled by parent */ }
+  }
+
+  const handleUsePrevLastFrame = async () => {
+    if (!projectId) return
+    try {
+      const r = await api.usePrevLastFrame(projectId, shot.shot_id)
+      onShotUpdated?.(shot.shot_id, { custom_first_frame_path: `${r.custom_first_frame_path}?v=${Date.now()}` })
     } catch { /* handled by parent */ }
   }
 
@@ -908,6 +916,7 @@ export function ShotCard({
                 onDelete={handleDeleteFirstFrame}
                 menuItems={[
                   { icon: Crop, label: '提取本镜首帧', disabled: !shot.first_frame_path, onClick: handleExtractFirstFrame },
+                  { icon: ArrowLeftToLine, label: '提取上一镜末帧', disabled: shot.shot_id <= 1, onClick: handleUsePrevLastFrame },
                   { icon: Upload, label: '上传首帧', onClick: () => firstFrameInputRef.current?.click() },
                 ]}
               />
@@ -1083,7 +1092,7 @@ export function ShotCard({
           aspectRatio={aspectRatio}
           open={isTrimOpen}
           onOpenChange={setIsTrimOpen}
-          onTrimmed={({ video_path, last_frame_path, trim_frames, trim_end_sec, version }) => {
+          onTrimmed={({ video_path, last_frame_path, trim_frames, trim_end_sec, version, next_shot }) => {
             setVideoVersion(version)
             onShotUpdated?.(shot.shot_id, {
               video_path: `${video_path}?v=${version}`,
@@ -1091,6 +1100,13 @@ export function ShotCard({
               trim_frames,
               trim_end_sec,
             })
+            // The next (un-generated) shot's first frame was auto-repointed to this
+            // shot's new trimmed last frame — reflect it without a full refetch.
+            if (next_shot) {
+              onShotUpdated?.(next_shot.shot_id, {
+                custom_first_frame_path: `${next_shot.custom_first_frame_path}?v=${version}`,
+              })
+            }
           }}
         />
       )}

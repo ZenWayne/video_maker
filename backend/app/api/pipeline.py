@@ -20,7 +20,7 @@ from app.db import get_session
 from app.main import get_redis
 from app.models.project import Project, Shot, ReferenceImage
 from app.models.schemas import (
-    ProjectResponse, StoryboardUpdate, ShotUpdate, ShotAiEditRequest,
+    ProjectResponse, StoryboardUpdate, StoryboardReplace, ShotUpdate, ShotAiEditRequest,
     ShotTrimRequest, RegenerateShotsRequest, PipelineActionResponse,
     ExportRequest, JoinPreviewRequest,
 )
@@ -247,6 +247,98 @@ async def patch_storyboard(
     )
 
 
+@router.put("/projects/{project_id}/storyboard", response_model=ProjectResponse)
+async def put_storyboard(
+    project_id: str,
+    body: StoryboardReplace,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Full-replace storyboard: upsert shots by shot_id, delete missing, rewrite storyboard.json.
+
+    Only allowed in SCRIPT_REVIEW (pre-render): no generated material files at stake.
+    """
+    project = await _get_project_or_404(project_id, session)
+
+    if project.status != ProjectStatus.SCRIPT_REVIEW.value:
+        raise HTTPException(
+            status_code=409,
+            detail="Project must be in script_review status to replace storyboard",
+        )
+
+    result = await session.execute(select(Shot).where(Shot.project_id == project_id))
+    existing = {s.shot_id: s for s in result.scalars().all()}
+    payload_ids = {item.shot_id for item in body.shots}
+
+    # Delete shots absent from the payload + remove any leftover output dir (CLAUDE.md audit).
+    for shot_id, shot in existing.items():
+        if shot_id not in payload_ids:
+            await session.delete(shot)
+            s_dir = shot_dir(project_id, shot_id)
+            if s_dir.exists():
+                shutil.rmtree(s_dir, ignore_errors=True)
+
+    # Upsert shots present in the payload.
+    for item in body.shots:
+        shot = existing.get(item.shot_id)
+        if shot is None:
+            shot = Shot(project_id=project_id, shot_id=item.shot_id)
+            session.add(shot)
+        shot.text = item.text
+        shot.shot_type = item.shot_type
+        shot.visual_description = item.visual_description
+        shot.shot_duration = item.shot_duration
+        shot.align_with_previous = item.align_with_previous
+        shot.reference_image_hint = item.reference_image_hint
+
+    project.scene_overview = body.scene_overview
+
+    # Rewrite storyboard.json to match (DB is source of truth).
+    sb_path = storyboard_path(project_id)
+    sb_path.parent.mkdir(parents=True, exist_ok=True)
+    sb_path.write_text(
+        json.dumps(
+            {
+                "scene_overview": body.scene_overview,
+                "shots": [item.model_dump() for item in body.shots],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    project.storyboard_path = str(sb_path)
+    project.updated_at = datetime.utcnow()
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+
+    from app.models.schemas import Storyboard
+    storyboard = None
+    if project.storyboard_path:
+        try:
+            sb_data = json.loads(Path(project.storyboard_path).read_text())
+            storyboard = Storyboard(**sb_data)
+        except Exception:
+            pass
+
+    return ProjectResponse(
+        id=project.id,
+        title=project.title,
+        theme_text=project.theme_text,
+        creator_name=project.creator_name,
+        status=project.status,
+        scene_overview=project.scene_overview,
+        storyboard_path=project.storyboard_path,
+        final_video_path=project.final_video_path,
+        error_message=project.error_message,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+        reference_images=[],
+        shots=[],
+        storyboard=storyboard,
+    )
+
+
 @router.post("/projects/{project_id}/approve-script", status_code=202)
 async def approve_script(
     project_id: str,
@@ -431,6 +523,7 @@ async def patch_shot(
         "use_prev_last_frame": shot.use_prev_last_frame,
         "shot_duration": shot.shot_duration,
         "auto_trim": shot.auto_trim,
+        "video_path": shot.video_path,
     }
 
 
@@ -1183,6 +1276,48 @@ async def extract_first_frame(
     return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
 
 
+@router.post("/projects/{project_id}/shots/{shot_id}/use-prev-last-frame")
+async def use_prev_last_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Copy the PREVIOUS shot's current last frame into this shot's custom_first_frame_path.
+
+    The previous shot's last_frame_path already reflects any trim (trim re-extracts
+    it), so this picks up the trimmed tail. Stored as a stable per-shot copy under
+    custom_frames/ — a genuine user override that survives the previous shot's
+    regeneration and is preserved by the auto-continuity logic.
+    """
+    await _get_project_or_404(project_id, session)
+    if shot_id <= 1:
+        raise HTTPException(status_code=400, detail="No previous shot")
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    prev_result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id - 1)
+    )
+    prev = prev_result.scalar_one_or_none()
+    src_str = prev.last_frame_path if prev else None
+    if not src_str or not Path(src_str).exists():
+        raise HTTPException(status_code=400, detail="Previous shot has no last frame")
+
+    dest_dir = shot_custom_frames_dir(project_id, shot_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
+    shutil.copy2(src_str, str(dest))
+
+    shot.custom_first_frame_path = str(dest)
+    await session.commit()
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+
+
 @router.post("/projects/{project_id}/shots/{shot_id}/extract-last-frame")
 async def extract_last_frame(
     project_id: str,
@@ -1350,24 +1485,34 @@ async def get_shot_waveform(
 
 async def _repoint_next_first_frame(
     project_id: str, shot_id: int, last_frame_path: str, session: AsyncSession
-) -> None:
+) -> tuple[int, str] | None:
     """Point the NEXT shot's auto first-frame at last_frame_path (preserve user overrides).
 
     Mirrors worker.tasks._propagate_first_frame_to_next: re-point when the next shot's
     custom_first_frame_path is empty or itself an auto-propagated last frame; never
-    clobber a genuine user override stored under custom_frames/.
+    clobber a genuine user override stored under custom_frames/. Only touches the next
+    shot while it is still un-generated.
+
+    Returns (next_shot_id, last_frame_path) when it actually repointed, else None — so
+    callers (e.g. trim) can surface the change to the frontend without a full refetch.
     """
     res = await session.execute(
         select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id + 1)
     )
     nxt = res.scalar_one_or_none()
     if nxt is None or not nxt.use_prev_last_frame:
-        return
+        return None
+    # Only auto-adjust the next shot while it is still un-generated; never touch
+    # the first frame of an already-rendered shot.
+    if nxt.video_path:
+        return None
     existing = nxt.custom_first_frame_path
     is_user_override = bool(existing) and "custom_frames" in existing
     if not is_user_override and existing != last_frame_path:
         nxt.custom_first_frame_path = last_frame_path
         session.add(nxt)
+        return (nxt.shot_id, last_frame_path)
+    return None
 
 
 async def _commit_new_current_video(
@@ -1450,7 +1595,7 @@ async def trim_shot_video(
     frame_idx = (n - 1) if n < total else (total - 1)
     extract_frame_at(str(source), frame_idx, str(new_lf))
     shot.last_frame_path = str(new_lf)
-    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+    repointed = await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
 
     # 3. Last frame changed → reset CC. VC is untouched.
     # Note: last_frame_pre_cc.png is already removed by the glob above.
@@ -1460,7 +1605,7 @@ async def trim_shot_video(
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
 
-    return {
+    resp = {
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "trim_frames": shot.trim_frames,
@@ -1468,6 +1613,14 @@ async def trim_shot_video(
         "version": ts,
         **get_video_info(str(source)),
     }
+    # If the next (un-generated) shot's first frame was auto-repointed to the new
+    # trimmed last frame, surface it so the UI updates without a full refetch.
+    if repointed:
+        resp["next_shot"] = {
+            "shot_id": repointed[0],
+            "custom_first_frame_path": to_media_url(repointed[1]),
+        }
+    return resp
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/restore-trim")

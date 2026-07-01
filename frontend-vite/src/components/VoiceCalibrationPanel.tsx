@@ -9,6 +9,8 @@ export interface VoiceCalibrationPanelProps {
   onRemove: () => void
   onToggleAuto: (enabled: boolean) => void
   onCalibrateAll: () => void
+  /** When true, drop the standalone card wrapper so this can sit inside a combined panel. */
+  embedded?: boolean
 }
 
 export function VoiceCalibrationPanel({
@@ -19,13 +21,14 @@ export function VoiceCalibrationPanel({
   onRemove,
   onToggleAuto,
   onCalibrateAll,
+  embedded = false,
 }: VoiceCalibrationPanelProps) {
   const fileRef = useRef<HTMLInputElement>(null)
   const hasBaseVoice = !!referenceVoicePath || referenceVoiceShotId != null
   const fileName = referenceVoicePath ? referenceVoicePath.split('/').pop() : null
 
   return (
-    <div className="rounded-lg border bg-white p-4 shadow-sm space-y-3">
+    <div className={embedded ? 'space-y-3' : 'rounded-lg border bg-white p-4 shadow-sm space-y-3'}>
       <div className="flex items-center justify-between">
         <span className="text-sm font-semibold text-zinc-800">音色校准</span>
         {hasBaseVoice && (

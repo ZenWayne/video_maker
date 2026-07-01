@@ -625,6 +625,7 @@ class WorkerSettings:
 | `POST` | `/api/projects/{id}/start` | DRAFT → SCRIPTING | 校验 ≥1 张 character 图 |
 | `POST` | `/api/projects/{id}/regenerate-script` | SCRIPT_REVIEW → SCRIPTING | 归档旧 storyboard，清空 shots |
 | `PATCH` | `/api/projects/{id}/storyboard` | SCRIPT_REVIEW | 直接修改分镜内容（含 align_with_previous） |
+| `PUT` | `/api/projects/{id}/storyboard` | SCRIPT_REVIEW | 全量替换分镜：upsert shots、删除缺失 shot（含目录）、重写 storyboard.json |
 | `POST` | `/api/projects/{id}/approve-script` | SCRIPT_REVIEW → SHOT_GENERATING | |
 | `POST` | `/api/projects/{id}/regenerate-shots` | SHOT_REVIEW → SHOT_GENERATING | body `{shot_ids: [...]}` |
 | `PATCH` | `/api/projects/{id}/shots/{shot_id}` | SHOT_REVIEW | 编辑 motion_prompt，不自动重跑 |
@@ -802,3 +803,130 @@ E2E=1 uv run pytest tests/e2e/ -v
 | 级联重跑 | 不自动级联 | 成本控制（Veo 3 昂贵）+ 尊重用户意图 |
 | storyboard 存储 | JSON 文件 + SQLite 双存 | 文件归档 + DB 运行时查询，两者不冲突 |
 | 鉴权 | 无鉴权（X-User-Name header） | 内网工具，简化 MVP 范围 |
+
+---
+
+## 13. MCP 服务：台词与动作创作代理
+
+### 13.1 概述
+
+`mcp` 服务是一个 **Model Context Protocol (MCP) 服务端**，专为外部 LLM 代理提供对项目分镜内容的读写接口，使代理能够批量创作台词（`text`）和动作提示词（`motion_prompt`），而无需直接访问数据库或了解 REST 细节。
+
+**MCP 服务本身不调用任何 LLM**，所有 AI 能力由接入的外部代理（如 Claude、GPT-4o 等）提供。
+
+### 13.2 PUT /api/projects/{id}/storyboard — 全量替换分镜
+
+与现有 `PATCH /storyboard`（部分更新）不同，`PUT /storyboard` 执行**全量替换**语义：
+
+| 特性 | PATCH /storyboard | PUT /storyboard |
+|---|---|---|
+| 字段 | 均可选 | `scene_overview` + `shots` 均必填 |
+| Shot 处理 | 按 `shot_id` 更新已有 shot | upsert + 删除 payload 中不存在的 shot |
+| 文件清理 | 不清理 | 删除多余 shot 对应的存储目录 |
+| storyboard.json | 不重写 | 重写（与 DB 保持一致） |
+| 前置状态 | `script_review` | `script_review` |
+| 非法状态响应 | 409 | 409 |
+
+**请求体（`StoryboardReplace`）：**
+
+```json
+{
+  "scene_overview": "主人公在咖啡馆等待老朋友...",
+  "shots": [
+    {
+      "shot_id": 1,
+      "text": "你终于来了。",
+      "shot_type": "Close-up",
+      "visual_description": "主人公抬头，眼神中带着释然",
+      "shot_duration": 4,
+      "align_with_previous": false,
+      "reference_image_hint": null
+    }
+  ]
+}
+```
+
+**`ShotItem` 字段说明：**
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| `shot_id` | int | 唯一 | 分镜序号（从 1 开始），payload 内不可重复 |
+| `text` | str | 必填 | 台词内容 |
+| `shot_type` | str | `Close-up`/`Medium Shot`/`Wide Shot` | 景别 |
+| `visual_description` | str | 必填 | 动作与表情描述 |
+| `shot_duration` | int | 4–8 | 时长（秒） |
+| `align_with_previous` | bool | 默认 true | 是否与前一镜首尾帧对齐 |
+| `reference_image_hint` | str | 可选 | 参考图提示（供后续处理使用） |
+
+> **注意**：`ShotItem` 不包含 `motion_prompt`。`PUT /storyboard` 只负责结构与台词；动作提示词通过后续的 `PATCH /shots/{shot_id}` 或 MCP write 工具单独设置。
+
+**文件清理（CLAUDE.md 素材审计）：**  
+payload 中不存在的 `shot_id` 对应的数据库行会被删除，其 `storage/projects/{id}/shots/shot_{n}/` 目录也会被 `shutil.rmtree` 清除，防止读到过期素材文件。
+
+### 13.3 MCP 服务部署
+
+**Compose 服务**（`deploy/docker-compose.dev.yml`，服务名 `mcp`）：
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                       Docker Compose                     │
+│                                                          │
+│  ┌──────────────────┐  HTTP /api   ┌────────────────┐    │
+│  │  外部 LLM 代理   │ ◄──────────► │  Backend API   │    │
+│  │  (Claude 等)     │              │  :8002         │    │
+│  └────────┬─────────┘              └────────────────┘    │
+│           │ MCP (HTTP)                      ▲             │
+│           ▼                                │             │
+│  ┌──────────────────┐  REST (httpx)        │             │
+│  │  mcp 容器        │ ────────────────────►│             │
+│  │  :8765 /mcp      │                                    │
+│  └──────────────────┘                                    │
+└──────────────────────────────────────────────────────────┘
+```
+
+| 属性 | 值 |
+|---|---|
+| 镜像 | `video-maker-worker-dev`（与 `backend` / `worker` 同一镜像） |
+| 端口 | `8765`（主机）→ `8765`（容器） |
+| 传输协议 | HTTP，FastMCP 默认路径 `/mcp` |
+| 入口 | `uv run --project . python -m mcp_server.server` |
+| 配置环境变量 | `BACKEND_BASE_URL=http://video-maker-backend-dev:8002`、`MCP_HOST=0.0.0.0`、`MCP_PORT=8765` |
+| 鉴权 | 无（信任网络内部，`X-User-Name: mcp-agent` 固定注入） |
+| 依赖 | `backend` 服务（needs `backend` to be up） |
+
+**启动命令：**
+
+```bash
+make dev-mcp   # 仅启动 mcp 服务（backend 须已运行）
+```
+
+### 13.4 代码模块（backend/mcp_server/）
+
+| 文件 | 职责 |
+|---|---|
+| `server.py` | FastMCP 服务端入口，注册全部 9 个工具，`create_server(backend)` 工厂函数 |
+| `client.py` | `BackendClient` — httpx 异步封装，`BackendError(status_code, detail)` 异常类 |
+| `config.py` | `Settings` — 读取 `BACKEND_BASE_URL` / `MCP_HOST` / `MCP_PORT` 环境变量 |
+| `validation.py` | `word_count_report(text, duration)` — 字数建议报告（复用 screenwriter 规则，仅提示不阻断） |
+| `context.py` | `shape_project` / `shape_shot` / `with_neighbors` — 整形 API 响应为代理友好格式 |
+| `guidelines.py` | `AUTHORING_GUIDELINES` 常量 — 台词与动作创作约定文本 |
+
+### 13.5 两阶段创作流程
+
+MCP 代理的推荐操作顺序：
+
+```
+阶段 1：结构 + 台词
+  replace_storyboard(project_id, scene_overview, shots=[{shot_id, text, ...}, ...])
+    → 全量写入分镜结构与台词（无 motion_prompt）
+
+阶段 2：动作
+  batch_update_shots(project_id, updates=[{shot_id, motion_prompt}, ...])
+    → 批量写入各镜运镜提示词
+```
+
+> **注意**：`update_dialogue` / `update_motion` / `batch_update_shots` 底层均调用 `PATCH /shots/{shot_id}`，该端点**不做项目状态校验**，因此可在任意状态（包括视频生成中）直接修改 `text` 与 `motion_prompt`；新内容将在下次重新生成时生效。
+
+也可以用 `update_dialogue` / `update_motion` 逐镜操作；`batch_update_shots` 支持同时传 `text` 和 `motion_prompt`，允许部分成功（`"ok": false` 逐项报告错误）。
+
+工具目录详见 `backend/mcp_server/README.md`。

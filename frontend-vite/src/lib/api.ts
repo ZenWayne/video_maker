@@ -349,7 +349,7 @@ export const api = {
     projectId: string,
     shotId: number,
     endFrame: number
-  ): Promise<{ video_path: string; last_frame_path: string; trim_frames: number | null; trim_end_sec: number | null; version: number; fps: number; total_frames: number; duration: number }> => {
+  ): Promise<{ video_path: string; last_frame_path: string; trim_frames: number | null; trim_end_sec: number | null; version: number; fps: number; total_frames: number; duration: number; next_shot?: { shot_id: number; custom_first_frame_path: string } }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/trim`, { end_frame: endFrame })
   },
 
@@ -471,6 +471,11 @@ export const api = {
   // 提取本镜首帧 → 首帧配置
   extractFirstFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; custom_first_frame_path: string }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/extract-first-frame`)
+  },
+
+  // 提取上一分镜末帧 → 本镜首帧（拷贝上一镜当前尾帧，已反映裁剪）
+  usePrevLastFrame: (projectId: string, shotId: number): Promise<{ shot_id: number; custom_first_frame_path: string }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/use-prev-last-frame`)
   },
 
   // 提取本镜尾帧 → 尾帧配置

@@ -215,3 +215,32 @@ async def test_continuity_respects_use_prev_last_frame_false(db_session_factory)
 
     shot2_after = await _get_shot(db_session_factory, pid, shot_id=2)
     assert shot2_after.custom_first_frame_path is None
+
+
+@pytest.mark.asyncio
+async def test_continuity_skips_already_generated_next(db_session_factory):
+    """If the next shot is already generated (has video_path), its first frame must
+    NOT be auto-adjusted — only un-generated shots track the previous last frame."""
+    pid = "proj-ff-7"
+    new_lf = f"/fake/{pid}/shots/1/last_frame_999_cccccccc.png"
+    stale = f"/fake/{pid}/shots/1/last_frame_111_aaaaaaaa.png"
+
+    await _seed_project(db_session_factory, pid)
+    await _seed_shot(db_session_factory, pid, shot_id=1, last_frame_path=new_lf)
+    await _seed_shot(
+        db_session_factory, pid, shot_id=2,
+        use_prev_last_frame=True,
+        custom_first_frame_path=stale,
+        video_path=f"/fake/{pid}/shots/2/output_1_x.mp4",  # already generated
+    )
+
+    async with db_session_factory() as session:
+        shot1 = (await session.execute(
+            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
+        )).scalar_one()
+        await tasks._propagate_first_frame_to_next(pid, shot1, new_lf, session)
+        await session.commit()
+
+    shot2_after = await _get_shot(db_session_factory, pid, shot_id=2)
+    # Already-generated next shot is left untouched (NOT repointed to new_lf).
+    assert shot2_after.custom_first_frame_path == stale

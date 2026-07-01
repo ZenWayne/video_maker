@@ -128,6 +128,42 @@ services:
       - redis
     restart: unless-stopped
 
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: video-maker-worker-dev
+    container_name: video-maker-mcp-dev
+    ports:
+      - "8765:8765"
+    volumes:
+      - ../backend:/app:z
+      - uv-cache:/root/.cache/uv
+      - backend-venv:/app/.venv
+    env_file:
+      - path: ./config.env
+        required: true
+    working_dir: /app
+    environment:
+      BACKEND_BASE_URL: http://video-maker-backend-dev:8002
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8765"
+      HTTP_PROXY: http://host.containers.internal:10809
+      HTTPS_PROXY: http://host.containers.internal:10809
+      http_proxy: http://host.containers.internal:10809
+      https_proxy: http://host.containers.internal:10809
+      # internal backend must bypass the proxy (proxy can't resolve container names)
+      NO_PROXY: video-maker-backend-dev,localhost,127.0.0.1
+      no_proxy: video-maker-backend-dev,localhost,127.0.0.1
+    # host.containers.internal does not route to the host under this network; pin it.
+    extra_hosts:
+      - "host.containers.internal:100.121.231.24"
+    command: >
+      uv run --project . python -m mcp_server.server
+    depends_on:
+      - backend
+    restart: unless-stopped
+
   playwright:
     image: mcr.microsoft.com/playwright:v1.41.0-jammy
     container_name: video-maker-playwright

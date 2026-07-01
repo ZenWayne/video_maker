@@ -23,6 +23,7 @@ interface TrimDialogProps {
     trim_frames: number | null
     trim_end_sec: number | null
     version: number
+    next_shot?: { shot_id: number; custom_first_frame_path: string }
   }) => void
 }
 
@@ -174,6 +175,7 @@ export function TrimDialog({
         trim_frames: result.trim_frames,
         trim_end_sec: result.trim_end_sec,
         version: result.version,
+        next_shot: result.next_shot,
       })
       setTotalFrames(result.total_frames)
       setDuration(result.duration)

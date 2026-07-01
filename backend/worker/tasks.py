@@ -682,6 +682,11 @@ async def _propagate_first_frame_to_next(
     next_shot = result.scalar_one_or_none()
     if next_shot is None or not next_shot.use_prev_last_frame:
         return
+    # Only auto-adjust the NEXT shot while it is still un-generated — once it has
+    # its own rendered video, leave its first frame alone (changing it would
+    # mismatch the already-generated clip).
+    if next_shot.video_path:
+        return
     existing = next_shot.custom_first_frame_path
     is_user_override = bool(existing) and "custom_frames" in existing
     if not is_user_override and existing != last_frame_path:
