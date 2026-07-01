@@ -38,6 +38,12 @@ not suggestions. (The video-maker-dialogue MCP serves this same content via
 - **Lip-sync:** call `update_motion` with `sync_lip_marker=true` (default) and the
   lip-sync line — `The character says: "..."` — is appended and kept in sync with
   the current dialogue automatically. Do NOT hand-write that line yourself.
+- **Props (静止呈现优先):** when a shot shows a prop (card, object), default to a
+  STATIC presentation — the prop is already held and kept steadily presented to
+  camera; do NOT write a pick-up action. Only if the first frame has empty hands
+  must the prop be **carried in from off-camera** (hand reaches off-frame and
+  brings it in). A prop must **never appear, fade, or materialize in mid-air**
+  inside the frame. Prefer authoring so the prop is present in the first frame.
 
 ## 3. Storyboard structure & status
 
