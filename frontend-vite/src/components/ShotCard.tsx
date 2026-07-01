@@ -1013,7 +1013,7 @@ export function ShotCard({
                   <User className="w-4 h-4 mr-1" />{shot.cc_status === 'done' ? '重新校准' : '校准人物'}
                 </Button>
               )}
-              {(shot.status === 'completed' || shot.status === 'failed' || shot.status === 'pending') && onRedraw && (
+              {onRedraw && (
                 <Button
                   variant="ghost"
                   size="sm"
