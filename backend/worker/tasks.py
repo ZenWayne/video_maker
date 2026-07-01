@@ -318,10 +318,10 @@ async def run_shot_pipeline(
         )
 
         try:
-            # If motion_prompt and first_frame are already set, reuse them
-            if shot.motion_prompt and shot.first_frame_path:
+            # Reuse the existing director take (the expensive LLM call) when a
+            # motion_prompt is already stored; otherwise run the director now.
+            if shot.motion_prompt:
                 motion_prompt = shot.motion_prompt
-                first_frame = Path(shot.first_frame_path) if shot.first_frame_path else None
             else:
                 # Run director
                 shot.status = ShotStatus.PROMPT_GENERATING.value
@@ -350,9 +350,15 @@ async def run_shot_pipeline(
                 await session.refresh(shot)
                 shot.motion_prompt = motion_prompt
 
-                # Pick first frame (None = multi-image reference mode)
-                first_frame = await _pick_first_frame(project_id, shot, session)
-                shot.first_frame_path = str(first_frame) if first_frame else None
+            # SINGLE SOURCE OF TRUTH for the first frame: always re-resolve from the
+            # authoritative inputs (custom_first_frame_path → prev last frame → refs).
+            # NEVER read back shot.first_frame_path as a generation input — it is a
+            # derived record of the last run and goes stale the moment the user
+            # re-uploads a first frame (custom_first_frame_path), which is exactly
+            # what caused regeneration to keep feeding the old image.
+            # (None = multi-image reference mode.)
+            first_frame = await _pick_first_frame(project_id, shot, session)
+            shot.first_frame_path = str(first_frame) if first_frame else None
 
             # Resolve reference image paths for multi-image mode
             ref_paths: Optional[list[str]] = None

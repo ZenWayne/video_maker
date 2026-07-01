@@ -397,8 +397,11 @@ async def regenerate_shots(
         raise HTTPException(status_code=409, detail=str(e))
 
     # Reset specified shots to PENDING and clear post-processing state.
-    # Keep motion_prompt / first_frame_path so the re-run reuses the existing
-    # director take and first frame instead of regenerating them.
+    # Keep motion_prompt so the re-run reuses the existing (expensive) director
+    # take instead of regenerating it. The first frame is NOT reused: the worker
+    # always re-resolves it from custom_first_frame_path / continuity via
+    # _pick_first_frame, so first_frame_path is a derived record only and a fresh
+    # first-frame upload is always honored.
     # Path-as-truth: target_last_frame_path is left EXACTLY as stored.
     # Whether the tail frame is actually used is decided by the worker
     # (resolve_tail_frame checks file presence at run time).
