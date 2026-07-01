@@ -70,7 +70,7 @@ async def test_extract_first_frame_200_distinct_ts_uuid(client, db_session_facto
     """200; returned URL basename is ts_uuid and DISTINCT from source path."""
     pid = await _make_project(db_session_factory, status="shot_review")
     src = _write_source_file(tmp_path, "first_frame.png")
-    await _seed_shot(db_session_factory, pid, first_frame_path=str(src))
+    await _seed_shot(db_session_factory, pid, custom_first_frame_path=str(src))
 
     r = await client.post(
         f"/api/projects/{pid}/shots/1/extract-first-frame",
@@ -88,7 +88,7 @@ async def test_extract_first_frame_db_and_file_exist(client, db_session_factory,
     """DB field set; new file exists on disk."""
     pid = await _make_project(db_session_factory, status="shot_review")
     src = _write_source_file(tmp_path, "first_frame.png")
-    await _seed_shot(db_session_factory, pid, first_frame_path=str(src))
+    await _seed_shot(db_session_factory, pid, custom_first_frame_path=str(src))
 
     await client.post(
         f"/api/projects/{pid}/shots/1/extract-first-frame",
@@ -103,23 +103,23 @@ async def test_extract_first_frame_db_and_file_exist(client, db_session_factory,
 
 
 async def test_extract_first_frame_source_still_exists(client, db_session_factory, tmp_path):
-    """Source first_frame_path must NOT be deleted (copy, not move)."""
+    """Source frame must NOT be deleted (copy, not move)."""
     pid = await _make_project(db_session_factory, status="shot_review")
     src = _write_source_file(tmp_path, "first_frame.png")
-    await _seed_shot(db_session_factory, pid, first_frame_path=str(src))
+    await _seed_shot(db_session_factory, pid, custom_first_frame_path=str(src))
 
     await client.post(
         f"/api/projects/{pid}/shots/1/extract-first-frame",
         headers=HEADERS,
     )
 
-    assert src.exists(), "Source first_frame_path must remain after extract (copy, not move)"
+    assert src.exists(), "Source frame must remain after extract (copy, not move)"
 
 
 async def test_extract_first_frame_400_when_field_none(client, db_session_factory, tmp_path):
-    """400 when first_frame_path is None (field empty)."""
+    """400 when there is no resolvable first frame (no custom / prev / char ref)."""
     pid = await _make_project(db_session_factory, status="shot_review")
-    await _seed_shot(db_session_factory, pid)  # first_frame_path defaults to None
+    await _seed_shot(db_session_factory, pid)  # no custom first frame, no prev shot, no character ref -> unresolvable
 
     r = await client.post(
         f"/api/projects/{pid}/shots/1/extract-first-frame",
@@ -129,10 +129,10 @@ async def test_extract_first_frame_400_when_field_none(client, db_session_factor
 
 
 async def test_extract_first_frame_400_when_file_absent(client, db_session_factory, tmp_path):
-    """400 when first_frame_path is set but the file doesn't exist on disk."""
+    """400 when the resolved first frame file does not exist on disk."""
     pid = await _make_project(db_session_factory, status="shot_review")
     ghost_path = tmp_path / "ghost_first_frame.png"  # NOT created on disk
-    await _seed_shot(db_session_factory, pid, first_frame_path=str(ghost_path))
+    await _seed_shot(db_session_factory, pid, custom_first_frame_path=str(ghost_path))
 
     r = await client.post(
         f"/api/projects/{pid}/shots/1/extract-first-frame",

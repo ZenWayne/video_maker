@@ -54,7 +54,7 @@ async def test_motion_prompt_persisted_after_video_generation(
     monkeypatch.setattr(tasks, "get_provider", lambda: fake_provider)
     monkeypatch.setattr(tasks, "run_director_agent", AsyncMock(return_value=DIRECTOR_PROMPT))
     monkeypatch.setattr(tasks, "generate_video", AsyncMock(return_value=b"fake-mp4-bytes"))
-    monkeypatch.setattr(tasks, "_pick_first_frame", AsyncMock(return_value=None))
+    monkeypatch.setattr(tasks, "pick_first_frame", AsyncMock(return_value=None))
     monkeypatch.setattr(tasks, "extract_last_frame", MagicMock(return_value=None))
 
     ctx = {"session_factory": db_session_factory, "redis": redis}

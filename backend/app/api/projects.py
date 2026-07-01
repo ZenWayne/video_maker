@@ -36,7 +36,6 @@ def _shot_to_dict(s) -> dict:
         "status": s.status,
         "align_with_previous": s.align_with_previous,
         "motion_prompt": s.motion_prompt,
-        "first_frame_path": to_media_url(s.first_frame_path),
         "video_path": to_media_url(s.video_path),
         "last_frame_path": to_media_url(s.last_frame_path),
         "word_count_warning": s.word_count_warning,

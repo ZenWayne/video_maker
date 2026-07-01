@@ -49,7 +49,6 @@ class ShotResponse(BaseModel):
     align_with_previous: bool
     use_prev_last_frame: bool = False
     motion_prompt: Optional[str] = None
-    first_frame_path: Optional[str] = None
     video_path: Optional[str] = None
     last_frame_path: Optional[str] = None
     word_count_warning: bool

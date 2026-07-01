@@ -66,7 +66,6 @@ export interface Shot {
   align_with_previous: boolean
   use_prev_last_frame: boolean
   motion_prompt: string | null
-  first_frame_path: string | null
   video_path: string | null
   last_frame_path: string | null
   word_count_warning: boolean

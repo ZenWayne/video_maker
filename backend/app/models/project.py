@@ -133,7 +133,6 @@ class Shot(Base):
     align_with_previous = Column(Boolean, nullable=False, default=True)
     use_prev_last_frame = Column(Boolean, nullable=False, default=True)
     motion_prompt = Column(Text, nullable=True)
-    first_frame_path = Column(Text, nullable=True)
     video_path = Column(Text, nullable=True)
     last_frame_path = Column(Text, nullable=True)
     veo_operation_id = Column(Text, nullable=True)

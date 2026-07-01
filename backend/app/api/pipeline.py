@@ -24,6 +24,7 @@ from app.models.schemas import (
     ShotTrimRequest, RegenerateShotsRequest, PipelineActionResponse,
     ExportRequest, JoinPreviewRequest,
 )
+from app.services.first_frame import pick_first_frame
 from app.services.state_machine import (
     ProjectStatus, ShotStatus,
     transition_project_status, InvalidTransitionError
@@ -398,10 +399,9 @@ async def regenerate_shots(
 
     # Reset specified shots to PENDING and clear post-processing state.
     # Keep motion_prompt so the re-run reuses the existing (expensive) director
-    # take instead of regenerating it. The first frame is NOT reused: the worker
+    # take instead of regenerating it. The first frame is never stored: the worker
     # always re-resolves it from custom_first_frame_path / continuity via
-    # _pick_first_frame, so first_frame_path is a derived record only and a fresh
-    # first-frame upload is always honored.
+    # pick_first_frame, so a fresh 首帧 upload is always honored.
     # Path-as-truth: target_last_frame_path is left EXACTLY as stored.
     # Whether the tail frame is actually used is decided by the worker
     # (resolve_tail_frame checks file presence at run time).
@@ -1256,7 +1256,12 @@ async def extract_first_frame(
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Copy the shot's extracted first frame into custom_first_frame_path (ts_uuid filename)."""
+    """Pin the shot's resolved first frame into custom_first_frame_path (ts_uuid filename).
+
+    The source is resolved on demand by the single-source resolver (there is no
+    stored first_frame_path): custom_first_frame_path → previous shot's last frame
+    → character reference.
+    """
     await _get_project_or_404(project_id, session)
     result = await session.execute(
         select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
@@ -1265,9 +1270,13 @@ async def extract_first_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
-    src_str = shot.first_frame_path
-    if not src_str or not Path(src_str).exists():
+    try:
+        src = await pick_first_frame(project_id, shot, session)
+    except ValueError:
+        src = None
+    if src is None or not src.exists():
         raise HTTPException(status_code=400, detail="Shot has no first frame or file is missing")
+    src_str = str(src)
 
     dest_dir = shot_custom_frames_dir(project_id, shot_id)
     dest_dir.mkdir(parents=True, exist_ok=True)

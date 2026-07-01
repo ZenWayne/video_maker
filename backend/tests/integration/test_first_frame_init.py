@@ -85,7 +85,7 @@ async def test_shot1_init_sets_char_ref_path(db_session_factory):
         shot = (await session.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
-        await tasks._init_shot1_first_frame(pid, shot, session)
+        await tasks.init_shot1_first_frame(pid, shot, session)
         await session.commit()
 
     shot_after = await _get_shot(db_session_factory, pid, shot_id=1)
@@ -106,7 +106,7 @@ async def test_shot1_init_no_char_ref_stays_none(db_session_factory):
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
         # Must NOT raise even when there is no character ref
-        await tasks._init_shot1_first_frame(pid, shot, session)
+        await tasks.init_shot1_first_frame(pid, shot, session)
         await session.commit()
 
     shot_after = await _get_shot(db_session_factory, pid, shot_id=1)
