@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -11,8 +12,30 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.db import init_db
 
+logger = logging.getLogger(__name__)
+
 # Global Redis client
 _redis_client: aioredis.Redis | None = None
+
+
+def check_video_provider() -> None:
+    """Log the active video provider, warning loudly if it is not ``vertex``.
+
+    Project policy mandates Vertex AI (Veo via Google). The committed
+    ``deploy/config.yml`` defaults ``VIDEO_PROVIDER`` to ``vertex``, but the
+    gitignored ``deploy/config.env`` (loaded by compose as ``env_file``) can
+    silently override it back to ``kie``. This makes such a revert visible in
+    the backend logs at startup instead of failing silently.
+    """
+    if settings.video_provider != "vertex":
+        logger.warning(
+            "VIDEO_PROVIDER=%r is NOT 'vertex' — project policy requires Vertex AI. "
+            "deploy/config.env likely overrides the committed config.yml default; "
+            "run `make config` to resync it back to vertex.",
+            settings.video_provider,
+        )
+    else:
+        logger.info("Video provider: vertex (Veo via Vertex AI)")
 
 
 async def get_redis() -> aioredis.Redis:
@@ -28,6 +51,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _redis_client
 
     # Startup
+    # Surface the active video provider (loud warning if not vertex)
+    check_video_provider()
+
     # Initialize database tables
     await init_db()
 
