@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>静音帧剪切参考 · 设计稿</title>
+<style>
+  :root{
+    --bg:#0b0b0e; --panel:#17171c; --panel2:#1e1e25; --line:#2a2a33;
+    --txt:#e7e7ea; --muted:#9a9aa6; --zinc:#a1a1aa; --accent:#22c55e;
+    --amber:#f59e0b; --amber-soft:rgba(245,158,11,.16);
+  }
+  *{box-sizing:border-box;font-family:ui-sans-serif,system-ui,"PingFang SC","Microsoft YaHei",sans-serif}
+  body{margin:0;background:#050507;color:var(--txt);padding:28px;display:flex;gap:24px;flex-wrap:wrap;align-items:flex-start}
+  .modal{width:560px;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.55);overflow:hidden}
+  .head{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}
+  .head h2{margin:0;font-size:15px;font-weight:600}
+  .head .x{color:var(--muted);font-size:18px}
+  .body{padding:18px}
+  .preview{aspect-ratio:16/9;background:linear-gradient(135deg,#23232b,#14141a);border:1px solid var(--line);border-radius:10px;display:flex;align-items:center;justify-content:center;color:#4b4b57;font-size:13px;position:relative}
+  .preview .badge{position:absolute;top:8px;left:8px;background:rgba(0,0,0,.5);border:1px solid var(--line);border-radius:6px;padding:2px 8px;font-size:11px;color:var(--muted)}
+
+  /* ---- silence readout callout (the NEW part) ---- */
+  .callout{margin-top:14px;background:var(--amber-soft);border:1px solid rgba(245,158,11,.4);border-radius:10px;padding:12px 14px;display:flex;gap:12px;align-items:center}
+  .callout .ico{width:34px;height:34px;border-radius:8px;background:rgba(245,158,11,.25);display:flex;align-items:center;justify-content:center;font-size:17px}
+  .callout .txt{flex:1;font-size:13px;line-height:1.5}
+  .callout .txt b{color:var(--amber)}
+  .callout .apply{background:var(--amber);color:#1a1205;border:none;border-radius:8px;padding:8px 12px;font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap}
+
+  /* ---- waveform / timeline ---- */
+  .wfwrap{margin-top:16px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 12px 8px}
+  .wflabel{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:6px}
+  .wf{position:relative;height:70px;border-radius:6px;overflow:hidden;background:#101015}
+  /* trailing silence shaded region */
+  .silence{position:absolute;top:0;bottom:0;right:0;width:16%;background:var(--amber-soft);border-left:1px dashed var(--amber)}
+  .silence .tag{position:absolute;top:4px;left:6px;font-size:10px;color:var(--amber)}
+  /* bars */
+  .bars{position:absolute;inset:0;display:flex;align-items:center;gap:2px;padding:0 4px}
+  .bar{flex:1;background:linear-gradient(var(--zinc),#5b5b66);border-radius:1px;opacity:.85}
+  /* speech-end reference marker */
+  .ref{position:absolute;top:-2px;bottom:-2px;left:84%;width:2px;background:var(--amber)}
+  .ref .cap{position:absolute;top:-20px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:10px;color:var(--amber);background:#050507;padding:1px 5px;border:1px solid rgba(245,158,11,.5);border-radius:5px}
+  /* manual trim handle */
+  .handle{position:absolute;top:0;bottom:0;left:92%;width:2px;background:var(--accent)}
+  .handle .grip{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:10px;height:22px;border-radius:4px;background:var(--accent)}
+  .handle .cap{position:absolute;bottom:-20px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:10px;color:var(--accent)}
+  .scale{display:flex;justify-content:space-between;font-size:10px;color:#54545f;margin-top:16px}
+
+  /* ---- numeric strip ---- */
+  .stats{margin-top:14px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .stat{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 10px}
+  .stat .k{font-size:10.5px;color:var(--muted)}
+  .stat .v{font-size:15px;font-weight:600;margin-top:2px}
+  .stat .v.amber{color:var(--amber)}
+  .stat .v.green{color:var(--accent)}
+
+  /* ---- controls ---- */
+  .row{margin-top:16px;display:flex;align-items:center;gap:8px}
+  .btn{background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:8px 12px;font-size:12.5px;cursor:pointer;display:flex;align-items:center;gap:6px}
+  .btn.detect{border-color:rgba(245,158,11,.5);color:var(--amber)}
+  .btn.primary{background:var(--accent);color:#04120a;border:none;font-weight:600;margin-left:auto}
+  .spacer{flex:1}
+  .foot-note{margin-top:12px;font-size:11px;color:#6b6b76;line-height:1.5}
+
+  .legend{width:300px;color:var(--muted);font-size:13px;line-height:1.7}
+  .legend h3{color:var(--txt);font-size:14px;margin:0 0 8px}
+  .legend .dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:middle}
+  .legend code{background:#17171c;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#cfcfd6}
+</style>
+</head>
+<body>
+  <div class="modal">
+    <div class="head"><h2>裁剪镜头 · Shot 2</h2><span class="x">✕</span></div>
+    <div class="body">
+      <div class="preview"><span class="badge">预览 · 第 168 帧</span>16 : 9 视频预览</div>
+
+      <!-- NEW: silence cut reference callout -->
+      <div class="callout">
+        <div class="ico">🔇</div>
+        <div class="txt">检测到尾部静音 <b>17 帧 (0.71s)</b> · 建议从 <b>第 168 帧</b> 剪切（末句说完 +3 帧呼吸感）</div>
+        <button class="apply">采用参考 →</button>
+      </div>
+
+      <!-- waveform with silence region + reference marker + manual handle -->
+      <div class="wfwrap">
+        <div class="wflabel"><span>波形 / 时间轴</span><span>185 帧 · 24fps · 7.71s</span></div>
+        <div class="wf">
+          <div class="bars" id="bars"></div>
+          <div class="silence"><span class="tag">尾部静音</span></div>
+          <div class="ref"><span class="cap">静音起点 · 第168帧（剪切参考）</span></div>
+          <div class="handle"><span class="grip"></span><span class="cap">手动裁剪点 · 170</span></div>
+        </div>
+        <div class="scale"><span>0</span><span>帧</span><span>185</span></div>
+      </div>
+
+      <!-- numeric readout: 返回帧数 -->
+      <div class="stats">
+        <div class="stat"><div class="k">总帧数</div><div class="v">185</div></div>
+        <div class="stat"><div class="k">建议剪切点（静音起点）</div><div class="v amber">168 帧</div></div>
+        <div class="stat"><div class="k">可裁掉的尾部静音</div><div class="v amber">17 帧</div></div>
+      </div>
+
+      <div class="row">
+        <button class="btn detect">🎧 重新检测静音</button>
+        <button class="btn">‹ 帧</button>
+        <button class="btn">帧 ›</button>
+        <button class="btn">▶ 预览</button>
+        <button class="btn primary">按参考剪切 → 168</button>
+      </div>
+      <div class="foot-note">「采用参考 / 按参考剪切」= 把手动裁剪点吸附到静音起点（第 168 帧），点确认后走现有 <code>/trim</code> 端点，不改动检测逻辑。</div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <h3>这版设计稿在做什么</h3>
+    <p><span class="dot" style="background:#f59e0b"></span><b style="color:#f59e0b">静音剪切参考（新增露出）</b>：后端 <code>speech_end_info()</code> 已能返回尾部静音起点的<b>秒 + 帧号</b>。这版把它以「帧数」形式明确呈现：</p>
+    <p>① 顶部黄色提示条：<code>尾部静音 17 帧 · 建议第 168 帧</code>；<br>
+       ② 波形上黄色参考线（静音起点）与绿色手动裁剪点对照；<br>
+       ③ 三个数字读数：总帧数 / 建议剪切点 / 可裁静音帧数。</p>
+    <p><span class="dot" style="background:#22c55e"></span><b>一键采用</b>：把手动裁剪点吸附到参考帧，确认后复用现有 <code>/trim</code>。检测与裁剪逻辑都不新建，只是把「帧数参考」暴露到剪切 UI。</p>
+    <p style="color:#6b6b76">若你要的其实是另一种（比如自动追加静音帧、或在 ShotCard 上直接显示），告诉我，我改这张稿。</p>
+  </div>
+
+  <script>
+    // fake waveform bars
+    const bars=document.getElementById('bars');
+    const N=90;
+    for(let i=0;i<N;i++){
+      const b=document.createElement('div');
+      b.className='bar';
+      // taper amplitude toward the trailing silence (last ~16%)
+      let amp;
+      if(i> N*0.84){ amp = 2 + Math.random()*3; }        // silence tail
+      else { amp = 12 + Math.abs(Math.sin(i*0.6))*38 + Math.random()*14; }
+      b.style.height = amp + 'px';
+      bars.appendChild(b);
+    }
+  </script>
+</body>
+</html>
