@@ -115,6 +115,10 @@ def merge_shots_with_crossfade(
         "-c:v", codec,
         "-preset", preset,
         "-crf", str(crf),
+        # Force 4:2:0 chroma: xfade negotiates its output to yuv444p, and
+        # libx264 would then emit a "High 4:4:4 Predictive" stream that
+        # browsers / HTML5 <video> and most hardware decoders cannot decode.
+        "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         output_path,
     ]
@@ -223,7 +227,16 @@ def merge_shots_with_reencoding(
             FFmpeg()
             .option("y")
             .input(str(filelist_path), f="concat", safe=0)
-            .output(output_path, vcodec=codec, preset=preset, crf=crf, acodec="aac")
+            # pix_fmt=yuv420p keeps the re-encode browser/hardware decodable
+            # (see merge_shots_with_crossfade for the yuv444p pitfall).
+            .output(
+                output_path,
+                vcodec=codec,
+                preset=preset,
+                crf=crf,
+                pix_fmt="yuv420p",
+                acodec="aac",
+            )
         ).execute()
         logger.info(f"Merged {len(valid_paths)} shots with re-encoding to {output_path}")
     finally:
