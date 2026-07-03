@@ -143,6 +143,9 @@ async def generate_first_frame(
                 config=types.GenerateContentConfig(
                     response_modalities=["IMAGE"],
                     temperature=1.0,
+                    # Pin output orientation — same rationale as tail frame:
+                    # a landscape return + 9:16 center-crop reads as zoom-in.
+                    image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
                 ),
             ),
             label="FF image generation",
