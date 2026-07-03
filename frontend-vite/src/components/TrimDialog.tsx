@@ -255,6 +255,12 @@ export function TrimDialog({
     }
   }
 
+  // 静音剪切参考：话尾帧之后到片尾都是尾部静音，可作为裁剪依据（帧数）。
+  // speechEndFrame 来自 getVideoInfo（后端已算），零额外请求。
+  const silenceFrames =
+    speechEndFrame != null ? totalFrames - speechEndFrame : 0
+  const showSilenceRef = speechEndFrame != null && silenceFrames > 0
+
   const currentTime = fps > 0 ? (endFrame / fps).toFixed(2) : '0'
   const trimmedPercent = totalFrames > 0 ? (endFrame / totalFrames) * 100 : 100
 
@@ -282,6 +288,38 @@ export function TrimDialog({
                 onEnded={stopPreview}
               />
             </div>
+
+            {/* 静音剪切参考（尾部静音帧数）*/}
+            {showSilenceRef && (
+              <div data-testid="silence-ref" className="shrink-0 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+                <div className="flex items-center gap-3">
+                  <span className="text-lg leading-none">🔇</span>
+                  <div className="flex-1 text-sm text-amber-200">
+                    检测到尾部静音 <b className="text-amber-400">{silenceFrames} 帧</b>
+                    {fps > 0 && (
+                      <span className="text-amber-300/70">
+                        {' '}({(silenceFrames / fps).toFixed(2)}s)
+                      </span>
+                    )}
+                    {' '}· 建议剪到第 <b className="text-amber-400">{speechEndFrame} 帧</b>
+                  </div>
+                </div>
+                <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                  <div className="rounded bg-black/20 px-2 py-1">
+                    <div className="text-zinc-400">总帧数</div>
+                    <div className="font-semibold">{totalFrames}</div>
+                  </div>
+                  <div className="rounded bg-black/20 px-2 py-1">
+                    <div className="text-zinc-400">建议剪切点</div>
+                    <div className="font-semibold text-amber-400">{speechEndFrame} 帧</div>
+                  </div>
+                  <div className="rounded bg-black/20 px-2 py-1">
+                    <div className="text-zinc-400">可裁静音</div>
+                    <div className="font-semibold text-amber-400">{silenceFrames} 帧</div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Waveform track — 与下方滑块共享时间轴 */}
             <div className="shrink-0">
