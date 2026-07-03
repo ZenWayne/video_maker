@@ -937,6 +937,48 @@ async def generate_tail_frame(
     return {"status": "queued", "shot_id": shot_id}
 
 
+@router.post("/projects/{project_id}/shots/{shot_id}/generate-first-frame", status_code=202)
+async def generate_first_frame(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+    redis=Depends(get_redis),
+):
+    """Generate an opening first frame for a shot (visual description + refs).
+
+    Mirrors generate-tail-frame: the worker writes the result into
+    custom_first_frame_path (path-as-truth) under custom_frames/ with a
+    ts_uuid filename, so continuity propagation treats it as a user override.
+    """
+    project = await _get_project_or_404(project_id, session)
+
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+
+    # Transition to SHOT_GENERATING
+    try:
+        await transition_project_status(
+            project, ProjectStatus.SHOT_GENERATING, f"user:{user}", session, redis
+        )
+    except InvalidTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    shot.ff_status = "generating"
+    shot.ff_error_message = None
+    session.add(shot)
+    await session.commit()
+
+    arq = await _get_arq_redis(redis)
+    await arq.enqueue_job("run_first_frame_pipeline", project_id, shot_id, f"user:{user}")
+
+    return {"status": "queued", "shot_id": shot_id}
+
+
 @router.post("/projects/{project_id}/shots/{shot_id}/confirm-tail-frame", status_code=202)
 async def confirm_tail_frame(
     project_id: str,
@@ -1388,11 +1430,20 @@ async def delete_first_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
+    # Prevent deleting while a first frame is being actively generated
+    if shot.ff_status == "generating":
+        raise HTTPException(
+            status_code=409,
+            detail="First frame is currently being generated; wait for it to complete",
+        )
+
     # Capture the stored path BEFORE clearing — needed for unlink below
     old_path = shot.custom_first_frame_path
 
     # Clear the custom first frame path
     shot.custom_first_frame_path = None
+    shot.ff_status = None
+    shot.ff_error_message = None
     session.add(shot)
     await session.commit()
 

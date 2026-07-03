@@ -232,6 +232,43 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       onEvent?.('tf_failed', data)
     })
 
+    // ff_started - 首帧开始生成
+    const unsubscribeFfStarted = sse.subscribe('ff_started', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number }
+      updateShot(d.shot_id, { ff_status: 'generating' })
+      setStatus(`分镜 #${d.shot_id} 首帧生成中`)
+      onEvent?.('ff_started', data)
+    })
+
+    // ff_completed - 首帧生成完成
+    const unsubscribeFfCompleted = sse.subscribe('ff_completed', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number; custom_first_frame_path: string }
+      updateShot(d.shot_id, {
+        ff_status: 'done',
+        custom_first_frame_path: d.custom_first_frame_path,
+      })
+      updateProjectStatus('shot_review')
+      setStatus(`分镜 #${d.shot_id} 首帧已生成`)
+      addToast({ type: 'success', message: `分镜 #${d.shot_id} 首帧已生成` })
+      onEvent?.('ff_completed', data)
+    })
+
+    // ff_failed - 首帧生成失败
+    const unsubscribeFfFailed = sse.subscribe('ff_failed', (data) => {
+      setLastEventTime(Date.now())
+      const d = data as { shot_id: number; error_message: string }
+      updateShot(d.shot_id, {
+        ff_status: 'failed',
+        ff_error_message: d.error_message,
+      })
+      updateProjectStatus('shot_review')
+      setStatus(`分镜 #${d.shot_id} 首帧生成失败`)
+      addToast({ type: 'error', message: `分镜 #${d.shot_id} 首帧生成失败: ${d.error_message}` })
+      onEvent?.('ff_failed', data)
+    })
+
     // vc_started - 音色转换开始
     const unsubscribeVcStarted = sse.subscribe('vc_started', (data) => {
       setLastEventTime(Date.now())
@@ -326,6 +363,9 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       unsubscribeTfPoseAnalyzed()
       unsubscribeTfCompleted()
       unsubscribeTfFailed()
+      unsubscribeFfStarted()
+      unsubscribeFfCompleted()
+      unsubscribeFfFailed()
       unsubscribeVcStarted()
       unsubscribeVcCompleted()
       unsubscribeVcFailed()

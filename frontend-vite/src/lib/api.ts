@@ -441,6 +441,11 @@ export const api = {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/generate-tail-frame`)
   },
 
+  // 生成首帧（AI 图片生成，支持参考物）
+  generateFirstFrame: (projectId: string, shotId: number): Promise<void> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/generate-first-frame`)
+  },
+
   // 从视频提取尾帧
   extractTailFrame: (projectId: string, shotId: number): Promise<{ target_last_frame_path: string }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/extract-tail-frame`)

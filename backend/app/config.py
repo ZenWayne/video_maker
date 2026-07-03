@@ -176,6 +176,73 @@ class Settings(BaseSettings):
         "- Photorealistic, 8K detail"
     )
 
+    # First frame generation (opening keyframe via Vertex AI) — mirrors the tail
+    # frame two-step CoT and reuses tf_project/tf_location/tf_model/tf_cot_model.
+    # Step 1: CoT analysis (TEXT only) — reason about the opening composition
+    ff_cot_prompt: str = (
+        "You are a cinematography expert. Analyze the shot description below "
+        "to determine the OPENING FRAME composition — the very first moment "
+        "of the shot, before any motion happens.\n\n"
+        "Shot type: {shot_type}\n"
+        "Visual description:\n{visual_description}\n\n"
+        "Motion that will happen during the shot (the opening frame must be "
+        "a natural STARTING point for it, not its result):\n{motion_prompt}\n\n"
+        "Input images (in order):\n"
+        "- [Character Reference]: facial identity only\n"
+        "- [Object Reference] (if any): props/objects that MUST be visible "
+        "in the opening frame — describe how and where they are placed or "
+        "held\n"
+        "- [Scene Context] (if any): current scene state for background/"
+        "lighting/wardrobe continuity\n\n"
+        "Think step by step:\n"
+        "1. What framing does the shot type imply (camera distance, angle)?\n"
+        "2. What scene, background, and lighting does the visual description "
+        "call for?\n"
+        "3. If object reference images are provided, how should these objects "
+        "appear in the opening frame? (e.g. held in hand, placed on table, "
+        "displayed to camera)\n"
+        "4. What is the character's STARTING body pose — head angle, torso "
+        "orientation, arm/hand positions, facial expression, eye gaze — such "
+        "that the described motion can naturally begin from it?\n\n"
+        "Hard rules:\n"
+        "- Describe the OPENING state only — do NOT depict the motion already "
+        "underway or completed.\n"
+        "- If object reference images are provided, the opening frame MUST "
+        "show them clearly.\n\n"
+        "Output a concise description of the OPENING COMPOSITION only (no "
+        "preamble): framing, scene, character pose, and object placement."
+    )
+
+    # Step 2: Image generation (IMAGE only) — generate with CoT result
+    ff_prompt: str = (
+        "Task: Generate the OPENING FRAME of a video shot — the first moment "
+        "before any motion begins.\n\n"
+        "Visual description of the shot:\n{visual_description}\n\n"
+        "Analyzed opening composition (the image MUST match this):\n"
+        "{opening_composition}\n\n"
+        "Image roles — read carefully, each image has a NARROW purpose:\n"
+        "- [Scene Context] (first image, if any): Use ONLY for background, "
+        "scene layout, lighting, and wardrobe colors. Do NOT copy the "
+        "character's body pose from this image — pose comes exclusively "
+        "from the analyzed opening composition.\n"
+        "- [Object Reference] (if any): Props/objects that MUST be clearly "
+        "visible in the output image, faithfully reproduced and "
+        "recognizable. Do not use for pose.\n"
+        "- [Character Reference] (last image): Use ONLY for facial "
+        "identity — facial bone structure (face shape, jawline, "
+        "cheekbones), eye shape, nose shape, skin texture, hair style. "
+        "The face must clearly look like this person — sharp, detailed, "
+        "not blurry. DO NOT copy the pose or eye gaze from this image.\n\n"
+        "Requirements:\n"
+        "- Framing, scene, body pose, and object placement all come from "
+        "the analyzed opening composition above\n"
+        "- Face identity copied from [Character Reference] (features only, "
+        "not expression)\n"
+        "- Background / lighting / wardrobe consistent with [Scene Context] "
+        "when provided\n"
+        "- Photorealistic, 8K detail"
+    )
+
     # Merge / export settings
     crossfade_duration: float = 0.1  # seconds; 0 = hard cut (no crossfade)
 

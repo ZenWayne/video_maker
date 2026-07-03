@@ -71,6 +71,8 @@ async def event_generator(
                         "word_count_warning": s.word_count_warning,
                         "error_message": s.error_message,
                         "custom_first_frame_path": to_media_url(s.custom_first_frame_path),
+                        "ff_status": s.ff_status,
+                        "ff_error_message": s.ff_error_message,
                         "custom_reference_paths": (
                             [to_media_url(p) for p in json.loads(s.custom_reference_paths)]
                             if s.custom_reference_paths else None

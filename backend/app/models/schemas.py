@@ -54,6 +54,8 @@ class ShotResponse(BaseModel):
     word_count_warning: bool
     error_message: Optional[str] = None
     custom_first_frame_path: Optional[str] = None
+    ff_status: Optional[str] = None
+    ff_error_message: Optional[str] = None
     custom_reference_paths: Optional[List[str]] = None
     reference_image_hint: Optional[str] = None
     vc_status: Optional[str] = None

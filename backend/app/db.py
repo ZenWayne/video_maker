@@ -122,6 +122,8 @@ async def _run_migrations(conn):
         ("source_fps", "FLOAT"),
         ("source_frames", "INTEGER"),
         ("vc_audio_path", "TEXT"),
+        ("ff_status", "VARCHAR(20)"),
+        ("ff_error_message", "TEXT"),
     ]:
         if not await _has_column("shots", col):
             await conn.execute(sa.text(f"ALTER TABLE shots ADD COLUMN {col} {typ}"))

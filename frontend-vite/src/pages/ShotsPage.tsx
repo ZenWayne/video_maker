@@ -551,6 +551,20 @@ export default function ShotsPage() {
     }
   }
 
+  // 生成首帧（AI 图片生成，支持参考物）
+  const handleGenerateFirstFrame = async (shotId: number) => {
+    if (!projectId) return
+    try {
+      await api.generateFirstFrame(projectId, shotId)
+      updateShot(shotId, { ff_status: 'generating' })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '首帧生成失败',
+      })
+    }
+  }
+
   // 确认尾帧/提取尾帧 已移除（path-as-truth：尾帧上传/提取/删除在 ShotCard 内联调用对应端点）
 
   // 删除尾帧（清空尾帧状态，不自动生成视频）
@@ -660,6 +674,7 @@ export default function ShotsPage() {
                   onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
                   onGenerateTailFrame={handleGenerateTailFrame}
                   onDeleteTailFrame={handleDeleteTailFrame}
+                  onGenerateFirstFrame={handleGenerateFirstFrame}
                 />
               )
             })}
@@ -836,6 +851,7 @@ export default function ShotsPage() {
                 onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
                 onGenerateTailFrame={handleGenerateTailFrame}
                 onDeleteTailFrame={handleDeleteTailFrame}
+                onGenerateFirstFrame={handleGenerateFirstFrame}
               />
             )
           })}

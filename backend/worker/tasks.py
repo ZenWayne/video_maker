@@ -36,6 +36,7 @@ from app.services.storage import (
     shot_pre_vc_video_path,
     shot_pre_cc_last_frame_path,
     shot_target_last_frame_path,
+    shot_custom_frames_dir,
     get_original_video_for_audio,
     pristine_last_frame_path,
     ts_uuid_name,
@@ -764,6 +765,112 @@ async def run_tail_frame_pipeline(
                 redis, project_id,
                 {
                     "type": "tf_failed",
+                    "data": {"shot_id": shot_id, "error_message": str(e)},
+                },
+            )
+
+        # Transition back to SHOT_REVIEW
+        await transition_project_status(
+            project, ProjectStatus.SHOT_REVIEW, "system:worker", session, redis
+        )
+
+
+@observability.traced_job("worker-first-frame-pipeline-run", tags=["first-frame"])
+async def run_first_frame_pipeline(
+    ctx: Dict[str, Any], project_id: str, shot_id: int, actor: str
+) -> None:
+    """Generate an opening first frame for a shot (mirrors run_tail_frame_pipeline).
+
+    Output is written to custom_frames/<ts_uuid>.png and stored in
+    custom_first_frame_path — path-as-truth, and the custom_frames/ location
+    marks it as a user override so continuity propagation won't clobber it.
+    After completion, transitions back to SHOT_REVIEW.
+    """
+    from app.services.first_frame_generator import generate_first_frame
+
+    worker_ctx = WorkerContext(ctx)
+    session_factory = worker_ctx.session_factory
+    redis = worker_ctx.redis
+
+    async with session_factory() as session:
+        result = await session.execute(select(Project).where(Project.id == project_id))
+        project = result.scalar_one_or_none()
+        if not project:
+            logger.error("Project %s not found", project_id)
+            return
+
+        result = await session.execute(
+            select(Shot).where(
+                Shot.project_id == project_id, Shot.shot_id == shot_id
+            )
+        )
+        shot = result.scalar_one_or_none()
+        if not shot:
+            logger.error("Shot %d not found in project %s", shot_id, project_id)
+            return
+
+        await publish_event(
+            redis, project_id,
+            {"type": "ff_started", "data": {"shot_id": shot_id}},
+        )
+
+        try:
+            # Scene context: the currently-resolved first frame (may be None in
+            # multi-image reference mode) — used only for scene continuity.
+            context_frame = await pick_first_frame(project_id, shot, session)
+
+            obj_refs = (
+                json.loads(shot.custom_reference_paths)
+                if shot.custom_reference_paths else None
+            )
+            char_refs = await _get_character_ref_paths(project_id, session)
+
+            dest_dir = shot_custom_frames_dir(project_id, shot.shot_id)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            ff_output = str(dest_dir / ts_uuid_name(".png"))
+
+            await generate_first_frame(
+                character_ref_paths=char_refs,
+                context_frame_path=str(context_frame) if context_frame else None,
+                visual_description=shot.visual_description,
+                shot_type=shot.shot_type,
+                output_path=ff_output,
+                motion_prompt=shot.motion_prompt,
+                object_ref_paths=obj_refs,
+                aspect_ratio=project.aspect_ratio,
+            )
+
+            shot.custom_first_frame_path = ff_output
+            shot.ff_status = "done"
+            shot.ff_error_message = None
+            shot.status = ShotStatus.PENDING.value
+            session.add(shot)
+            await session.commit()
+
+            await publish_event(
+                redis, project_id,
+                {
+                    "type": "ff_completed",
+                    "data": {
+                        "shot_id": shot_id,
+                        "custom_first_frame_path": to_media_url(ff_output),
+                    },
+                },
+            )
+            logger.info("First frame generated for shot %d in project %s", shot_id, project_id)
+
+        except Exception as e:
+            logger.error("First frame pipeline failed for shot %d: %s", shot_id, e, exc_info=True)
+            shot.ff_status = "failed"
+            shot.ff_error_message = str(e)
+            shot.status = ShotStatus.PENDING.value
+            session.add(shot)
+            await session.commit()
+
+            await publish_event(
+                redis, project_id,
+                {
+                    "type": "ff_failed",
                     "data": {"shot_id": shot_id, "error_message": str(e)},
                 },
             )

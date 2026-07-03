@@ -37,6 +37,8 @@ const mockShot: Shot = {
   word_count_warning: false,
   error_message: null,
   custom_first_frame_path: null,
+  ff_status: null,
+  ff_error_message: null,
   custom_reference_paths: null,
   reference_image_hint: null,
   vc_status: null,
