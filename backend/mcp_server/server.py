@@ -158,16 +158,23 @@ def create_server(backend: BackendClient) -> FastMCP:
 
     @mcp.tool
     async def batch_update_shots(project_id: str, updates: list[dict]) -> dict:
-        """Apply many {shot_id, text?, motion_prompt?} edits in one call. Partial success allowed."""
+        """Apply many {shot_id, text?, motion_prompt?, visual_description?} edits in one call. Partial success allowed."""
         results = []
         for u in updates:
             sid = u.get("shot_id")
             try:
                 if sid is None:
                     raise ValueError("missing shot_id")
-                body = {k: u[k] for k in ("text", "motion_prompt") if k in u and u[k] is not None}
+                body = {
+                    k: u[k]
+                    for k in ("text", "motion_prompt", "visual_description")
+                    if k in u and u[k] is not None
+                }
                 if not body:
-                    raise ValueError("no text or motion_prompt provided")
+                    raise ValueError("no text, motion_prompt or visual_description provided")
+                vd = body.get("visual_description")
+                if vd is not None and not vd.strip():
+                    raise ValueError("visual_description must not be empty")
                 shot = await backend.patch_shot(project_id, sid, body)
                 results.append({"shot_id": sid, "ok": True, "shot": shot})
             except (BackendError, ValueError) as e:

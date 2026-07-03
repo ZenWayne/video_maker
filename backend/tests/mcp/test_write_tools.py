@@ -219,3 +219,32 @@ async def test_replace_storyboard_tool(server, db_session_factory):
     async with Client(server) as c:
         shots = _payload(await c.call_tool("list_shots", {"project_id": pid}))
     assert [s["shot_id"] for s in shots] == [1]
+
+
+async def test_batch_update_supports_visual_description(server, db_session_factory):
+    pid = await seed_project(db_session_factory)
+    async with Client(server) as c:
+        res = await c.call_tool("batch_update_shots", {
+            "project_id": pid,
+            "updates": [{"shot_id": 1, "visual_description": "new look"}],
+        })
+    results = _payload(res)["results"]
+    assert results[0]["ok"] is True
+    async with db_session_factory() as s:
+        shot = (await s.execute(select(Shot).where(
+            Shot.project_id == pid, Shot.shot_id == 1))).scalar_one()
+    assert shot.visual_description == "new look"
+
+
+async def test_batch_update_rejects_empty_visual_description(server, db_session_factory):
+    pid = await seed_project(db_session_factory)
+    async with Client(server) as c:
+        res = await c.call_tool("batch_update_shots", {
+            "project_id": pid,
+            "updates": [{"shot_id": 1, "visual_description": "  "},
+                        {"shot_id": 2, "text": "still fine"}],
+        })
+    results = _payload(res)["results"]
+    assert results[0]["ok"] is False
+    assert "visual_description" in results[0]["error"]
+    assert results[1]["ok"] is True
