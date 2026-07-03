@@ -8,7 +8,12 @@ from fastmcp import FastMCP
 from app.agents.director import postprocess_motion_prompt
 from mcp_server.client import BackendClient, BackendError
 from mcp_server.config import settings
-from mcp_server.context import shape_project, shape_shot, with_neighbors
+from mcp_server.context import (
+    shape_generation_status,
+    shape_project,
+    shape_shot,
+    with_neighbors,
+)
 from mcp_server.guidelines import AUTHORING_GUIDELINES
 from mcp_server.validation import word_count_report
 
@@ -153,16 +158,23 @@ def create_server(backend: BackendClient) -> FastMCP:
 
     @mcp.tool
     async def batch_update_shots(project_id: str, updates: list[dict]) -> dict:
-        """Apply many {shot_id, text?, motion_prompt?} edits in one call. Partial success allowed."""
+        """Apply many {shot_id, text?, motion_prompt?, visual_description?} edits in one call. Partial success allowed."""
         results = []
         for u in updates:
             sid = u.get("shot_id")
             try:
                 if sid is None:
                     raise ValueError("missing shot_id")
-                body = {k: u[k] for k in ("text", "motion_prompt") if k in u and u[k] is not None}
+                body = {
+                    k: u[k]
+                    for k in ("text", "motion_prompt", "visual_description")
+                    if k in u and u[k] is not None
+                }
                 if not body:
-                    raise ValueError("no text or motion_prompt provided")
+                    raise ValueError("no text, motion_prompt or visual_description provided")
+                vd = body.get("visual_description")
+                if vd is not None and not vd.strip():
+                    raise ValueError("visual_description must not be empty")
                 shot = await backend.patch_shot(project_id, sid, body)
                 results.append({"shot_id": sid, "ok": True, "shot": shot})
             except (BackendError, ValueError) as e:
@@ -184,7 +196,73 @@ def create_server(backend: BackendClient) -> FastMCP:
         except BackendError as e:
             return {"ok": False, "status_code": e.status_code, "error": e.detail}
 
+    @mcp.tool
+    async def start_generation(project_id: str) -> dict:
+        """Start script generation (draft → scripting). Requires ≥1 uploaded
+        character reference image. Async trigger: queues the screenwriter and
+        returns immediately — poll get_generation_status until status becomes
+        script_review. Errors return {"ok": false, "status_code", "error"}."""
+        try:
+            return await backend.start_project(project_id)
+        except BackendError as e:
+            return _backend_err(e)
+
+    @mcp.tool
+    async def approve_script(project_id: str) -> dict:
+        """Approve the script and start shot generation (script_review →
+        shot_generating). Resets all shots to pending. Async trigger: returns
+        immediately — poll get_generation_status until status becomes shot_review."""
+        try:
+            return await backend.approve_script(project_id)
+        except BackendError as e:
+            return _backend_err(e)
+
+    @mcp.tool
+    async def regenerate_shots(project_id: str, shot_ids: list[int]) -> dict:
+        """Regenerate specific shots with their current prompts (shot_review →
+        shot_generating). Async trigger: returns immediately — poll
+        get_generation_status until the shots report has_video=true."""
+        if not shot_ids:
+            raise ValueError("shot_ids must not be empty")
+        if any(sid <= 0 for sid in shot_ids):
+            raise ValueError("shot_ids must all be positive integers")
+        try:
+            return await backend.regenerate_shots(project_id, shot_ids)
+        except BackendError as e:
+            return _backend_err(e)
+
+    @mcp.tool
+    async def continue_generation(project_id: str) -> dict:
+        """Resume generation of the next pending/failed shot (shot_review →
+        shot_generating). Async trigger: returns immediately — poll
+        get_generation_status for progress."""
+        try:
+            return await backend.continue_generation(project_id)
+        except BackendError as e:
+            return _backend_err(e)
+
+    @mcp.tool
+    async def cancel_generation(project_id: str) -> dict:
+        """Cancel in-flight shot generation and return the project to
+        shot_review. In-progress shots are reset to pending."""
+        try:
+            return await backend.cancel_generation(project_id)
+        except BackendError as e:
+            return _backend_err(e)
+
+    @mcp.tool
+    async def get_generation_status(project_id: str) -> dict:
+        """Poll generation progress: project status plus per-shot status,
+        video_path, error_message, vc_status and tf_status. Use after any
+        driver tool (start_generation / approve_script / regenerate_shots /
+        continue_generation) to watch the async pipeline."""
+        return shape_generation_status(await backend.get_project(project_id))
+
     return mcp
+
+
+def _backend_err(e: BackendError) -> dict:
+    return {"ok": False, "status_code": e.status_code, "error": e.detail}
 
 
 def _video_note(shot: dict) -> str | None:

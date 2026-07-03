@@ -36,3 +36,26 @@ def test_with_neighbors():
     assert out["shot_id"] == 2
     assert out["prev_text"] == "first"
     assert out["next_text"] == "third"
+
+
+def test_shape_generation_status():
+    from mcp_server.context import shape_generation_status
+    p = {
+        "status": "shot_review",
+        "shots": [
+            {"shot_id": 2, "status": "pending", "video_path": None,
+             "error_message": "boom", "vc_status": None, "tf_status": None},
+            {"shot_id": 1, "status": "completed", "video_path": "projects/x/1/output.mp4",
+             "error_message": None, "vc_status": "completed", "tf_status": None},
+        ],
+    }
+    out = shape_generation_status(p)
+    assert out["status"] == "shot_review"
+    assert [s["shot_id"] for s in out["shots"]] == [1, 2]
+    assert out["shots"][0] == {
+        "shot_id": 1, "status": "completed", "has_video": True,
+        "video_path": "projects/x/1/output.mp4", "error_message": None,
+        "vc_status": "completed", "tf_status": None,
+    }
+    assert out["shots"][1]["has_video"] is False
+    assert out["shots"][1]["error_message"] == "boom"

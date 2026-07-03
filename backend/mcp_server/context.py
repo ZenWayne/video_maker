@@ -44,3 +44,21 @@ def with_neighbors(shots: list[dict], shot_id: int) -> dict:
     shaped["prev_text"] = ordered[idx - 1].get("text") if idx > 0 else None
     shaped["next_text"] = ordered[idx + 1].get("text") if idx < len(ordered) - 1 else None
     return shaped
+
+
+def shape_generation_status(p: dict) -> dict:
+    return {
+        "status": p["status"],
+        "shots": [
+            {
+                "shot_id": s["shot_id"],
+                "status": s.get("status"),
+                "has_video": bool(s.get("video_path")),
+                "video_path": s.get("video_path"),
+                "error_message": s.get("error_message"),
+                "vc_status": s.get("vc_status"),
+                "tf_status": s.get("tf_status"),
+            }
+            for s in sorted(p.get("shots", []), key=lambda s: s["shot_id"])
+        ],
+    }
