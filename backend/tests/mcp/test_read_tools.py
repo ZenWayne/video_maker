@@ -59,3 +59,12 @@ async def test_guidelines_tool(server):
         res = await c.call_tool("get_authoring_guidelines", {})
     text = _payload(res)
     assert "motion_prompt" in text
+
+
+async def test_guidelines_document_lifecycle_tools(server):
+    async with Client(server) as c:
+        res = await c.call_tool("get_authoring_guidelines", {})
+    text = _payload(res)
+    for name in ("start_generation", "approve_script", "regenerate_shots",
+                 "continue_generation", "cancel_generation", "get_generation_status"):
+        assert name in text

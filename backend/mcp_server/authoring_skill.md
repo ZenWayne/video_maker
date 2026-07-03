@@ -58,6 +58,29 @@ treat them as authoring rules, not suggestions.
   `upload_reference_images` when that tool is available). At least one character
   reference image is required before script generation runs.
 
+## 6. 生命周期工具（状态机）
+
+项目状态机与对应驱动工具：
+
+```
+draft ──start_generation──▶ scripting ──▶ script_review
+script_review ──(replace_storyboard / batch_update_shots 编辑)──▶ script_review
+script_review ──approve_script──▶ shot_generating ──▶ shot_review
+shot_review ──(regenerate_shots / 编辑)──▶ shot_generating ──▶ shot_review
+shot_review ──continue_generation──▶ shot_generating（续跑 pending/failed shot）
+shot_generating ──cancel_generation──▶ shot_review（止损）
+shot_review ──export（暂无 MCP 工具，走 UI）──▶ exporting ──▶ exported
+```
+
+- `start_generation` 前置：项目为 draft 且已用 `upload_reference_images` 上传 ≥1 张
+  character 参考图。
+- 驱动类工具（`start_generation` / `approve_script` / `regenerate_shots` /
+  `continue_generation` / `cancel_generation`）为**异步触发**：只入队并立即返回
+  `{status, message}`；进度用 `get_generation_status` 轮询（返回项目 status 与每个
+  shot 的 status / has_video / video_path / error_message / vc_status / tf_status）。
+- 非法状态下调用返回 `{"ok": false, "status_code": 409, "error": ...}`，属正常
+  反馈而非连接错误。
+
 ## Pre-submit checklist
 
 - [ ] Dialogue language matches the project.
