@@ -184,7 +184,65 @@ def create_server(backend: BackendClient) -> FastMCP:
         except BackendError as e:
             return {"ok": False, "status_code": e.status_code, "error": e.detail}
 
+    @mcp.tool
+    async def start_generation(project_id: str) -> dict:
+        """Start script generation (draft → scripting). Requires ≥1 uploaded
+        character reference image. Async trigger: queues the screenwriter and
+        returns immediately — poll get_generation_status until status becomes
+        script_review. Errors return {"ok": false, "status_code", "error"}."""
+        try:
+            return await backend.start_project(project_id)
+        except BackendError as e:
+            return _backend_err(e)
+
+    @mcp.tool
+    async def approve_script(project_id: str) -> dict:
+        """Approve the script and start shot generation (script_review →
+        shot_generating). Resets all shots to pending. Async trigger: returns
+        immediately — poll get_generation_status until status becomes shot_review."""
+        try:
+            return await backend.approve_script(project_id)
+        except BackendError as e:
+            return _backend_err(e)
+
+    @mcp.tool
+    async def regenerate_shots(project_id: str, shot_ids: list[int]) -> dict:
+        """Regenerate specific shots with their current prompts (shot_review →
+        shot_generating). Async trigger: returns immediately — poll
+        get_generation_status until the shots report has_video=true."""
+        if not shot_ids:
+            raise ValueError("shot_ids must not be empty")
+        if any(sid <= 0 for sid in shot_ids):
+            raise ValueError("shot_ids must all be positive integers")
+        try:
+            return await backend.regenerate_shots(project_id, shot_ids)
+        except BackendError as e:
+            return _backend_err(e)
+
+    @mcp.tool
+    async def continue_generation(project_id: str) -> dict:
+        """Resume generation of the next pending/failed shot (shot_review →
+        shot_generating). Async trigger: returns immediately — poll
+        get_generation_status for progress."""
+        try:
+            return await backend.continue_generation(project_id)
+        except BackendError as e:
+            return _backend_err(e)
+
+    @mcp.tool
+    async def cancel_generation(project_id: str) -> dict:
+        """Cancel in-flight shot generation and return the project to
+        shot_review. In-progress shots are reset to pending."""
+        try:
+            return await backend.cancel_generation(project_id)
+        except BackendError as e:
+            return _backend_err(e)
+
     return mcp
+
+
+def _backend_err(e: BackendError) -> dict:
+    return {"ok": False, "status_code": e.status_code, "error": e.detail}
 
 
 def _video_note(shot: dict) -> str | None:
