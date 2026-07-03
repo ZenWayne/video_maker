@@ -6,6 +6,7 @@ not present in PATH (e.g. on developer machines without ffmpeg installed).
 """
 
 import shutil
+import subprocess
 import pytest
 from pathlib import Path
 
@@ -33,6 +34,30 @@ def _make_test_video(path: Path, duration: int = 2) -> None:
         .input(f"color=blue:size=64x64:rate=10:duration={duration}", f="lavfi")
         .output(str(path), pix_fmt="yuv420p", vcodec="libx264", an=None)
     ).execute()
+
+
+def _make_test_video_with_audio(path: Path, duration: int = 2) -> None:
+    """Generate a tiny synthetic MP4 with a silent audio track."""
+    (
+        FFmpeg()
+        .option("y")
+        .input(f"color=blue:size=64x64:rate=10:duration={duration}", f="lavfi")
+        .input(f"anullsrc=r=44100:cl=stereo", f="lavfi", t=str(duration))
+        .output(str(path), pix_fmt="yuv420p", vcodec="libx264", acodec="aac", shortest=None)
+    ).execute()
+
+
+def _pix_fmt(path: Path) -> str:
+    """Return the video stream's pixel format via ffprobe."""
+    out = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=pix_fmt",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -232,3 +257,35 @@ class TestMergeShotsWithReencoding:
 
         with pytest.raises(ValueError, match="No shot paths provided"):
             merge_shots_with_reencoding([], str(tmp_path / "out.mp4"))
+
+    def test_reencoded_output_is_yuv420p(self, tmp_path):
+        """Re-encoded concat must stay yuv420p (browser/hardware decodable)."""
+        from app.agents.merger import merge_shots_with_reencoding
+
+        v1 = tmp_path / "shot1.mp4"
+        v2 = tmp_path / "shot2.mp4"
+        output = tmp_path / "merged.mp4"
+        _make_test_video_with_audio(v1)
+        _make_test_video_with_audio(v2)
+
+        merge_shots_with_reencoding([str(v1), str(v2)], str(output))
+
+        assert _pix_fmt(output) == "yuv420p"
+
+
+class TestMergeShotsWithCrossfade:
+    def test_crossfade_output_is_yuv420p(self, tmp_path):
+        """xfade negotiates yuv444p internally; the encoded output must be
+        forced back to yuv420p or browsers cannot decode the merged video."""
+        from app.agents.merger import merge_shots_with_crossfade
+
+        v1 = tmp_path / "shot1.mp4"
+        v2 = tmp_path / "shot2.mp4"
+        output = tmp_path / "merged.mp4"
+        _make_test_video_with_audio(v1, duration=2)
+        _make_test_video_with_audio(v2, duration=2)
+
+        merge_shots_with_crossfade([str(v1), str(v2)], str(output), crossfade_duration=0.3)
+
+        assert output.exists()
+        assert _pix_fmt(output) == "yuv420p"
