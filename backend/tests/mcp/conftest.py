@@ -87,3 +87,12 @@ async def seed_project(sf, status="script_review", scene_overview="overview", sh
                        shot_duration=6, status="pending", align_with_previous=(i > 1)))
         await s.commit()
         return pid
+
+
+async def seed_reference_image(sf, project_id, kind="character"):
+    from app.models.project import ReferenceImage
+    async with sf() as s:
+        s.add(ReferenceImage(project_id=project_id, kind=kind,
+                             filename="ref.png", storage_path="refs/ref.png",
+                             order_index=0))
+        await s.commit()

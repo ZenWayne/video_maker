@@ -94,3 +94,23 @@ class BackendClient:
             f"/api/projects/{project_id}/storyboard",
             json={"scene_overview": scene_overview, "shots": shots},
         )
+
+    # ── lifecycle drivers ────────────────────────────────────────────────
+
+    async def start_project(self, project_id: str) -> dict:
+        return await self._request("POST", f"/api/projects/{project_id}/start")
+
+    async def approve_script(self, project_id: str) -> dict:
+        return await self._request("POST", f"/api/projects/{project_id}/approve-script")
+
+    async def regenerate_shots(self, project_id: str, shot_ids: list[int]) -> dict:
+        return await self._request(
+            "POST", f"/api/projects/{project_id}/regenerate-shots",
+            json={"shot_ids": shot_ids},
+        )
+
+    async def continue_generation(self, project_id: str) -> dict:
+        return await self._request("POST", f"/api/projects/{project_id}/continue-generation")
+
+    async def cancel_generation(self, project_id: str) -> dict:
+        return await self._request("POST", f"/api/projects/{project_id}/cancel-generation")
