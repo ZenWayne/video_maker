@@ -163,6 +163,13 @@ export function TrimDialog({
     seekToFrame(next)
   }
 
+  const handleApplyReference = () => {
+    if (speechEndFrame == null) return
+    const clamped = Math.max(minFrames, Math.min(speechEndFrame, totalFrames))
+    setEndFrame(clamped)
+    seekToFrame(clamped)
+  }
+
   const handleTrim = async () => {
     if (endFrame >= totalFrames) return
     setIsTrimming(true)
@@ -303,6 +310,13 @@ export function TrimDialog({
                     )}
                     {' '}· 建议剪到第 <b className="text-amber-400">{speechEndFrame} 帧</b>
                   </div>
+                  <button
+                    type="button"
+                    onClick={handleApplyReference}
+                    className="shrink-0 rounded-md bg-amber-500 px-3 py-1.5 text-xs font-semibold text-amber-950 hover:bg-amber-400"
+                  >
+                    采用参考 →
+                  </button>
                 </div>
                 <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
                   <div className="rounded bg-black/20 px-2 py-1">

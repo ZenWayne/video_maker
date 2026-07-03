@@ -337,4 +337,17 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     await renderReady()
     expect(screen.queryByTestId('silence-ref')).not.toBeInTheDocument()
   })
+
+  it('点采用参考:裁剪点吸附到建议帧,确认裁剪变可用', async () => {
+    await renderReady()
+    // 初始 endFrame == totalFrames → 确认裁剪禁用
+    expect(screen.getByText('确认裁剪').closest('button')).toBeDisabled()
+
+    fireEvent.click(screen.getByText(/采用参考/).closest('button')!)
+
+    // endFrame → 180；当前帧读数更新
+    expect(screen.getByText(/帧: 180 \/ 240/)).toBeInTheDocument()
+    // 有可裁内容 → 确认裁剪可用
+    expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
+  })
 })
