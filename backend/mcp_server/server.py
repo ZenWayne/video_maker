@@ -1,3 +1,5 @@
+import base64
+import binascii
 import os
 from urllib.parse import urlparse
 
@@ -81,9 +83,13 @@ def create_server(backend: BackendClient) -> FastMCP:
     async def upload_reference_images(
         project_id: str, kind: str = "character",
         paths: list[str] | None = None, urls: list[str] | None = None,
+        files: list[dict] | None = None,
     ) -> dict:
-        """Upload reference images for a project. Provide local `paths` (readable by
-        the MCP server) and/or `urls` (downloaded server-side); both are forwarded
+        """Upload reference images for a project. Three sources, combinable:
+        `files` — real file transfer through the MCP call itself, a list of
+        {"filename": str, "content_base64": str} objects (preferred for client-local
+        files; no shared filesystem needed); `paths` — files readable by the MCP
+        server's own filesystem; `urls` — downloaded server-side. All are forwarded
         as multipart. kind is "character" (主题角色) or "scene".
 
         Character images are the candidates for shot first frames, and at least one
@@ -91,16 +97,26 @@ def create_server(backend: BackendClient) -> FastMCP:
         """
         if kind not in ("character", "scene"):
             raise ValueError('kind must be "character" or "scene"')
-        files: list[tuple[str, bytes]] = []
+        out: list[tuple[str, bytes]] = []
+        for i, entry in enumerate(files or []):
+            name = (entry.get("filename") or "").strip() or f"image_{i}"
+            b64 = entry.get("content_base64") or ""
+            try:
+                data = base64.b64decode(b64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError(f"files[{i}].content_base64 is not valid base64") from exc
+            if not data:
+                raise ValueError(f"files[{i}].content_base64 decoded to empty content")
+            out.append((os.path.basename(name), data))
         for p in paths or []:
             with open(p, "rb") as f:
-                files.append((os.path.basename(p) or "image", f.read()))
+                out.append((os.path.basename(p) or "image", f.read()))
         for u in urls or []:
             data = await backend.fetch_bytes(u)
-            files.append((os.path.basename(urlparse(u).path) or "image", data))
-        if not files:
-            raise ValueError("provide at least one path or url")
-        created = await backend.upload_reference_images(project_id, kind, files)
+            out.append((os.path.basename(urlparse(u).path) or "image", data))
+        if not out:
+            raise ValueError("provide at least one of files, paths, or urls")
+        created = await backend.upload_reference_images(project_id, kind, out)
         return {"uploaded": [
             {"id": r.get("id"), "kind": r.get("kind"), "filename": r.get("filename")}
             for r in created
