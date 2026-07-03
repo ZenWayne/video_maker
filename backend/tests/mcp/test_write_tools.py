@@ -85,7 +85,7 @@ async def test_upload_reference_images_bad_kind(server, db_session_factory, tmp_
 async def test_upload_reference_images_requires_source(server, db_session_factory):
     pid = await seed_project(db_session_factory)
     async with Client(server) as c:
-        with pytest.raises(Exception, match="path or url"):
+        with pytest.raises(Exception, match="files, paths, or urls"):
             await c.call_tool("upload_reference_images", {"project_id": pid, "kind": "character"})
 
 
