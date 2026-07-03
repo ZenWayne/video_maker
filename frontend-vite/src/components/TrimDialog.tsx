@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Loader2, ChevronLeft, ChevronRight, Play, Square, Undo2, Crosshair, AudioLines } from 'lucide-react'
+import { Loader2, ChevronLeft, ChevronRight, Play, Square, Undo2, Crosshair } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -45,7 +45,6 @@ export function TrimDialog({
   const [isTrimming, setIsTrimming] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
   const [isAligning, setIsAligning] = useState(false)
-  const [isDetectingSilence, setIsDetectingSilence] = useState(false)
   const [peaks, setPeaks] = useState<number[] | null>(null)
   const [notice, setNotice] = useState('')
   const [isPreviewing, setIsPreviewing] = useState(false)
@@ -243,25 +242,6 @@ export function TrimDialog({
     }
   }
 
-  const handleDetectSilence = async () => {
-    setIsDetectingSilence(true)
-    setError('')
-    setNotice('')
-    try {
-      const result = await api.detectSilence(projectId, shot.shot_id)
-      if (result.has_silence && result.suggested_end_frame != null) {
-        setEndFrame(result.suggested_end_frame)
-        seekToFrame(result.suggested_end_frame)
-      } else {
-        setNotice('无尾部静音可裁剪')
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Silence detect failed')
-    } finally {
-      setIsDetectingSilence(false)
-    }
-  }
-
   // 静音剪切参考：话尾帧之后到片尾都是尾部静音，可作为裁剪依据（帧数）。
   // speechEndFrame 来自 getVideoInfo（后端已算），零额外请求。
   const silenceFrames =
@@ -445,7 +425,7 @@ export function TrimDialog({
                     variant="outline"
                     size="sm"
                     onClick={handleRestore}
-                    disabled={isRestoring || isTrimming || isAligning || isPreviewing || isDetectingSilence}
+                    disabled={isRestoring || isTrimming || isAligning || isPreviewing}
                   >
                     {isRestoring ? (
                       <><Loader2 className="w-4 h-4 mr-1 animate-spin" />还原中...</>
@@ -459,7 +439,7 @@ export function TrimDialog({
                     variant="outline"
                     size="sm"
                     onClick={handleAlignTailFrame}
-                    disabled={isAligning || isTrimming || isRestoring || isPreviewing || isDetectingSilence}
+                    disabled={isAligning || isTrimming || isRestoring || isPreviewing}
                   >
                     {isAligning ? (
                       <><Loader2 className="w-4 h-4 mr-1 animate-spin" />校准中...</>
@@ -468,18 +448,6 @@ export function TrimDialog({
                     )}
                   </Button>
                 )}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleDetectSilence}
-                  disabled={isDetectingSilence || isTrimming || isAligning || isRestoring || isPreviewing}
-                >
-                  {isDetectingSilence ? (
-                    <><Loader2 className="w-4 h-4 mr-1 animate-spin" />检测中...</>
-                  ) : (
-                    <><AudioLines className="w-4 h-4 mr-1" />静音裁剪</>
-                  )}
-                </Button>
               </div>
               <div className="flex items-center gap-2">
                 <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -487,7 +455,7 @@ export function TrimDialog({
                 </Button>
                 <Button
                   onClick={handleTrim}
-                  disabled={isTrimming || isDetectingSilence || endFrame >= totalFrames}
+                  disabled={isTrimming || endFrame >= totalFrames}
                 >
                   {isTrimming ? (
                     <><Loader2 className="w-4 h-4 mr-1 animate-spin" />裁剪中...</>
