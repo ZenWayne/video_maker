@@ -46,7 +46,6 @@ export function TrimDialog({
   const [isRestoring, setIsRestoring] = useState(false)
   const [isAligning, setIsAligning] = useState(false)
   const [peaks, setPeaks] = useState<number[] | null>(null)
-  const [notice, setNotice] = useState('')
   const [isPreviewing, setIsPreviewing] = useState(false)
   const [playheadFrame, setPlayheadFrame] = useState<number | null>(null)
   const [hasBackup, setHasBackup] = useState(false)
@@ -125,7 +124,6 @@ export function TrimDialog({
     if (!open) return
     setIsLoading(true)
     setError('')
-    setNotice('')
     setPeaks(null)
     setPlayheadFrame(null)
     api.getVideoInfo(projectId, shot.shot_id).then((info) => {
@@ -468,9 +466,6 @@ export function TrimDialog({
 
             {error && (
               <p className="text-sm text-red-500">{error}</p>
-            )}
-            {notice && !error && (
-              <p className="text-sm text-zinc-500">{notice}</p>
             )}
           </div>
         )}
