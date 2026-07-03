@@ -8,7 +8,12 @@ from fastmcp import FastMCP
 from app.agents.director import postprocess_motion_prompt
 from mcp_server.client import BackendClient, BackendError
 from mcp_server.config import settings
-from mcp_server.context import shape_project, shape_shot, with_neighbors
+from mcp_server.context import (
+    shape_generation_status,
+    shape_project,
+    shape_shot,
+    with_neighbors,
+)
 from mcp_server.guidelines import AUTHORING_GUIDELINES
 from mcp_server.validation import word_count_report
 
@@ -237,6 +242,14 @@ def create_server(backend: BackendClient) -> FastMCP:
             return await backend.cancel_generation(project_id)
         except BackendError as e:
             return _backend_err(e)
+
+    @mcp.tool
+    async def get_generation_status(project_id: str) -> dict:
+        """Poll generation progress: project status plus per-shot status,
+        video_path, error_message, vc_status and tf_status. Use after any
+        driver tool (start_generation / approve_script / regenerate_shots /
+        continue_generation) to watch the async pipeline."""
+        return shape_generation_status(await backend.get_project(project_id))
 
     return mcp
 
