@@ -141,9 +141,11 @@ def create_server(backend: BackendClient) -> FastMCP:
 
     @mcp.tool
     async def update_motion(
-        project_id: str, shot_id: int, motion_prompt: str, sync_lip_marker: bool = True
+        project_id: str, shot_id: int, motion_prompt: str, sync_lip_marker: bool = False
     ) -> dict:
-        """Set a shot's motion_prompt (动作). When sync_lip_marker, keep the lip-sync line in sync."""
+        """Set a shot's motion_prompt (动作). Weave the dialogue into the action beats
+        yourself (preferred); pass sync_lip_marker=true only to auto-append a trailing
+        'The character says: "..."' lip-sync line instead."""
         final = motion_prompt
         if sync_lip_marker:
             current = await backend.get_project(project_id)

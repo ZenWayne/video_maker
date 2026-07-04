@@ -71,8 +71,8 @@ def _vertex_op_with_bytes(captured: dict):
 
 
 @pytest.mark.asyncio
-async def test_spoken_text_appended_to_prompt():
-    """When spoken_text is provided it is appended to the motion prompt."""
+async def test_spoken_text_ignored_prompt_sent_as_is():
+    """spoken_text is ignored — dialogue lives in the motion prompt itself."""
     captured: dict = {}
     mock_client = MagicMock()
     mock_client.aio.models.generate_videos = _vertex_op_with_bytes(captured)
@@ -89,13 +89,12 @@ async def test_spoken_text_appended_to_prompt():
             spoken_text="Hello world",
         )
 
-    assert "A cat walks forward" in captured["prompt"]
-    assert "Hello world" in captured["prompt"]
+    assert captured["prompt"] == "A cat walks forward"
 
 
 @pytest.mark.asyncio
-async def test_empty_spoken_text_not_appended():
-    """When spoken_text is blank, prompt is left unchanged."""
+async def test_empty_spoken_text_prompt_unchanged():
+    """Blank spoken_text also leaves the prompt untouched."""
     captured: dict = {}
     mock_client = MagicMock()
     mock_client.aio.models.generate_videos = _vertex_op_with_bytes(captured)
@@ -273,7 +272,7 @@ async def test_kie_image_to_video_flow(kie_env, tmp_path):
     assert gen["imageUrls"] == ["https://h/up1.png"]
     assert gen["duration"] == 6
     assert gen["aspect_ratio"] == "16:9"
-    assert "Meow" in gen["prompt"]
+    assert gen["prompt"] == "A cat walks forward"
     assert record["polled"] == {"taskId": "task_1"}
 
 

@@ -129,7 +129,9 @@ def trim_video(input_path: str, output_path: str, num_frames: int) -> None:
 
     Uses ``-vframes`` for frame-precise cutting (time-based ``-t`` suffers
     from float rounding and can be ±1 frame off).  Re-encodes with libx264
-    crf=18 because stream copy can only cut at keyframes.
+    crf=18 because stream copy can only cut at keyframes.  ``-shortest`` cuts
+    the audio stream at the video's end — ``-vframes`` alone only limits the
+    video stream, leaving the full-length audio in the output (A/V mismatch).
     """
     try:
         (
@@ -138,6 +140,7 @@ def trim_video(input_path: str, output_path: str, num_frames: int) -> None:
             .input(input_path)
             .output(
                 output_path,
+                {"shortest": None},
                 vframes=num_frames,
                 vcodec="libx264",
                 preset="fast",
