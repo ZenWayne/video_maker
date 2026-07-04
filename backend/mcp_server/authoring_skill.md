@@ -37,6 +37,36 @@ treat them as authoring rules, not suggestions.
   `The character says: "..."` marker appended instead (never hand-write that line).
   After editing dialogue, update the inlined sentences to match.
 
+### Motion-prompt authoring lessons (Veo 3.1, learned in production)
+
+- **Intra-shot timing — use timestamp segments.** Prose timing rules ("for the
+  first 2 seconds she is silent") are IGNORED; speech otherwise starts at 0s and
+  fills the shot. Place actions and dialogue in time with the official segment
+  syntax:
+  ```
+  [00:00-00:02] She slides one card out of the fan, its back to the camera, saying "and there it is."
+  [00:02-00:05] Holding the card up, she says "six of cups, reversed."
+  [00:05-00:08] She turns the card over toward the camera at the very last moment.
+  ```
+  If timestamps still fail, restructure across shots: move the pre-speech action
+  to the END of the previous shot so this shot can speak from 0s, and/or pad the
+  line's start with transition words ("and there it is.") to push key words later.
+- **Keep prompts SIMPLE.** Long fidelity boilerplate + many-step sequences cause
+  instruction drift (steps get skipped or merged). State the camera, the beats
+  with inlined dialogue, and lip-sync — nothing else.
+- **Complex action sequence and target last frame: pick ONE.** Frame
+  interpolation rushes to the pinned end frame and compresses/skips intermediate
+  steps. With a tail frame, keep the action to 1–2 steps; move extra steps to a
+  neighboring shot.
+- **Key props (card faces, text, logos) cannot be invented mid-shot.** Shot-level
+  reference images are NOT sent to Veo when first/last frames are used (the API
+  modes are mutually exclusive) — the model will hallucinate the prop from the
+  dialogue words. Reveal the prop at the shot's very END, pinned by a target last
+  frame containing the real image; the next shot inherits the correct picture via
+  first-frame continuity.
+- **Prefer positive phrasing** ("its back faces the camera the whole time") over
+  "never/no" statements — negations are weakly followed.
+
 ## 3. Storyboard structure & status
 
 - `replace_storyboard` requires the project in **`script_review`** status (else 409).
