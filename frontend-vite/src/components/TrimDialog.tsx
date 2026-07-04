@@ -41,6 +41,7 @@ export function TrimDialog({
   const [duration, setDuration] = useState(0)
   const [endFrame, setEndFrame] = useState(0)
   const [speechEndFrame, setSpeechEndFrame] = useState<number | null>(null)
+  const [sourceVideoUrl, setSourceVideoUrl] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isTrimming, setIsTrimming] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
@@ -137,6 +138,7 @@ export function TrimDialog({
       setEndFrame(shot.trim_frames ?? info.total_frames)
       setHasBackup(info.has_backup)
       setSpeechEndFrame(info.speech_end_frame)
+      setSourceVideoUrl(info.source_video_url ?? null)
       setIsLoading(false)
     }).catch((e) => {
       setError(e instanceof Error ? e.message : 'Failed to load video info')
@@ -275,7 +277,7 @@ export function TrimDialog({
             <div className="min-h-0 flex-1 flex items-center justify-center bg-black rounded-lg overflow-hidden">
               <video
                 ref={videoRef}
-                src={shot.video_path || undefined}
+                src={sourceVideoUrl ?? shot.video_path ?? undefined}
                 preload="auto"
                 className="max-w-full max-h-full object-contain"
                 onLoadedMetadata={() => seekToFrame(endFrame)}
@@ -303,7 +305,7 @@ export function TrimDialog({
                   style={{ width: `${trimmedPercent}%` }}
                 />
                 <div
-                  className="absolute inset-y-0 bg-red-300/50 rounded-r-full"
+                  className="absolute inset-y-0 bg-zinc-300 rounded-r-full"
                   style={{ left: `${trimmedPercent}%`, right: 0 }}
                 />
               </div>
@@ -325,6 +327,11 @@ export function TrimDialog({
                 {endFrame < totalFrames && (
                   <span className="text-red-500 ml-2">
                     裁掉 {totalFrames - endFrame} 帧
+                  </span>
+                )}
+                {speechEndFrame != null && (
+                  <span className="text-amber-700 ml-2 font-medium">
+                    静音参考: 第 {speechEndFrame} 帧
                   </span>
                 )}
                 {playheadFrame != null && (

@@ -14,6 +14,7 @@ vi.mock('@/lib/api', () => ({
       has_backup: false,
       speech_end_frame: 180,
       speech_end_sec: 7.5,
+      source_video_url: '/api/media/projects/p/shots/shot_1/output_1_a.mp4',
     }),
     getWaveform: vi.fn().mockResolvedValue({ peaks: [0.2, 0.6, 0.4, 0.8, 0.3] }),
     trimShot: vi.fn(),
@@ -122,6 +123,24 @@ async function renderReady() {
   await waitFor(() => {
     expect(screen.getByText(/帧: 240 \/ 240/)).toBeInTheDocument()
   })
+
+  return { onOpenChange, onTrimmed }
+}
+
+/** Render dialog with an optional shot override (inline render, no wait) */
+function renderDialog(shotOverride?: Shot) {
+  const onOpenChange = vi.fn()
+  const onTrimmed = vi.fn()
+
+  render(
+    <TrimDialog
+      shot={shotOverride ?? mockShot}
+      projectId="proj-1"
+      open={true}
+      onOpenChange={onOpenChange}
+      onTrimmed={onTrimmed}
+    />
+  )
 
   return { onOpenChange, onTrimmed }
 }
@@ -320,5 +339,25 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     await waitFor(() =>
       expect(api.getWaveform).toHaveBeenCalledWith('proj-1', 1),
     )
+  })
+
+  it('帧信息行常显静音参考帧数(琥珀色)', async () => {
+    renderDialog()
+    expect(await screen.findByText('静音参考: 第 180 帧')).toBeInTheDocument()
+  })
+
+  it('预览 video 使用源片 URL 而非 shot.video_path', async () => {
+    renderDialog()
+    await screen.findByText(/帧:/)
+    const video = document.querySelector('video')!
+    expect(video.getAttribute('src')).toBe('/api/media/projects/p/shots/shot_1/output_1_a.mp4')
+  })
+
+  it('已裁剪 shot 打开时时间轴仍是全段、裁剪点在 trim_frames', async () => {
+    renderDialog({ ...mockShot, trim_frames: 200 })
+    expect(await screen.findByText(/帧:\s*200\s*\/\s*240/)).toBeInTheDocument()
+    expect(screen.getByText('裁掉 40 帧')).toBeInTheDocument()
+    const slider = document.querySelector('input[type="range"]') as HTMLInputElement
+    expect(slider.max).toBe('240')
   })
 })

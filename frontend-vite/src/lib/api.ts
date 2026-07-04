@@ -363,6 +363,7 @@ export const api = {
     has_backup: boolean
     speech_end_frame: number | null
     speech_end_sec: number | null
+    source_video_url?: string | null
   }> => {
     return request('GET', `/api/projects/${projectId}/shots/${shotId}/video-info`)
   },
