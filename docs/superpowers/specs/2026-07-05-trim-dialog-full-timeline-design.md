@@ -37,8 +37,14 @@
 4. **静音参考帧数**：`detectSilence` 返回的 `suggested_end_frame` 存入 state，
    在帧信息行以琥珀色常显（与黄线同色系）；再次打开弹窗时若已有
    `speech_end_frame`（video-info 已暴露）直接显示，无需重新检测。
-5. **后端不动**：`GET /waveform` 已对完整 `shot.video_path` 提峰值；
-   `video-info` 已暴露 `speech_end_frame/sec`。
+5. **后端：裁剪弹窗只读端点统一「源片视角」**（计划阶段修正——原假设"后端不动"
+   不成立：trim 已是纯 EDL、`video_path` 通常即源片，但 VC 后/老 shot 的
+   `video_path` 可能指向物理剪过的派生文件，ffprobe/波形/静音检测会被带偏）：
+   - `video-info`、`/waveform`、`/detect-silence` 三个只读端点改用
+     `shot_source_path(project_id, shot_id) or shot.video_path`（与 trim 端点
+     同一 helper，帧号天然同一坐标系——trim 本就按源片帧号裁剪）。
+   - `video-info` 增加返回 `source_video_url`（源片 media URL），前端 `<video>`
+     用它做预览源，使已裁剪区段也可被 seek/预览。
 
 ## 测试
 
