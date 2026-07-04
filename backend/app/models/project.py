@@ -139,6 +139,8 @@ class Shot(Base):
     word_count_warning = Column(Boolean, default=False)
     error_message = Column(Text, nullable=True)
     custom_first_frame_path = Column(Text, nullable=True)  # 用户上传的自定义首帧
+    ff_status = Column(String(20), nullable=True)  # null | "generating" | "done" | "failed"
+    ff_error_message = Column(Text, nullable=True)
     custom_reference_paths = Column(Text, nullable=True)  # JSON: ["path1.png","path2.png"]
     reference_image_hint = Column(Text, nullable=True)  # AI 生成的参考图上传提示
     vc_status = Column(String(20), nullable=True)  # null | "converting" | "done" | "failed"

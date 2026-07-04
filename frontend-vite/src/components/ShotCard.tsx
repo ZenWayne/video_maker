@@ -50,6 +50,7 @@ interface ShotCardProps {
   onCharacterCalibrateRevert?: (shotId: number) => void
   onGenerateTailFrame?: (shotId: number) => void
   onDeleteTailFrame?: (shotId: number) => void
+  onGenerateFirstFrame?: (shotId: number) => void
 }
 
 interface KeyframeMenuItem {
@@ -201,6 +202,7 @@ export function ShotCard({
   onCharacterCalibrateRevert,
   onGenerateTailFrame,
   onDeleteTailFrame,
+  onGenerateFirstFrame,
 }: ShotCardProps) {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isPromptDialogOpen, setIsPromptDialogOpen] = useState(false)
@@ -912,9 +914,15 @@ export function ShotCard({
                 label="首帧"
                 accent="zinc"
                 imgUrl={firstFrameUrl}
+                generating={shot.ff_status === 'generating'}
+                failed={shot.ff_status === 'failed'}
                 onPreview={setPreviewUrl}
                 onDelete={handleDeleteFirstFrame}
+                onRetry={onGenerateFirstFrame ? () => onGenerateFirstFrame(shot.shot_id) : undefined}
                 menuItems={[
+                  ...(onGenerateFirstFrame
+                    ? [{ icon: Sparkles, label: '生成首帧', onClick: () => onGenerateFirstFrame(shot.shot_id) }]
+                    : []),
                   { icon: Crop, label: '提取本镜首帧', disabled: shot.status !== 'completed', onClick: handleExtractFirstFrame },
                   { icon: ArrowLeftToLine, label: '提取上一镜末帧', disabled: shot.shot_id <= 1, onClick: handleUsePrevLastFrame },
                   { icon: Upload, label: '上传首帧', onClick: () => firstFrameInputRef.current?.click() },
@@ -937,6 +945,9 @@ export function ShotCard({
                   { icon: Upload, label: '上传尾帧', onClick: () => tailFrameInputRef.current?.click() },
                 ]}
               />
+              {shot.ff_status === 'failed' && shot.ff_error_message && (
+                <span className="text-[11px] text-red-500 mt-1">{shot.ff_error_message}</span>
+              )}
               {shot.tf_status === 'failed' && shot.tf_error_message && (
                 <span className="text-[11px] text-red-500 mt-1">{shot.tf_error_message}</span>
               )}

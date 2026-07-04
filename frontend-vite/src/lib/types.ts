@@ -53,6 +53,7 @@ export interface Project {
 export type VcStatus = 'converting' | 'done' | 'failed'
 export type CcStatus = 'calibrating' | 'done' | 'failed'
 export type TfStatus = 'generating' | 'done' | 'failed'
+export type FfStatus = 'generating' | 'done' | 'failed'
 
 export interface Shot {
   id: number
@@ -71,6 +72,8 @@ export interface Shot {
   word_count_warning: boolean
   error_message: string | null
   custom_first_frame_path: string | null
+  ff_status: FfStatus | null
+  ff_error_message: string | null
   custom_reference_paths: string[] | null
   reference_image_hint: string | null
   vc_status: VcStatus | null
@@ -128,6 +131,9 @@ export type SSEEventType =
   | 'tf_pose_analyzed'
   | 'tf_completed'
   | 'tf_failed'
+  | 'ff_started'
+  | 'ff_completed'
+  | 'ff_failed'
 
 export interface WorkerStatusData {
   message: string

@@ -219,6 +219,10 @@ async def generate_tail_frame(
                 config=types.GenerateContentConfig(
                     response_modalities=["IMAGE"],
                     temperature=1.0,
+                    # Pin output orientation — without this the model sometimes
+                    # returns landscape and the 9:16 center-crop chops off 2/3
+                    # of the width (reads as a hard zoom-in).
+                    image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
                 ),
             ),
             label="TF image generation",
