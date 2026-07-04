@@ -55,6 +55,9 @@ const mockProject = {
       auto_trim: true,
       target_last_frame_path: null,
       tf_confirmed: false,
+      trim_frames: 100,
+      source_fps: 24.0,
+      source_frames: 117,
     },
   ],
 }
@@ -67,6 +70,7 @@ const mockVideoInfo = {
   has_backup: false,
   speech_end_sec: 4.34742,
   speech_end_frame: 104,
+  source_video_url: REAL_VIDEO,
 }
 
 test.describe('裁剪弹窗 · 声纹波形轨', () => {
@@ -136,5 +140,20 @@ test.describe('裁剪弹窗 · 声纹波形轨', () => {
     await expect(page.getByRole('button', { name: '确认裁剪' })).toBeVisible()
     await expect(page.getByText(/帧:\s*\d+\s*\/\s*117/)).toBeVisible()
     // Do NOT click 确认裁剪 — that would mutate the real shot asset.
+  })
+
+  test('已裁剪 shot：全段时间轴 + 灰显图例 + 静音参考帧数', async ({ page }) => {
+    await page.goto(`/projects/${PROJECT_ID}/shots`)
+    await expect(page.getByTestId('shots-list')).toBeVisible({ timeout: 10_000 })
+    await page.getByRole('button', { name: '裁剪' }).first().click()
+    await expect(page.getByText('裁剪视频 — Shot #1')).toBeVisible({ timeout: 5_000 })
+
+    // 全段：分母是源总帧 117，裁剪点回落在 trim_frames=100
+    await expect(page.getByText(/帧:\s*100\s*\/\s*117/)).toBeVisible()
+    await expect(page.getByText('裁掉 17 帧')).toBeVisible()
+    // 静音参考帧数常显（mockVideoInfo.speech_end_frame = 104）
+    await expect(page.getByText('静音参考: 第 104 帧')).toBeVisible()
+    // 图例含灰显说明
+    await expect(page.getByText(/灰=已裁剪/)).toBeVisible()
   })
 })
