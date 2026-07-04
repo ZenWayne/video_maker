@@ -42,6 +42,12 @@ not suggestions. (The video-maker-dialogue MCP serves this same content via
   to `false`; pass `true` only when you explicitly want the trailing
   `The character says: "..."` marker appended instead (never hand-write that line).
   After editing dialogue, update the inlined sentences to match.
+- **Emotional continuity:** every shot must sense the PREVIOUS shot's performance
+  micro-emotion. Open the motion prompt with one short line describing the mood
+  she carries in from the previous shot (inferred from its dialogue and actions —
+  do NOT quote the lines) and how it evolves across this shot, e.g. "She enters
+  still carrying the steady, assured tone of the card reveal; across this shot it
+  softens into gentle empathy." Shot 1 needs no such line.
 
 ### Motion-prompt authoring lessons (Veo 3.1, learned in production)
 
