@@ -224,7 +224,7 @@ export default function HomePage() {
                   {project.status === 'exported' && project.final_video_path ? (
                     <div className={`${project.aspect_ratio === '9:16' ? 'aspect-[9/16]' : 'aspect-video'} bg-zinc-100 rounded-lg overflow-hidden`}>
                       <video
-                        src={project.final_video_path}
+                        src={api.finalVideoUrl(project.id)}
                         className="w-full h-full object-cover"
                       />
                     </div>

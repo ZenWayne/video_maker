@@ -134,7 +134,7 @@ export default function ExportPage() {
               {finalVideoPath ? (
                 <div className={`${currentProject?.aspect_ratio === '9:16' ? 'aspect-[9/16]' : 'aspect-video'} bg-zinc-900`}>
                   <video
-                    src={finalVideoPath}
+                    src={projectId ? api.finalVideoUrl(projectId) : undefined}
                     controls
                     className="w-full h-full"
                   />
