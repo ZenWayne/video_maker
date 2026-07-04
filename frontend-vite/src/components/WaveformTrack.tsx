@@ -55,9 +55,9 @@ export default function WaveformTrack({
       g.fillRect(i * barWidth, mid - h / 2, barWidth, h)
     })
 
-    // 待裁区 + 裁剪竖线
+    // 已裁剪区磨砂灰显（波形透灰可见）+ 裁剪竖线
     const cx = pixelForFrame(endFrame, width, totalFrames)
-    g.fillStyle = 'rgba(239, 68, 68, 0.12)' // red 12%
+    g.fillStyle = 'rgba(244, 244, 245, 0.78)' // zinc-100 磨砂
     g.fillRect(cx, 0, width - cx, TRACK_HEIGHT)
     g.fillStyle = '#EF4444' // red-500
     g.fillRect(cx - 1, 0, 3, TRACK_HEIGHT)
@@ -89,7 +89,7 @@ export default function WaveformTrack({
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold text-zinc-600">声纹波形</span>
         <span className="text-[11px] text-zinc-400">
-          蓝=人声 · 黄线=说话结束 · 红线=裁剪点 · 绿线=播放
+          蓝=人声 · 灰=已裁剪 · 黄线=说话结束 · 红线=裁剪点 · 绿线=播放
         </span>
       </div>
       <canvas

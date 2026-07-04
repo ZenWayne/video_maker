@@ -117,4 +117,33 @@ describe('WaveformTrack', () => {
     fireEvent.pointerDown(canvas, { clientX: 250 })
     expect(onScrub).toHaveBeenCalledWith(120)
   })
+
+  it('endFrame 右侧画磨砂灰覆盖(已裁剪灰显)，不再画红膜', () => {
+    render(
+      <WaveformTrack
+        peaks={samplePeaks}
+        totalFrames={240}
+        endFrame={200}
+        speechEndFrame={180}
+        onScrub={() => {}}
+      />,
+    )
+    expect(fillStyleLog).toContain('rgba(244, 244, 245, 0.78)')
+    expect(fillStyleLog).not.toContain('rgba(239, 68, 68, 0.12)')
+  })
+
+  it('图例说明包含 灰=已裁剪', () => {
+    render(
+      <WaveformTrack
+        peaks={samplePeaks}
+        totalFrames={240}
+        endFrame={200}
+        speechEndFrame={null}
+        onScrub={() => {}}
+      />,
+    )
+    expect(
+      screen.getByText('蓝=人声 · 灰=已裁剪 · 黄线=说话结束 · 红线=裁剪点 · 绿线=播放'),
+    ).toBeInTheDocument()
+  })
 })
