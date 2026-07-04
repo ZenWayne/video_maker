@@ -33,6 +33,7 @@ from app.services.storage import (
     storyboard_path, archived_storyboard_path, shot_custom_frames_dir, to_media_url,
     shot_pre_vc_video_path, shot_audio_original_path, shot_audio_vc_path,
     shot_pre_cc_last_frame_path, join_preview_path, shot_dir, ts_uuid_name,
+    shot_source_path,
 )
 from app.services.events import publish_event
 
@@ -1474,6 +1475,17 @@ async def reorder_shot_references(
     return _ref_images_response(shot)
 
 
+def _dialog_source(project_id: str, shot_id: int, video_path: str) -> str:
+    """裁剪弹窗只读端点的统一「源片视角」。
+
+    trim 端点按源片帧号裁剪（shot_source_path），弹窗展示的时间轴/波形/静音
+    检测必须基于同一文件，否则 VC 后（video_path 指向物理剪过的派生文件）
+    时间轴只剩剪后长度。找不到源片时回退 video_path。
+    """
+    src = shot_source_path(project_id, shot_id)
+    return str(src) if src is not None else video_path
+
+
 @router.get("/projects/{project_id}/shots/{shot_id}/video-info")
 async def get_shot_video_info(
     project_id: str,
@@ -1491,18 +1503,20 @@ async def get_shot_video_info(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    info = get_video_info(shot.video_path)
+    source = _dialog_source(project_id, shot_id, shot.video_path)
+    info = get_video_info(source)
     # Restore is possible when a pristine output_ exists and the current clip is a
     # derived (trimmed_/vc_) file, i.e. not the pristine itself.
     from app.services.storage import pristine_video_path
     pristine = pristine_video_path(project_id, shot_id)
     info["has_backup"] = pristine is not None and Path(shot.video_path) != pristine
     try:
-        sec, frame = speech_end_info(shot.video_path, info["fps"])
+        sec, frame = speech_end_info(source, info["fps"])
     except Exception:  # 静音检测失败不应阻塞裁剪元数据返回
         sec, frame = None, None
     info["speech_end_sec"] = sec
     info["speech_end_frame"] = frame
+    info["source_video_url"] = to_media_url(source)
     return info
 
 
@@ -1523,7 +1537,7 @@ async def get_shot_waveform(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
     try:
-        peaks = extract_waveform_peaks(shot.video_path)
+        peaks = extract_waveform_peaks(_dialog_source(project_id, shot_id, shot.video_path))
     except Exception:
         peaks = []
     return {"peaks": peaks}
@@ -1817,13 +1831,14 @@ async def detect_silence(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    suggestion = suggest_silence_trim(shot.video_path)
+    source = _dialog_source(project_id, shot_id, shot.video_path)
+    suggestion = suggest_silence_trim(source)
     if suggestion is None:
         return {
             "has_silence": False,
             "suggested_end_frame": None,
             "silence_start_time": None,
-            **get_video_info(shot.video_path),
+            **get_video_info(source),
         }
     return {"has_silence": True, **suggestion}
 
