@@ -35,9 +35,13 @@ not suggestions. (The video-maker-dialogue MCP serves this same content via
 - Write the motion prompt in **ENGLISH**, even when the dialogue is another language.
 - Describe **camera movement + talking-head physiological cues** (gaze, gestures,
   blinking, lip movement); preserve visual fidelity to the reference / first frame.
-- **Lip-sync:** call `update_motion` with `sync_lip_marker=true` (default) and the
-  lip-sync line — `The character says: "..."` — is appended and kept in sync with
-  the current dialogue automatically. Do NOT hand-write that line yourself.
+- **Dialogue placement:** weave the dialogue INTO the action beats — each sentence
+  inlined at its moment (e.g. `saying "..." as she flips the card`). This is the only
+  way to align speech with actions; a bare trailing dialogue line has no timing
+  context and makes the character start speaking at 0s. `sync_lip_marker` defaults
+  to `false`; pass `true` only when you explicitly want the trailing
+  `The character says: "..."` marker appended instead (never hand-write that line).
+  After editing dialogue, update the inlined sentences to match.
 
 ## 3. Storyboard structure & status
 

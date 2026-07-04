@@ -136,6 +136,17 @@ async def test_update_motion_appends_lip_marker(server, db_session_factory):
     assert 'The character says: "line 1"' in data["shot"]["motion_prompt"]
 
 
+async def test_update_motion_default_no_marker(server, db_session_factory):
+    """sync_lip_marker defaults to False — omitting it stores the prompt as-is."""
+    pid = await seed_project(db_session_factory)
+    async with Client(server) as c:
+        res = await c.call_tool("update_motion",
+                                {"project_id": pid, "shot_id": 1,
+                                 "motion_prompt": "slow zoom in"})
+    data = _payload(res)
+    assert data["shot"]["motion_prompt"] == "slow zoom in"
+
+
 async def test_update_motion_no_marker_when_disabled(server, db_session_factory):
     pid = await seed_project(db_session_factory)
     async with Client(server) as c:
