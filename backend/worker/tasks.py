@@ -435,7 +435,6 @@ async def run_shot_pipeline(
                     motion_prompt=motion_prompt,
                     first_frame_path=str(first_frame) if first_frame else None,
                     shot_duration=shot.shot_duration,
-                    spoken_text=shot.text,
                     reference_image_paths=ref_paths,
                     aspect_ratio=project.aspect_ratio,
                     last_frame_path=last_frame,

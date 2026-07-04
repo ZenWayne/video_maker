@@ -51,13 +51,6 @@ class VideoGenerationTimeout(Exception):
 # Shared helpers
 # --------------------------------------------------------------------------- #
 
-def _build_prompt(motion_prompt: str, spoken_text: str) -> str:
-    """Append spoken dialogue to the motion prompt (shared by all providers)."""
-    if spoken_text and spoken_text.strip():
-        return f"{motion_prompt}\n\nSpoken dialogue: {spoken_text.strip()}"
-    return motion_prompt
-
-
 def _crop_inputs(
     tmp_dir: str,
     first_frame_path: Optional[str],
@@ -104,12 +97,16 @@ class VideoProvider(ABC):
         motion_prompt: str,
         first_frame_path: Optional[str],
         shot_duration: int,
-        spoken_text: str,
         reference_image_paths: Optional[list[str]] = None,
         aspect_ratio: str = "16:9",
         last_frame_path: Optional[str] = None,
     ) -> bytes:
-        """Generate a video and return the raw MP4 bytes."""
+        """Generate a video and return the raw MP4 bytes.
+
+        The motion prompt is sent to the provider as-is: any dialogue the
+        character speaks must already be written into it (the director /
+        MCP sync keep it there).
+        """
         raise NotImplementedError
 
 
@@ -134,7 +131,6 @@ class VertexVeoProvider(VideoProvider):
         motion_prompt: str,
         first_frame_path: Optional[str],
         shot_duration: int,
-        spoken_text: str,
         reference_image_paths: Optional[list[str]] = None,
         aspect_ratio: str = "16:9",
         last_frame_path: Optional[str] = None,
@@ -149,7 +145,7 @@ class VertexVeoProvider(VideoProvider):
             )
 
             logger.info("Starting Veo generation with prompt: %s...", motion_prompt[:100])
-            prompt = _build_prompt(motion_prompt, spoken_text)
+            prompt = motion_prompt
 
             # reference_images mode requires exactly 8s duration
             effective_duration = 8 if reference_image_paths else shot_duration
@@ -437,7 +433,6 @@ class KieVeoProvider(VideoProvider):
         motion_prompt: str,
         first_frame_path: Optional[str],
         shot_duration: int,
-        spoken_text: str,
         reference_image_paths: Optional[list[str]] = None,
         aspect_ratio: str = "16:9",
         last_frame_path: Optional[str] = None,
@@ -451,7 +446,7 @@ class KieVeoProvider(VideoProvider):
                 reference_image_paths, aspect_ratio,
             )
 
-            prompt = _build_prompt(motion_prompt, spoken_text)
+            prompt = motion_prompt
             generation_type, image_paths, model = self._resolve_mode(
                 first_frame_path, last_frame_path, reference_image_paths,
             )
@@ -522,15 +517,15 @@ async def generate_video(
 ) -> bytes:
     """Generate video via the configured provider.
 
-    ``client`` and ``operation_id`` are accepted for backward compatibility and
-    ignored — each provider manages its own client/transport.
+    ``client``, ``operation_id`` and ``spoken_text`` are accepted for backward
+    compatibility and ignored — providers manage their own client/transport,
+    and dialogue must be written into ``motion_prompt`` itself.
     """
     provider = get_video_provider()
     return await provider.generate_video(
         motion_prompt=motion_prompt,
         first_frame_path=first_frame_path,
         shot_duration=shot_duration,
-        spoken_text=spoken_text,
         reference_image_paths=reference_image_paths,
         aspect_ratio=aspect_ratio,
         last_frame_path=last_frame_path,
