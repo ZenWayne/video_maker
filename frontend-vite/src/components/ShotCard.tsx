@@ -1029,7 +1029,7 @@ export function ShotCard({
       {editDialog}
 
       <Dialog open={isPromptDialogOpen} onOpenChange={setIsPromptDialogOpen}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-2xl overflow-y-auto max-h-[90vh]">
           <DialogHeader>
             <DialogTitle>编辑运镜提示词 #{shot.shot_id}</DialogTitle>
           </DialogHeader>
