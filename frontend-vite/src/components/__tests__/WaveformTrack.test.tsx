@@ -146,4 +146,21 @@ describe('WaveformTrack', () => {
       screen.getByText('蓝=人声 · 灰=已裁剪 · 黄线=说话结束 · 红线=裁剪点 · 绿线=播放'),
     ).toBeInTheDocument()
   })
+
+  it('speechEndFrame 在已裁剪区内时,黄线绘制在灰显之上保持清晰可见', () => {
+    render(
+      <WaveformTrack
+        peaks={samplePeaks}
+        totalFrames={240}
+        endFrame={100}
+        speechEndFrame={180}
+        onScrub={() => {}}
+      />,
+    )
+    const greyOverlayIndex = fillStyleLog.indexOf('rgba(244, 244, 245, 0.78)')
+    const amberLineIndex = fillStyleLog.indexOf('#B45309')
+    expect(greyOverlayIndex).toBeGreaterThan(-1)
+    expect(amberLineIndex).toBeGreaterThan(-1)
+    expect(amberLineIndex).toBeGreaterThan(greyOverlayIndex) // 黄线在灰显之后绘制
+  })
 })

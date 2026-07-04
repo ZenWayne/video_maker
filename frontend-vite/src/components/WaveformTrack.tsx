@@ -38,13 +38,11 @@ export default function WaveformTrack({
 
     const mid = TRACK_HEIGHT / 2
 
-    // 静音高亮带 + 说话结束竖线
+    // 静音高亮带（背景，保持在柱子下层）
     if (speechEndFrame != null) {
       const sx = pixelForFrame(speechEndFrame, width, totalFrames)
       g.fillStyle = 'rgba(252, 211, 77, 0.18)' // amber 18%
       g.fillRect(sx, 0, width - sx, TRACK_HEIGHT)
-      g.fillStyle = '#B45309' // amber-700
-      g.fillRect(sx - 1, 0, 2, TRACK_HEIGHT)
     }
 
     // 峰值柱
@@ -61,6 +59,13 @@ export default function WaveformTrack({
     g.fillRect(cx, 0, width - cx, TRACK_HEIGHT)
     g.fillStyle = '#EF4444' // red-500
     g.fillRect(cx - 1, 0, 3, TRACK_HEIGHT)
+
+    // 说话结束竖线（黄线画在灰显之上，确保在已裁剪区仍清晰可见）
+    if (speechEndFrame != null) {
+      const sx = pixelForFrame(speechEndFrame, width, totalFrames)
+      g.fillStyle = '#B45309' // amber-700
+      g.fillRect(sx - 1, 0, 2, TRACK_HEIGHT)
+    }
 
     // 播放头(预览播放时跟随 currentTime)
     if (playheadFrame != null) {
