@@ -1505,6 +1505,9 @@ async def get_shot_video_info(
 
     source = _dialog_source(project_id, shot_id, shot.video_path)
     info = get_video_info(source)
+    # 容器时长可能含超出视频的音频尾巴（老生成产物）——时间轴统一按视频流计
+    if info.get("fps"):
+        info["duration"] = round(info["total_frames"] / info["fps"], 3)
     # Restore is possible when a pristine output_ exists and the current clip is a
     # derived (trimmed_/vc_) file, i.e. not the pristine itself.
     from app.services.storage import pristine_video_path
@@ -1527,7 +1530,7 @@ async def get_shot_waveform(
     session: AsyncSession = Depends(get_session),
 ):
     """Return audio waveform peaks for the shot video as a list of floats in [0,1]."""
-    from app.agents.video_trimmer import extract_waveform_peaks
+    from app.agents.video_trimmer import extract_waveform_peaks, get_video_info
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1537,7 +1540,10 @@ async def get_shot_waveform(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
     try:
-        peaks = extract_waveform_peaks(_dialog_source(project_id, shot_id, shot.video_path))
+        source = _dialog_source(project_id, shot_id, shot.video_path)
+        info = get_video_info(source)
+        video_seconds = info["total_frames"] / info["fps"] if info.get("fps") else None
+        peaks = extract_waveform_peaks(source, max_seconds=video_seconds)
     except Exception:
         peaks = []
     return {"peaks": peaks}

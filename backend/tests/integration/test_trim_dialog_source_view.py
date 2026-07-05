@@ -38,11 +38,14 @@ def probe_calls(monkeypatch):
     def _rec(key, ret):
         def f(path, *args, **kwargs):
             calls[key] = path
+            calls[key + "_kwargs"] = kwargs
             return ret
         return f
 
     monkeypatch.setattr(vt, "get_video_info", _rec("info", {
-        "fps": 24.0, "total_frames": 144, "duration": 6.0,
+        # duration 故意设为错误值（容器时长/音频尾巴），验证端点会用
+        # total_frames/fps 归一化，而不是直接透传 ffprobe 的 duration
+        "fps": 24.0, "total_frames": 144, "duration": 7.5,
     }))
     monkeypatch.setattr(vt, "speech_end_info", _rec("speech", (5.0, 120)))
     monkeypatch.setattr(vt, "extract_waveform_peaks", _rec("peaks", [0.5]))
@@ -62,6 +65,9 @@ async def test_video_info_probes_source_and_returns_source_url(
     assert probe_calls["speech"] == source, "静音检测必须打在源片上"
     assert r.json()["source_video_url"] is not None
     assert "output_1700000000_deadbeef.mp4" in r.json()["source_video_url"]
+    # duration 必须按视频流 (total_frames/fps = 144/24) 归一化，
+    # 而不是 mock 里故意设错的容器 duration (7.5)
+    assert r.json()["duration"] == pytest.approx(6.0)
 
 
 async def test_waveform_extracts_from_source(
@@ -73,6 +79,9 @@ async def test_waveform_extracts_from_source(
     r = await client.get(f"/api/projects/{pid}/shots/1/waveform")
     assert r.status_code == 200
     assert probe_calls["peaks"] == source
+    # 端点必须把视频流时长 (total_frames/fps = 144/24) 作为 max_seconds
+    # 传给 extract_waveform_peaks，桶才能按视频时间轴对齐
+    assert probe_calls["peaks_kwargs"]["max_seconds"] == pytest.approx(144 / 24.0)
 
 
 async def test_detect_silence_probes_source(
