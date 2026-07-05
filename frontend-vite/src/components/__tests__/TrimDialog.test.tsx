@@ -309,19 +309,33 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     expect(video.pause).toHaveBeenCalledTimes(1)
   })
 
-  it('confirm button stays disabled until slider is moved', async () => {
+  it('confirm button is enabled at full length (last frame = untrimmed)', async () => {
     await renderReady()
 
-    // Initially endFrame == totalFrames → nothing to trim
-    expect(screen.getByText('确认裁剪').closest('button')).toBeDisabled()
+    // Initially endFrame == totalFrames (full length) → button is ENABLED
+    // (last frame means "not trimmed" — confirm at full length clears the trim)
+    expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
 
-    // Move slider → now there's something to trim
+    // Move slider to trim → button stays enabled
     fireEvent.change(screen.getByRole('slider'), { target: { value: '200' } })
     expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
 
-    // Move back to max → nothing to trim again
+    // Move back to max (full length) → button still enabled
     fireEvent.change(screen.getByRole('slider'), { target: { value: '240' } })
-    expect(screen.getByText('确认裁剪').closest('button')).toBeDisabled()
+    expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
+  })
+
+  it('confirm button is enabled when already-trimmed shot loads at full timeline', async () => {
+    // Render a shot that was previously trimmed to frame 200
+    renderDialog({ ...mockShot, trim_frames: 200 })
+
+    // Wait for load — total timeline is 240, but endFrame initialized to trim_frames (200)
+    await waitFor(() => {
+      expect(screen.getByText(/帧:\s*200\s*\/\s*240/)).toBeInTheDocument()
+    })
+
+    // Confirm button is enabled (can always confirm, even at non-full-length)
+    expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
   })
 
   it('加载后渲染声纹波形轨', async () => {

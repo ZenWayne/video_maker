@@ -166,7 +166,6 @@ export function TrimDialog({
   }
 
   const handleTrim = async () => {
-    if (endFrame >= totalFrames) return
     setIsTrimming(true)
     setError('')
     try {
@@ -442,7 +441,7 @@ export function TrimDialog({
                 </Button>
                 <Button
                   onClick={handleTrim}
-                  disabled={isTrimming || isDetectingSilence || endFrame >= totalFrames}
+                  disabled={isTrimming || isDetectingSilence}
                 >
                   {isTrimming ? (
                     <><Loader2 className="w-4 h-4 mr-1 animate-spin" />裁剪中...</>
