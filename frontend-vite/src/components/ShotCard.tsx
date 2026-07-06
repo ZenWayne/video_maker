@@ -48,9 +48,8 @@ interface ShotCardProps {
   onVoiceRevert?: (shotId: number) => void
   onCharacterCalibrate?: (shotId: number) => void
   onCharacterCalibrateRevert?: (shotId: number) => void
-  onGenerateTailFrame?: (shotId: number) => void
   onDeleteTailFrame?: (shotId: number) => void
-  onGenerateFirstFrame?: (shotId: number) => void
+  onOpenGenerateImage?: (shotId: number, slot: 'first_frame' | 'tail_frame') => void
 }
 
 interface KeyframeMenuItem {
@@ -200,9 +199,8 @@ export function ShotCard({
   onVoiceRevert,
   onCharacterCalibrate,
   onCharacterCalibrateRevert,
-  onGenerateTailFrame,
   onDeleteTailFrame,
-  onGenerateFirstFrame,
+  onOpenGenerateImage,
 }: ShotCardProps) {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isPromptDialogOpen, setIsPromptDialogOpen] = useState(false)
@@ -918,10 +916,10 @@ export function ShotCard({
                 failed={shot.ff_status === 'failed'}
                 onPreview={setPreviewUrl}
                 onDelete={handleDeleteFirstFrame}
-                onRetry={onGenerateFirstFrame ? () => onGenerateFirstFrame(shot.shot_id) : undefined}
+                onRetry={onOpenGenerateImage ? () => onOpenGenerateImage(shot.shot_id, 'first_frame') : undefined}
                 menuItems={[
-                  ...(onGenerateFirstFrame
-                    ? [{ icon: Sparkles, label: '生成首帧', onClick: () => onGenerateFirstFrame(shot.shot_id) }]
+                  ...(onOpenGenerateImage
+                    ? [{ icon: Sparkles, label: '生成首帧…', onClick: () => onOpenGenerateImage(shot.shot_id, 'first_frame') }]
                     : []),
                   { icon: Crop, label: '提取本镜首帧', disabled: shot.status !== 'completed', onClick: handleExtractFirstFrame },
                   { icon: ArrowLeftToLine, label: '提取上一镜末帧', disabled: shot.shot_id <= 1, onClick: handleUsePrevLastFrame },
@@ -936,10 +934,10 @@ export function ShotCard({
                 failed={shot.tf_status === 'failed'}
                 onPreview={setPreviewUrl}
                 onDelete={onDeleteTailFrame ? () => onDeleteTailFrame(shot.shot_id) : undefined}
-                onRetry={onGenerateTailFrame ? () => onGenerateTailFrame(shot.shot_id) : undefined}
+                onRetry={onOpenGenerateImage ? () => onOpenGenerateImage(shot.shot_id, 'tail_frame') : undefined}
                 menuItems={[
-                  ...(onGenerateTailFrame
-                    ? [{ icon: Sparkles, label: '生成尾帧', disabled: !shot.motion_prompt, onClick: () => onGenerateTailFrame(shot.shot_id) }]
+                  ...(onOpenGenerateImage
+                    ? [{ icon: Sparkles, label: '生成尾帧…', onClick: () => onOpenGenerateImage(shot.shot_id, 'tail_frame') }]
                     : []),
                   { icon: Crop, label: '提取本镜尾帧', disabled: !shot.last_frame_path, onClick: handleExtractLastFrame },
                   { icon: Upload, label: '上传尾帧', onClick: () => tailFrameInputRef.current?.click() },

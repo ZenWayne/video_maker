@@ -24,6 +24,7 @@ import { ShotCard } from '@/components/ShotCard'
 import { ProgressStream } from '@/components/ProgressStream'
 import { VoiceCalibrationPanel } from '@/components/VoiceCalibrationPanel'
 import { ReferenceAssetsPanel } from '@/components/ReferenceAssetsPanel'
+import { GenerateImageDialog } from '@/components/GenerateImageDialog'
 import {
   Tooltip,
   TooltipContent,
@@ -32,7 +33,7 @@ import {
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/state'
 import { versionShotMedia } from '@/lib/media'
-import type { ProjectStatus, ReferenceImage, Shot } from '@/lib/types'
+import type { ProjectDetail, ProjectStatus, ReferenceImage, Shot } from '@/lib/types'
 
 // 计算断层警告
 function computeCascadeWarnings(
@@ -92,6 +93,7 @@ export default function ShotsPage() {
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([])
   const [joinPreviewUrl, setJoinPreviewUrl] = useState<string | null>(null)
   const [isJoining, setIsJoining] = useState(false)
+  const [genDialog, setGenDialog] = useState<{ shotId: number; slot: 'first_frame' | 'tail_frame' } | null>(null)
 
   const updateShot = useStore((s) => s.updateShot)
 
@@ -554,34 +556,6 @@ export default function ShotsPage() {
     }
   }
 
-  // 生成尾帧
-  const handleGenerateTailFrame = async (shotId: number) => {
-    if (!projectId) return
-    try {
-      await api.generateTailFrame(projectId, shotId)
-      updateShot(shotId, { tf_status: 'generating', tf_confirmed: false })
-    } catch (error) {
-      addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : '尾帧生成失败',
-      })
-    }
-  }
-
-  // 生成首帧（AI 图片生成，支持参考物）
-  const handleGenerateFirstFrame = async (shotId: number) => {
-    if (!projectId) return
-    try {
-      await api.generateFirstFrame(projectId, shotId)
-      updateShot(shotId, { ff_status: 'generating' })
-    } catch (error) {
-      addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : '首帧生成失败',
-      })
-    }
-  }
-
   // 确认尾帧/提取尾帧 已移除（path-as-truth：尾帧上传/提取/删除在 ShotCard 内联调用对应端点）
 
   // 删除尾帧（清空尾帧状态，不自动生成视频）
@@ -689,14 +663,29 @@ export default function ShotsPage() {
                   onVoiceRevert={handleVoiceRevert}
                   onCharacterCalibrate={handleCharacterCalibrate}
                   onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
-                  onGenerateTailFrame={handleGenerateTailFrame}
                   onDeleteTailFrame={handleDeleteTailFrame}
-                  onGenerateFirstFrame={handleGenerateFirstFrame}
+                  onOpenGenerateImage={(shotId, slot) => setGenDialog({ shotId, slot })}
                 />
               )
             })}
           </div>
         </main>
+
+        {genDialog && currentProject && (() => {
+          const shot = shots.find((s) => s.shot_id === genDialog.shotId)
+          if (!shot) return null
+          const projectDetail: ProjectDetail = { ...currentProject, shots, reference_images: referenceImages }
+          return (
+            <GenerateImageDialog
+              project={projectDetail}
+              shot={shot}
+              slot={genDialog.slot}
+              open
+              onOpenChange={(o) => !o && setGenDialog(null)}
+              onChanged={refetchProject}
+            />
+          )
+        })()}
       </div>
     )
   }
@@ -866,9 +855,8 @@ export default function ShotsPage() {
                 onVoiceRevert={handleVoiceRevert}
                 onCharacterCalibrate={handleCharacterCalibrate}
                 onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
-                onGenerateTailFrame={handleGenerateTailFrame}
                 onDeleteTailFrame={handleDeleteTailFrame}
-                onGenerateFirstFrame={handleGenerateFirstFrame}
+                onOpenGenerateImage={(shotId, slot) => setGenDialog({ shotId, slot })}
               />
             )
           })}
@@ -1059,6 +1047,22 @@ export default function ShotsPage() {
           </div>
         </div>
       )}
+
+      {genDialog && currentProject && (() => {
+        const shot = shots.find((s) => s.shot_id === genDialog.shotId)
+        if (!shot) return null
+        const projectDetail: ProjectDetail = { ...currentProject, shots, reference_images: referenceImages }
+        return (
+          <GenerateImageDialog
+            project={projectDetail}
+            shot={shot}
+            slot={genDialog.slot}
+            open
+            onOpenChange={(o) => !o && setGenDialog(null)}
+            onChanged={refetchProject}
+          />
+        )
+      })()}
     </div>
   )
 }
