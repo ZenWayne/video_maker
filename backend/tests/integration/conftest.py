@@ -71,6 +71,8 @@ async def client(db_engine, db_session_factory, redis, monkeypatch, tmp_path):
     # voice routes were extracted to app.api.voice; they bind _get_arq_redis in
     # their own namespace, so patch it there too (per-namespace mocking).
     monkeypatch.setattr(voice_module, "_get_arq_redis", _fake_get_arq)
+    import app.api.image_candidates as image_candidates_module
+    monkeypatch.setattr(image_candidates_module, "_get_arq_redis", _fake_get_arq)
 
     # Override FastAPI DI
     async def override_session():
