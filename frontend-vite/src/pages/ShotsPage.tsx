@@ -148,16 +148,16 @@ export default function ShotsPage() {
     // 统一图片生成候选：开始/完成/失败/CC 候选就绪
     // 候选事件 payload 只有 {shot_id, candidate_id, slot, file_path|error}，
     // 没有完整的 candidate 对象，无法像 tf_completed 那样靠 updateShot 局部 patch，
-    // 必须真实重拉项目数据，候选画廊才能拿到 shot.image_candidates
+    // 必须真实重拉项目数据，候选画廊才能拿到 shot.image_candidates。
+    // 候选生成在 project 状态机之外，绝不能翻转页面 status（不 setStatus）。
     if (type === 'image_candidate_started') {
-      setStatus('shot_review')
+      refetchProject()
     }
     if (
       type === 'image_candidate_completed' ||
       type === 'image_candidate_failed' ||
       type === 'cc_candidate_ready'
     ) {
-      setStatus('shot_review')
       refetchProject()
     }
   }, [setShots, updateShot, refetchProject])

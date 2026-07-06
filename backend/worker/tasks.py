@@ -717,7 +717,13 @@ async def run_image_candidate(
             cand.status = "done"
             cand.error = None
             if cand.slot == "cc":
-                shot.cc_status = None
+                # 若当前 last_frame 已是已采纳的校准帧（cc_*.png），保持 cc_status="done"
+                # 以维持 已校准/还原 UI 与 character-calibrate-revert 可用；否则清空。
+                shot.cc_status = (
+                    "done"
+                    if (shot.last_frame_path and Path(shot.last_frame_path).name.startswith("cc_"))
+                    else None
+                )
                 shot.cc_error_message = None
                 session.add(shot)
             session.add(cand)
@@ -1049,7 +1055,13 @@ async def _do_character_calibrate_one(
 
             cand.file_path = out
             cand.status = "done"
-            shot.cc_status = None
+            # 若当前 last_frame 已是已采纳的校准帧（cc_*.png），保持 cc_status="done"
+            # 以维持 已校准/还原 UI 与 character-calibrate-revert 可用；否则清空。
+            shot.cc_status = (
+                "done"
+                if (shot.last_frame_path and Path(shot.last_frame_path).name.startswith("cc_"))
+                else None
+            )
             shot.cc_error_message = None
             session.add_all([cand, shot])
             await session.commit()

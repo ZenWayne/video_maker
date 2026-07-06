@@ -1,6 +1,7 @@
 """候选创建/删除端点（ARQ mock、真实 in-memory DB）."""
 import io
 import json
+from datetime import datetime, timedelta
 import pytest
 from sqlalchemy import select
 
@@ -52,6 +53,7 @@ async def test_create_custom_candidate_with_temp_upload(client, db_session_facto
     async with db_session_factory() as s:
         row = (await s.execute(select(ImageCandidate))).scalar_one()
         refs = json.loads(row.ref_paths)
+        assert "character" not in refs  # 未显式传 ref_image_ids → 键不写入，worker 端回退默认角色参考图
         assert len(refs["object"]) == 1
         assert "candidates" in refs["object"][0]  # 临时上传进 candidates 目录
         from pathlib import Path
@@ -117,5 +119,25 @@ async def test_delete_candidate(client, db_session_factory, tmp_path):
     )
     assert r3.status_code == 200
     assert not f.exists()
+    async with db_session_factory() as s:
+        assert (await s.execute(select(ImageCandidate))).scalar_one_or_none() is None
+
+
+async def test_delete_stuck_generating_candidate_after_timeout(client, db_session_factory):
+    """worker 挂掉后卡在 generating 超过 30 分钟的候选应可删除。"""
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _add_shot(db_session_factory, pid, 1)
+    r = await _create(client, pid)
+    cid = r.json()["candidate"]["id"]
+
+    async with db_session_factory() as s:
+        row = (await s.execute(select(ImageCandidate).where(ImageCandidate.id == cid))).scalar_one()
+        row.created_at = datetime.utcnow() - timedelta(minutes=31)
+        await s.commit()
+
+    r2 = await client.delete(
+        f"/api/projects/{pid}/shots/1/image-candidates/{cid}", headers=HEADERS
+    )
+    assert r2.status_code == 200
     async with db_session_factory() as s:
         assert (await s.execute(select(ImageCandidate))).scalar_one_or_none() is None

@@ -1,7 +1,7 @@
 """图片候选端点 — 统一图片生成（生成→候选→采纳）。"""
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -62,10 +62,7 @@ async def _get_candidate_or_404(
 
 
 async def _get_arq_redis(redis) -> ArqRedis:
-    from arq import create_pool
-    from arq.connections import RedisSettings
-    from app.config import settings
-    return await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    return ArqRedis(redis.connection_pool)
 
 
 @router.post(
@@ -96,13 +93,13 @@ async def create_image_candidate(
 
     custom_prompt = (custom_prompt or "").strip() or None
 
-    # ── 解析参考图选择 → ref_paths JSON（键存在即显式；全缺省则存 None）──
+    # ── 解析参考图选择 → ref_paths JSON ──
+    # "character" 键只有在显式传了 ref_image_ids 时才写入（哪怕是空列表）；
+    # 否则不写该键，worker 端按键缺失回退到默认角色参考图。
     selected_char: list[str] = []
     selected_obj: list[str] = []
-    explicit = False
 
     if ref_image_ids is not None:
-        explicit = True
         try:
             ids = json.loads(ref_image_ids)
         except json.JSONDecodeError:
@@ -120,11 +117,9 @@ async def create_image_candidate(
                 (selected_char if r.kind == "character" else selected_obj).append(r.storage_path)
 
     if include_shot_refs and shot.custom_reference_paths:
-        explicit = True
         selected_obj += json.loads(shot.custom_reference_paths)
 
     if files:
-        explicit = True
         cand_dir = shot_candidates_dir(project_id, shot_id)
         cand_dir.mkdir(parents=True, exist_ok=True)
         for f in files:
@@ -133,10 +128,12 @@ async def create_image_candidate(
             dest.write_bytes(await f.read())
             selected_obj.append(str(dest))
 
-    ref_paths = (
-        json.dumps({"character": selected_char, "object": selected_obj})
-        if explicit else None
-    )
+    refs: dict = {}
+    if ref_image_ids is not None:
+        refs["character"] = selected_char
+    if ref_image_ids is not None or selected_obj:
+        refs["object"] = selected_obj
+    ref_paths = json.dumps(refs) if refs else None
 
     cand = ImageCandidate(
         project_id=project_id,
@@ -166,10 +163,10 @@ async def delete_image_candidate(
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """删除候选：删行 + unlink 文件。生成中禁删。已采纳可删（槽位持副本）。"""
+    """删除候选：删行 + unlink 文件。生成中（未超时）禁删；卡死（>=30min）可删。已采纳可删（槽位持副本）。"""
     await _get_project_or_404(project_id, session)
     cand = await _get_candidate_or_404(project_id, shot_id, candidate_id, session)
-    if cand.status == "generating":
+    if cand.status == "generating" and (datetime.utcnow() - cand.created_at) < timedelta(minutes=30):
         raise HTTPException(status_code=409, detail="Candidate is still generating")
     if cand.file_path:
         Path(cand.file_path).unlink(missing_ok=True)
