@@ -168,9 +168,9 @@ def _make_fake_generate_content(captured, image_bytes: bytes, cot_text: str):
 
 
 @pytest.mark.asyncio
-async def test_tail_frame_generator_builds_correct_prompt(tmp_path):
+async def test_generate_tail_frame_builds_correct_prompt(tmp_path):
     """generate_tail_frame passes first_frame, object refs, character refs, then prompt text."""
-    from app.services.tail_frame_generator import generate_tail_frame
+    from app.services.image_generation import generate_tail_frame
 
     char_ref = tmp_path / "char.png"
     char_ref.write_bytes(b"\x89PNG_char")
@@ -190,8 +190,8 @@ async def test_tail_frame_generator_builds_correct_prompt(tmp_path):
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = fake
 
-    with patch("app.services.tail_frame_generator._get_client", return_value=mock_client), \
-         patch("app.services.tail_frame_generator.center_crop_to_aspect"):
+    with patch("app.services.image_generation.get_client", return_value=mock_client), \
+         patch("app.services.image_generation.center_crop_to_aspect"):
         result = await generate_tail_frame(
             character_ref_paths=[str(char_ref)],
             first_frame_path=str(first_frame),
@@ -219,9 +219,9 @@ async def test_tail_frame_generator_builds_correct_prompt(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tail_frame_generator_no_object_refs(tmp_path):
+async def test_generate_tail_frame_no_object_refs(tmp_path):
     """generate_tail_frame works without object reference images."""
-    from app.services.tail_frame_generator import generate_tail_frame
+    from app.services.image_generation import generate_tail_frame
 
     char_ref = tmp_path / "char.png"
     char_ref.write_bytes(b"\x89PNG_char")
@@ -239,8 +239,8 @@ async def test_tail_frame_generator_no_object_refs(tmp_path):
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = fake
 
-    with patch("app.services.tail_frame_generator._get_client", return_value=mock_client), \
-         patch("app.services.tail_frame_generator.center_crop_to_aspect"):
+    with patch("app.services.image_generation.get_client", return_value=mock_client), \
+         patch("app.services.image_generation.center_crop_to_aspect"):
         await generate_tail_frame(
             character_ref_paths=[str(char_ref)],
             first_frame_path=str(first_frame),
@@ -257,7 +257,7 @@ async def test_tail_frame_generator_no_object_refs(tmp_path):
 @pytest.mark.asyncio
 async def test_tail_frame_cot_retries_on_empty(tmp_path):
     """When the first CoT returns empty text, generator retries with the stronger prompt."""
-    from app.services.tail_frame_generator import generate_tail_frame
+    from app.services.image_generation import generate_tail_frame
 
     char_ref = tmp_path / "char.png"
     char_ref.write_bytes(b"\x89PNG_char")
@@ -296,8 +296,8 @@ async def test_tail_frame_cot_retries_on_empty(tmp_path):
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = fake
 
-    with patch("app.services.tail_frame_generator._get_client", return_value=mock_client), \
-         patch("app.services.tail_frame_generator.center_crop_to_aspect"):
+    with patch("app.services.image_generation.get_client", return_value=mock_client), \
+         patch("app.services.image_generation.center_crop_to_aspect"):
         await generate_tail_frame(
             character_ref_paths=[str(char_ref)],
             first_frame_path=str(first_frame),
@@ -310,9 +310,9 @@ async def test_tail_frame_cot_retries_on_empty(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tail_frame_generator_raises_on_no_image(tmp_path):
+async def test_generate_tail_frame_raises_on_no_image(tmp_path):
     """generate_tail_frame raises when Gemini returns no image."""
-    from app.services.tail_frame_generator import generate_tail_frame
+    from app.services.image_generation import generate_tail_frame
 
     char_ref = tmp_path / "char.png"
     char_ref.write_bytes(b"\x89PNG")
@@ -329,7 +329,7 @@ async def test_tail_frame_generator_raises_on_no_image(tmp_path):
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = fake_generate_content
 
-    with patch("app.services.tail_frame_generator._get_client", return_value=mock_client):
+    with patch("app.services.image_generation.get_client", return_value=mock_client):
         with pytest.raises(RuntimeError, match="did not return an image"):
             await generate_tail_frame(
                 character_ref_paths=[str(char_ref)],

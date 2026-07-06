@@ -108,3 +108,37 @@ async def init_shot1_first_frame(
     if ref:
         shot.custom_first_frame_path = ref.storage_path
         session.add(shot)
+
+
+async def propagate_first_frame_to_next(
+    project_id: str, shot: Shot, last_frame_path: str, session: AsyncSession
+) -> None:
+    """Eagerly point the NEXT shot's custom_first_frame_path at this shot's last frame.
+
+    Predicate: next shot (shot_id + 1) must exist AND use_prev_last_frame=True.
+
+    Last frames now use unique filenames (last_frame_<ts>_<hex>.png), so the value
+    must be RE-POINTED on every (re)generation/trim — a previously auto-propagated
+    path would otherwise reference a deleted, stale file. We preserve a genuine user
+    override (a frame uploaded/extracted into custom_frames/) and only re-point when
+    the existing value is empty or itself an auto-propagated last frame.
+    """
+    result = await session.execute(
+        select(Shot).where(
+            Shot.project_id == project_id,
+            Shot.shot_id == shot.shot_id + 1,
+        )
+    )
+    next_shot = result.scalar_one_or_none()
+    if next_shot is None or not next_shot.use_prev_last_frame:
+        return
+    # Only auto-adjust the NEXT shot while it is still un-generated — once it has
+    # its own rendered video, leave its first frame alone (changing it would
+    # mismatch the already-generated clip).
+    if next_shot.video_path:
+        return
+    existing = next_shot.custom_first_frame_path
+    is_user_override = bool(existing) and "custom_frames" in existing
+    if not is_user_override and existing != last_frame_path:
+        next_shot.custom_first_frame_path = last_frame_path
+        session.add(next_shot)

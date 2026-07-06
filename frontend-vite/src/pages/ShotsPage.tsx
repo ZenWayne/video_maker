@@ -24,6 +24,7 @@ import { ShotCard } from '@/components/ShotCard'
 import { ProgressStream } from '@/components/ProgressStream'
 import { VoiceCalibrationPanel } from '@/components/VoiceCalibrationPanel'
 import { ReferenceAssetsPanel } from '@/components/ReferenceAssetsPanel'
+import { GenerateImageDialog } from '@/components/GenerateImageDialog'
 import {
   Tooltip,
   TooltipContent,
@@ -32,7 +33,7 @@ import {
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/state'
 import { versionShotMedia } from '@/lib/media'
-import type { ProjectStatus, ReferenceImage, Shot } from '@/lib/types'
+import type { ProjectDetail, ProjectStatus, ReferenceImage, Shot } from '@/lib/types'
 
 // 计算断层警告
 function computeCascadeWarnings(
@@ -92,8 +93,33 @@ export default function ShotsPage() {
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([])
   const [joinPreviewUrl, setJoinPreviewUrl] = useState<string | null>(null)
   const [isJoining, setIsJoining] = useState(false)
+  const [genDialog, setGenDialog] = useState<{ shotId: number; slot: 'first_frame' | 'tail_frame' } | null>(null)
 
   const updateShot = useStore((s) => s.updateShot)
+
+  // 拉取项目详情并通过统一的 state setter 写入 store + 本地 state
+  // 供挂载时初次加载复用，也供 SSE 候选事件触发的重拉复用
+  const refetchProject = useCallback(async () => {
+    if (!projectId) return
+
+    try {
+      const project = await api.getProject(projectId)
+      setCurrentProject(project)
+      setStatus(project.status as ProjectStatus)
+      setSceneOverview(project.scene_overview || '')
+      setShots((project.shots || []).map(versionShotMedia))
+      setReferenceVoiceShotId(project.reference_voice_shot_id ?? null)
+      setReferenceVoicePath(project.reference_voice_path ?? null)
+      setAutoVoiceCalibrate(project.auto_voice_calibrate ?? false)
+      setHasCharacterRefs(project.reference_images?.some((r) => r.kind === 'character') ?? false)
+      setReferenceImages(project.reference_images ?? [])
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '获取项目失败',
+      })
+    }
+  }, [projectId, setCurrentProject, setShots, addToast])
 
   const handleSSEEvent = useCallback((type: string, data?: unknown) => {
     if (type === 'all_shots_ready' || type === 'shot_review_ready') {
@@ -119,34 +145,27 @@ export default function ShotsPage() {
     if (type === 'tf_completed') {
       setStatus('shot_review')
     }
-  }, [setShots, updateShot])
-
-  // 获取项目详情
-  useEffect(() => {
-    if (!projectId) return
-
-    const fetchProject = async () => {
-      try {
-        const project = await api.getProject(projectId)
-        setCurrentProject(project)
-        setStatus(project.status as ProjectStatus)
-        setSceneOverview(project.scene_overview || '')
-        setShots((project.shots || []).map(versionShotMedia))
-        setReferenceVoiceShotId(project.reference_voice_shot_id ?? null)
-        setReferenceVoicePath(project.reference_voice_path ?? null)
-        setAutoVoiceCalibrate(project.auto_voice_calibrate ?? false)
-        setHasCharacterRefs(project.reference_images?.some((r) => r.kind === 'character') ?? false)
-        setReferenceImages(project.reference_images ?? [])
-      } catch (error) {
-        addToast({
-          type: 'error',
-          message: error instanceof Error ? error.message : '获取项目失败',
-        })
-      }
+    // 统一图片生成候选：开始/完成/失败/CC 候选就绪
+    // 候选事件 payload 只有 {shot_id, candidate_id, slot, file_path|error}，
+    // 没有完整的 candidate 对象，无法像 tf_completed 那样靠 updateShot 局部 patch，
+    // 必须真实重拉项目数据，候选画廊才能拿到 shot.image_candidates。
+    // 候选生成在 project 状态机之外，绝不能翻转页面 status（不 setStatus）。
+    if (type === 'image_candidate_started') {
+      refetchProject()
     }
+    if (
+      type === 'image_candidate_completed' ||
+      type === 'image_candidate_failed' ||
+      type === 'cc_candidate_ready'
+    ) {
+      refetchProject()
+    }
+  }, [setShots, updateShot, refetchProject])
 
-    fetchProject()
-  }, [projectId, setCurrentProject, setShots, addToast])
+  // 获取项目详情（挂载时）
+  useEffect(() => {
+    refetchProject()
+  }, [refetchProject])
 
   // 计算断层警告
   const warnings = useMemo(() => {
@@ -537,34 +556,6 @@ export default function ShotsPage() {
     }
   }
 
-  // 生成尾帧
-  const handleGenerateTailFrame = async (shotId: number) => {
-    if (!projectId) return
-    try {
-      await api.generateTailFrame(projectId, shotId)
-      updateShot(shotId, { tf_status: 'generating', tf_confirmed: false })
-    } catch (error) {
-      addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : '尾帧生成失败',
-      })
-    }
-  }
-
-  // 生成首帧（AI 图片生成，支持参考物）
-  const handleGenerateFirstFrame = async (shotId: number) => {
-    if (!projectId) return
-    try {
-      await api.generateFirstFrame(projectId, shotId)
-      updateShot(shotId, { ff_status: 'generating' })
-    } catch (error) {
-      addToast({
-        type: 'error',
-        message: error instanceof Error ? error.message : '首帧生成失败',
-      })
-    }
-  }
-
   // 确认尾帧/提取尾帧 已移除（path-as-truth：尾帧上传/提取/删除在 ShotCard 内联调用对应端点）
 
   // 删除尾帧（清空尾帧状态，不自动生成视频）
@@ -579,6 +570,34 @@ export default function ShotsPage() {
         target_last_frame_path: null,
       })
       addToast({ type: 'success', message: `镜头 #${shotId} 尾帧已删除` })
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '删除失败',
+      })
+    }
+  }
+
+  // 采纳图片候选（CC 候选采纳条：替换 shot 对应槽位）
+  const handleAdoptCandidate = async (shotId: number, candidateId: string) => {
+    if (!projectId) return
+    try {
+      await api.adoptImageCandidate(projectId, shotId, candidateId)
+      await refetchProject()
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '采纳失败',
+      })
+    }
+  }
+
+  // 删除图片候选
+  const handleDeleteCandidate = async (shotId: number, candidateId: string) => {
+    if (!projectId) return
+    try {
+      await api.deleteImageCandidate(projectId, shotId, candidateId)
+      await refetchProject()
     } catch (error) {
       addToast({
         type: 'error',
@@ -672,14 +691,31 @@ export default function ShotsPage() {
                   onVoiceRevert={handleVoiceRevert}
                   onCharacterCalibrate={handleCharacterCalibrate}
                   onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
-                  onGenerateTailFrame={handleGenerateTailFrame}
                   onDeleteTailFrame={handleDeleteTailFrame}
-                  onGenerateFirstFrame={handleGenerateFirstFrame}
+                  onOpenGenerateImage={(shotId, slot) => setGenDialog({ shotId, slot })}
+                  onAdoptCandidate={handleAdoptCandidate}
+                  onDeleteCandidate={handleDeleteCandidate}
                 />
               )
             })}
           </div>
         </main>
+
+        {genDialog && currentProject && (() => {
+          const shot = shots.find((s) => s.shot_id === genDialog.shotId)
+          if (!shot) return null
+          const projectDetail: ProjectDetail = { ...currentProject, shots, reference_images: referenceImages }
+          return (
+            <GenerateImageDialog
+              project={projectDetail}
+              shot={shot}
+              slot={genDialog.slot}
+              open
+              onOpenChange={(o) => !o && setGenDialog(null)}
+              onChanged={refetchProject}
+            />
+          )
+        })()}
       </div>
     )
   }
@@ -849,9 +885,10 @@ export default function ShotsPage() {
                 onVoiceRevert={handleVoiceRevert}
                 onCharacterCalibrate={handleCharacterCalibrate}
                 onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
-                onGenerateTailFrame={handleGenerateTailFrame}
                 onDeleteTailFrame={handleDeleteTailFrame}
-                onGenerateFirstFrame={handleGenerateFirstFrame}
+                onOpenGenerateImage={(shotId, slot) => setGenDialog({ shotId, slot })}
+                onAdoptCandidate={handleAdoptCandidate}
+                onDeleteCandidate={handleDeleteCandidate}
               />
             )
           })}
@@ -1042,6 +1079,22 @@ export default function ShotsPage() {
           </div>
         </div>
       )}
+
+      {genDialog && currentProject && (() => {
+        const shot = shots.find((s) => s.shot_id === genDialog.shotId)
+        if (!shot) return null
+        const projectDetail: ProjectDetail = { ...currentProject, shots, reference_images: referenceImages }
+        return (
+          <GenerateImageDialog
+            project={projectDetail}
+            shot={shot}
+            slot={genDialog.slot}
+            open
+            onOpenChange={(o) => !o && setGenDialog(null)}
+            onChanged={refetchProject}
+          />
+        )
+      })()}
     </div>
   )
 }

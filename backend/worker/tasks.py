@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app import observability
-from app.models.project import Project, Shot, ReferenceImage
+from app.models.project import Project, Shot, ReferenceImage, ImageCandidate
 from app.services.state_machine import (
     ProjectStatus,
     ShotStatus,
@@ -23,6 +23,7 @@ from app.services.state_machine import (
 from app.services.first_frame import (
     pick_first_frame,
     init_shot1_first_frame,
+    propagate_first_frame_to_next,
 )
 from app.services.storage import (
     storyboard_path,
@@ -35,11 +36,10 @@ from app.services.storage import (
     shot_audio_vc_path,
     shot_pre_vc_video_path,
     shot_pre_cc_last_frame_path,
-    shot_target_last_frame_path,
-    shot_custom_frames_dir,
     get_original_video_for_audio,
     pristine_last_frame_path,
     ts_uuid_name,
+    shot_candidates_dir,
 )
 from app.services.events import publish_event
 from app.agents.llm import GeminiProvider
@@ -489,7 +489,7 @@ async def run_shot_pipeline(
             extract_last_frame(str(video_out), str(last_frame_out))
             shot.last_frame_path = str(last_frame_out)
             # Eagerly propagate last frame to next shot's first frame for frontend visibility.
-            await _propagate_first_frame_to_next(
+            await propagate_first_frame_to_next(
                 project_id, shot, str(last_frame_out), session
             )
 
@@ -576,40 +576,6 @@ async def run_shot_pipeline(
         )
 
 
-async def _propagate_first_frame_to_next(
-    project_id: str, shot: Shot, last_frame_path: str, session: AsyncSession
-) -> None:
-    """Eagerly point the NEXT shot's custom_first_frame_path at this shot's last frame.
-
-    Predicate: next shot (shot_id + 1) must exist AND use_prev_last_frame=True.
-
-    Last frames now use unique filenames (last_frame_<ts>_<hex>.png), so the value
-    must be RE-POINTED on every (re)generation/trim — a previously auto-propagated
-    path would otherwise reference a deleted, stale file. We preserve a genuine user
-    override (a frame uploaded/extracted into custom_frames/) and only re-point when
-    the existing value is empty or itself an auto-propagated last frame.
-    """
-    result = await session.execute(
-        select(Shot).where(
-            Shot.project_id == project_id,
-            Shot.shot_id == shot.shot_id + 1,
-        )
-    )
-    next_shot = result.scalar_one_or_none()
-    if next_shot is None or not next_shot.use_prev_last_frame:
-        return
-    # Only auto-adjust the NEXT shot while it is still un-generated — once it has
-    # its own rendered video, leave its first frame alone (changing it would
-    # mismatch the already-generated clip).
-    if next_shot.video_path:
-        return
-    existing = next_shot.custom_first_frame_path
-    is_user_override = bool(existing) and "custom_frames" in existing
-    if not is_user_override and existing != last_frame_path:
-        next_shot.custom_first_frame_path = last_frame_path
-        session.add(next_shot)
-
-
 async def _get_character_ref_paths(
     project_id: str, session: AsyncSession
 ) -> list[str]:
@@ -624,260 +590,185 @@ async def _get_character_ref_paths(
     return [r.storage_path for r in refs if Path(r.storage_path).exists()]
 
 
-@observability.traced_job("worker-tail-frame-pipeline-run", tags=["tail-frame"])
-async def run_tail_frame_pipeline(
-    ctx: Dict[str, Any], project_id: str, shot_id: int, actor: str
+def _resolve_ff_context(shot: Shot) -> str | None:
+    """first_frame/custom-first 的 context 帧：目标尾帧 → 实际尾帧 → 无。"""
+    ctx = resolve_tail_frame(shot.target_last_frame_path)
+    if ctx:
+        return ctx
+    if shot.last_frame_path and Path(shot.last_frame_path).exists():
+        return shot.last_frame_path
+    return None
+
+
+@observability.traced_job("worker-image-candidate-run", tags=["image-candidate"])
+async def run_image_candidate(
+    ctx: Dict[str, Any], project_id: str, shot_id: int, candidate_id: str, actor: str
 ) -> None:
-    """Generate target tail frame for a shot: pick_first_frame + director + tail frame.
-
-    After completion, transitions back to SHOT_REVIEW so the user can
-    confirm the generated tail frame before video generation proceeds.
-
-    Args:
-        ctx: arq context
-        project_id: Project ID
-        shot_id: Shot sequence number
-        actor: Who triggered this
-    """
-    from app.services.tail_frame_generator import generate_tail_frame
+    """统一图片候选生成：模式 = slot + 有无 custom_prompt；不触碰 project 状态机。"""
+    from app.services import image_generation as ig
 
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory
     redis = worker_ctx.redis
 
     async with session_factory() as session:
-        result = await session.execute(select(Project).where(Project.id == project_id))
-        project = result.scalar_one_or_none()
-        if not project:
-            logger.error("Project %s not found", project_id)
+        project = (await session.execute(
+            select(Project).where(Project.id == project_id)
+        )).scalar_one_or_none()
+        shot = (await session.execute(
+            select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+        )).scalar_one_or_none()
+        cand = (await session.execute(
+            select(ImageCandidate).where(ImageCandidate.id == candidate_id)
+        )).scalar_one_or_none()
+        if not project or not shot or not cand:
+            logger.error("run_image_candidate: missing project/shot/candidate (%s/%s/%s)",
+                         project_id, shot_id, candidate_id)
             return
 
-        result = await session.execute(
-            select(Shot).where(
-                Shot.project_id == project_id, Shot.shot_id == shot_id
-            )
-        )
-        shot = result.scalar_one_or_none()
-        if not shot:
-            logger.error("Shot %d not found in project %s", shot_id, project_id)
-            return
+        await publish_event(redis, project_id, {
+            "type": "image_candidate_started",
+            "data": {"shot_id": shot_id, "candidate_id": candidate_id, "slot": cand.slot},
+        })
 
-        provider = get_provider()
-
-        await publish_event(
-            redis, project_id,
-            {"type": "tf_started", "data": {"shot_id": shot_id}},
-        )
-
+        success = False
         try:
-            # 1. Pick first frame (single source of truth; nothing persisted)
-            first_frame = await pick_first_frame(project_id, shot, session)
-
-            # 2. Director → generate motion_prompt. Reuse the stored prompt, EXCEPT
-            #    when the shot has reference props — those must be woven into the
-            #    motion, so regenerate to pick them up (a prop-less stored prompt
-            #    would otherwise leave the prop out of the tail frame).
-            obj_refs = (
-                json.loads(shot.custom_reference_paths)
-                if shot.custom_reference_paths else None
-            )
-            if shot.motion_prompt and not obj_refs:
-                motion_prompt = shot.motion_prompt
-                logger.info("Reusing existing motion_prompt for shot %d", shot_id)
+            refs = json.loads(cand.ref_paths) if cand.ref_paths else {}
+            if "character" in refs:
+                char_refs = refs["character"]
             else:
-                shot.status = ShotStatus.PROMPT_GENERATING.value
-                session.add(shot)
-                await session.commit()
+                char_refs = await _get_character_ref_paths(project_id, session)
+            obj_refs = refs.get("object") or None
 
-                motion_prompt = await run_director_agent(
-                    shot_id=shot.shot_id,
-                    shot_type=shot.shot_type,
-                    visual_description=shot.visual_description,
-                    text=shot.text,
-                    duration=shot.shot_duration,
-                    llm_provider=provider,
-                    reference_image_paths=obj_refs,
+            out_dir = shot_candidates_dir(project_id, shot_id)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out = str(out_dir / ts_uuid_name(".png"))
+
+            if cand.slot == "cc":
+                pristine = pristine_last_frame_path(project_id, shot_id)
+                if pristine is None and shot.last_frame_path and Path(shot.last_frame_path).exists():
+                    pristine = Path(shot.last_frame_path)
+                if pristine is None:
+                    raise ValueError("Shot has no last frame to calibrate")
+                await ig.calibrate_face(char_refs, str(pristine), out)
+
+            elif cand.custom_prompt:
+                if cand.slot == "tail_frame":
+                    ff = await pick_first_frame(project_id, shot, session)
+                    context = str(ff) if ff else None
+                else:
+                    context = _resolve_ff_context(shot)
+                await ig.generate_custom(
+                    prompt=cand.custom_prompt,
+                    output_path=out,
+                    character_ref_paths=char_refs,
+                    object_ref_paths=obj_refs,
+                    context_frame_path=context,
+                    aspect_ratio=project.aspect_ratio,
                 )
-                shot.motion_prompt = motion_prompt
-                if obj_refs:
-                    logger.info("Regenerated motion_prompt for shot %d (%d ref prop)", shot_id, len(obj_refs))
 
-            # 3. Generate target tail frame
-            shot.tf_status = "generating"
-            session.add(shot)
-            await session.commit()
+            elif cand.slot == "tail_frame":
+                first_frame = await pick_first_frame(project_id, shot, session)
+                if shot.motion_prompt and not obj_refs:
+                    motion_prompt = shot.motion_prompt
+                else:
+                    motion_prompt = await run_director_agent(
+                        shot_id=shot.shot_id,
+                        shot_type=shot.shot_type,
+                        visual_description=shot.visual_description,
+                        text=shot.text,
+                        duration=shot.shot_duration,
+                        llm_provider=get_provider(),
+                        reference_image_paths=obj_refs,
+                    )
+                    shot.motion_prompt = motion_prompt
+                    session.add(shot)
+                    await session.commit()
 
-            char_refs = await _get_character_ref_paths(project_id, session)
-
-            ensure_shot_dir(project_id, shot.shot_id)
-            tf_output = str(shot_target_last_frame_path(project_id, shot.shot_id))
-
-            async def _on_cot_complete(end_pose: str) -> None:
-                await publish_event(
-                    redis, project_id,
-                    {
+                async def _on_cot(end_pose: str) -> None:
+                    await publish_event(redis, project_id, {
                         "type": "tf_pose_analyzed",
                         "data": {"shot_id": shot_id, "end_pose": end_pose},
-                    },
+                    })
+
+                await ig.generate_tail_frame(
+                    character_ref_paths=char_refs,
+                    first_frame_path=str(first_frame) if first_frame else None,
+                    motion_prompt=motion_prompt,
+                    output_path=out,
+                    object_ref_paths=obj_refs,
+                    aspect_ratio=project.aspect_ratio,
+                    on_cot_complete=_on_cot,
                 )
 
-            await generate_tail_frame(
-                character_ref_paths=char_refs,
-                first_frame_path=str(first_frame) if first_frame else None,
-                motion_prompt=motion_prompt,
-                output_path=tf_output,
-                object_ref_paths=obj_refs,
-                aspect_ratio=project.aspect_ratio,
-                on_cot_complete=_on_cot_complete,
-            )
+            else:  # first_frame auto
+                await ig.generate_first_frame(
+                    character_ref_paths=char_refs,
+                    context_frame_path=_resolve_ff_context(shot),
+                    visual_description=shot.visual_description,
+                    shot_type=shot.shot_type,
+                    output_path=out,
+                    motion_prompt=shot.motion_prompt,
+                    object_ref_paths=obj_refs,
+                    aspect_ratio=project.aspect_ratio,
+                )
 
-            shot.target_last_frame_path = tf_output
-            shot.tf_status = "done"
-            shot.tf_error_message = None
-            shot.tf_confirmed = False
-            shot.status = ShotStatus.PENDING.value
-            session.add(shot)
+            cand.file_path = out
+            cand.status = "done"
+            cand.error = None
+            if cand.slot == "cc":
+                # 若当前 last_frame 已是已采纳的校准帧（cc_*.png），保持 cc_status="done"
+                # 以维持 已校准/还原 UI 与 character-calibrate-revert 可用；否则清空。
+                shot.cc_status = (
+                    "done"
+                    if (shot.last_frame_path and Path(shot.last_frame_path).name.startswith("cc_"))
+                    else None
+                )
+                shot.cc_error_message = None
+                session.add(shot)
+            session.add(cand)
             await session.commit()
-
-            await publish_event(
-                redis, project_id,
-                {
-                    "type": "tf_completed",
-                    "data": {
-                        "shot_id": shot_id,
-                        "target_last_frame_path": to_media_url(tf_output),
-                        "motion_prompt": motion_prompt,
-                    },
-                },
-            )
-            logger.info("Tail frame generated for shot %d in project %s", shot_id, project_id)
+            success = True
+            logger.info("Image candidate %s done (slot=%s shot=%d)", candidate_id, cand.slot, shot_id)
 
         except Exception as e:
-            logger.error("Tail frame pipeline failed for shot %d: %s", shot_id, e, exc_info=True)
-            shot.tf_status = "failed"
-            shot.tf_error_message = str(e)
-            shot.status = ShotStatus.PENDING.value
-            session.add(shot)
+            logger.error("Image candidate %s failed: %s", candidate_id, e, exc_info=True)
+            cand.status = "failed"
+            cand.error = str(e)
+            if cand.slot == "cc":
+                shot.cc_status = "failed"
+                shot.cc_error_message = str(e)
+                session.add(shot)
+            session.add(cand)
             await session.commit()
-
-            await publish_event(
-                redis, project_id,
-                {
-                    "type": "tf_failed",
-                    "data": {"shot_id": shot_id, "error_message": str(e)},
+            await publish_event(redis, project_id, {
+                "type": "image_candidate_failed",
+                "data": {
+                    "shot_id": shot_id,
+                    "candidate_id": candidate_id,
+                    "slot": cand.slot,
+                    "error_message": str(e),
                 },
-            )
+            })
 
-        # Transition back to SHOT_REVIEW
-        await transition_project_status(
-            project, ProjectStatus.SHOT_REVIEW, "system:worker", session, redis
-        )
-
-
-@observability.traced_job("worker-first-frame-pipeline-run", tags=["first-frame"])
-async def run_first_frame_pipeline(
-    ctx: Dict[str, Any], project_id: str, shot_id: int, actor: str
-) -> None:
-    """Generate an opening first frame for a shot (mirrors run_tail_frame_pipeline).
-
-    Output is written to custom_frames/<ts_uuid>.png and stored in
-    custom_first_frame_path — path-as-truth, and the custom_frames/ location
-    marks it as a user override so continuity propagation won't clobber it.
-    After completion, transitions back to SHOT_REVIEW.
-    """
-    from app.services.first_frame_generator import generate_first_frame
-
-    worker_ctx = WorkerContext(ctx)
-    session_factory = worker_ctx.session_factory
-    redis = worker_ctx.redis
-
-    async with session_factory() as session:
-        result = await session.execute(select(Project).where(Project.id == project_id))
-        project = result.scalar_one_or_none()
-        if not project:
-            logger.error("Project %s not found", project_id)
-            return
-
-        result = await session.execute(
-            select(Shot).where(
-                Shot.project_id == project_id, Shot.shot_id == shot_id
-            )
-        )
-        shot = result.scalar_one_or_none()
-        if not shot:
-            logger.error("Shot %d not found in project %s", shot_id, project_id)
-            return
-
-        await publish_event(
-            redis, project_id,
-            {"type": "ff_started", "data": {"shot_id": shot_id}},
-        )
-
-        try:
-            # Scene context: the currently-resolved first frame (may be None in
-            # multi-image reference mode) — used only for scene continuity.
-            context_frame = await pick_first_frame(project_id, shot, session)
-
-            obj_refs = (
-                json.loads(shot.custom_reference_paths)
-                if shot.custom_reference_paths else None
-            )
-            char_refs = await _get_character_ref_paths(project_id, session)
-
-            dest_dir = shot_custom_frames_dir(project_id, shot.shot_id)
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            ff_output = str(dest_dir / ts_uuid_name(".png"))
-
-            await generate_first_frame(
-                character_ref_paths=char_refs,
-                context_frame_path=str(context_frame) if context_frame else None,
-                visual_description=shot.visual_description,
-                shot_type=shot.shot_type,
-                output_path=ff_output,
-                motion_prompt=shot.motion_prompt,
-                object_ref_paths=obj_refs,
-                aspect_ratio=project.aspect_ratio,
-            )
-
-            shot.custom_first_frame_path = ff_output
-            shot.ff_status = "done"
-            shot.ff_error_message = None
-            shot.status = ShotStatus.PENDING.value
-            session.add(shot)
-            await session.commit()
-
-            await publish_event(
-                redis, project_id,
-                {
-                    "type": "ff_completed",
+        if success:
+            # Publish OUTSIDE the failure-handling try/except: a publish error here
+            # must never overwrite the already-committed "done" status with "failed".
+            try:
+                await publish_event(redis, project_id, {
+                    "type": "image_candidate_completed",
                     "data": {
                         "shot_id": shot_id,
-                        "custom_first_frame_path": to_media_url(ff_output),
+                        "candidate_id": candidate_id,
+                        "slot": cand.slot,
+                        "file_path": to_media_url(out),
                     },
-                },
-            )
-            logger.info("First frame generated for shot %d in project %s", shot_id, project_id)
-
-        except Exception as e:
-            logger.error("First frame pipeline failed for shot %d: %s", shot_id, e, exc_info=True)
-            shot.ff_status = "failed"
-            shot.ff_error_message = str(e)
-            shot.status = ShotStatus.PENDING.value
-            session.add(shot)
-            await session.commit()
-
-            await publish_event(
-                redis, project_id,
-                {
-                    "type": "ff_failed",
-                    "data": {"shot_id": shot_id, "error_message": str(e)},
-                },
-            )
-
-        # Transition back to SHOT_REVIEW
-        await transition_project_status(
-            project, ProjectStatus.SHOT_REVIEW, "system:worker", session, redis
-        )
+                })
+            except Exception:
+                logger.error(
+                    "Failed to publish image_candidate_completed for %s", candidate_id,
+                    exc_info=True,
+                )
 
 
 async def run_merger(
@@ -1127,8 +1018,8 @@ async def _do_character_calibrate_one(
     shot_id: int,
     ref_image_paths: list[str],
 ) -> None:
-    """Calibrate face in a single shot's last frame using reference images."""
-    from app.services.face_calibration_client import calibrate_face
+    """校准一个 shot 的 last frame → 产出 cc 候选（采纳后才替换，见 adopt 端点）。"""
+    from app.services import image_generation as ig
 
     async with session_factory() as session:
         result = await session.execute(
@@ -1145,42 +1036,55 @@ async def _do_character_calibrate_one(
             {"type": "cc_started", "data": {"shot_id": shot_id}},
         )
 
+        cand = ImageCandidate(
+            project_id=project_id, shot_pk=shot.id, shot_id=shot_id,
+            slot="cc", status="generating", prompt_source="auto",
+            ref_paths=json.dumps({"character": ref_image_paths}),
+        )
+        session.add(cand)
+        await session.commit()
+        await session.refresh(cand)
+
         try:
-            s_dir = shot_dir(project_id, shot_id)
-            # Calibrate from the un-calibrated pristine frame (never stack onto an
-            # already-calibrated one); write the result to a NEW unique cc_ file so
-            # its URL changes — no in-place overwrite, no fixed-name backup.
+            # 从未校准的 pristine 帧出发（绝不叠加已校准帧）
             pristine = pristine_last_frame_path(project_id, shot_id) or Path(shot.last_frame_path)
-            cc_out = s_dir / f"cc_{ts_uuid_name('.png')}"
-            await calibrate_face(ref_image_paths, str(pristine), str(cc_out))
+            out_dir = shot_candidates_dir(project_id, shot_id)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out = str(out_dir / ts_uuid_name(".png"))
+            await ig.calibrate_face(ref_image_paths, str(pristine), out)
 
-            # Drop the previous calibrated frame(s); keep the pristine last_frame_.
-            for _old in s_dir.glob("cc_*.png"):
-                if _old != cc_out:
-                    _old.unlink(missing_ok=True)
-
-            shot.last_frame_path = str(cc_out)
-            shot.cc_status = "done"
+            cand.file_path = out
+            cand.status = "done"
+            # 若当前 last_frame 已是已采纳的校准帧（cc_*.png），保持 cc_status="done"
+            # 以维持 已校准/还原 UI 与 character-calibrate-revert 可用；否则清空。
+            shot.cc_status = (
+                "done"
+                if (shot.last_frame_path and Path(shot.last_frame_path).name.startswith("cc_"))
+                else None
+            )
             shot.cc_error_message = None
-            # Next shot's first frame should reflect the calibrated face.
-            await _propagate_first_frame_to_next(project_id, shot, str(cc_out), session)
-            session.add(shot)
+            session.add_all([cand, shot])
             await session.commit()
 
             await publish_event(
                 redis, project_id,
                 {
-                    "type": "cc_completed",
+                    "type": "cc_candidate_ready",
                     "data": {
                         "shot_id": shot_id,
-                        "last_frame_path": to_media_url(str(cc_out)),
+                        "candidate_id": cand.id,
+                        "file_path": to_media_url(out),
                     },
                 },
             )
-            logger.info("Character calibration completed for shot %d", shot_id)
+            logger.info("CC candidate ready for shot %d", shot_id)
 
         except Exception as e:
             logger.error("Character calibration failed for shot %d: %s", shot_id, e)
+            cand.status = "failed"
+            cand.error = str(e)
+            session.add(cand)
+            await session.commit()
             await _mark_shot_failed(
                 session, redis, project_id, shot, e,
                 status_field="cc_status", status_value="failed",

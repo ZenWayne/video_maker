@@ -908,9 +908,8 @@ async def generate_tail_frame(
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
-    """Generate a target tail frame for a shot (director + tail frame generation)."""
-    project = await _get_project_or_404(project_id, session)
-
+    """[Deprecated wrapper] 创建 auto 尾帧候选（新入口：POST .../image-candidates）。"""
+    await _get_project_or_404(project_id, session)
     result = await session.execute(
         select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
     )
@@ -918,23 +917,18 @@ async def generate_tail_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
-    # Transition to SHOT_GENERATING
-    try:
-        await transition_project_status(
-            project, ProjectStatus.SHOT_GENERATING, f"user:{user}", session, redis
-        )
-    except InvalidTransitionError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-    _reset_tail_frame(shot)  # re-enable tail frame flow on re-generate
-    shot.tf_status = "generating"
-    session.add(shot)
+    from app.models.project import ImageCandidate
+    cand = ImageCandidate(
+        project_id=project_id, shot_pk=shot.id, shot_id=shot_id,
+        slot="tail_frame", status="generating", prompt_source="auto",
+    )
+    session.add(cand)
     await session.commit()
+    await session.refresh(cand)
 
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_tail_frame_pipeline", project_id, shot_id, f"user:{user}")
-
-    return {"status": "queued", "shot_id": shot_id}
+    await arq.enqueue_job("run_image_candidate", project_id, shot_id, cand.id, f"user:{user}")
+    return {"status": "queued", "shot_id": shot_id, "candidate_id": cand.id}
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/generate-first-frame", status_code=202)
@@ -945,14 +939,8 @@ async def generate_first_frame(
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
-    """Generate an opening first frame for a shot (visual description + refs).
-
-    Mirrors generate-tail-frame: the worker writes the result into
-    custom_first_frame_path (path-as-truth) under custom_frames/ with a
-    ts_uuid filename, so continuity propagation treats it as a user override.
-    """
-    project = await _get_project_or_404(project_id, session)
-
+    """[Deprecated wrapper] 创建 auto 首帧候选（新入口：POST .../image-candidates）。"""
+    await _get_project_or_404(project_id, session)
     result = await session.execute(
         select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
     )
@@ -960,23 +948,18 @@ async def generate_first_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
-    # Transition to SHOT_GENERATING
-    try:
-        await transition_project_status(
-            project, ProjectStatus.SHOT_GENERATING, f"user:{user}", session, redis
-        )
-    except InvalidTransitionError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-    shot.ff_status = "generating"
-    shot.ff_error_message = None
-    session.add(shot)
+    from app.models.project import ImageCandidate
+    cand = ImageCandidate(
+        project_id=project_id, shot_pk=shot.id, shot_id=shot_id,
+        slot="first_frame", status="generating", prompt_source="auto",
+    )
+    session.add(cand)
     await session.commit()
+    await session.refresh(cand)
 
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_first_frame_pipeline", project_id, shot_id, f"user:{user}")
-
-    return {"status": "queued", "shot_id": shot_id}
+    await arq.enqueue_job("run_image_candidate", project_id, shot_id, cand.id, f"user:{user}")
+    return {"status": "queued", "shot_id": shot_id, "candidate_id": cand.id}
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/confirm-tail-frame", status_code=202)
@@ -1551,7 +1534,7 @@ async def _repoint_next_first_frame(
 ) -> tuple[int, str] | None:
     """Point the NEXT shot's auto first-frame at last_frame_path (preserve user overrides).
 
-    Mirrors worker.tasks._propagate_first_frame_to_next: re-point when the next shot's
+    Mirrors app.services.first_frame.propagate_first_frame_to_next: re-point when the next shot's
     custom_first_frame_path is empty or itself an auto-propagated last frame; never
     clobber a genuine user override stored under custom_frames/. Only touches the next
     shot while it is still un-generated.

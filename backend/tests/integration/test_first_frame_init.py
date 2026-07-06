@@ -131,7 +131,7 @@ async def test_continuity_propagates_last_frame_to_next(db_session_factory):
         shot1 = (await session.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
-        await tasks._propagate_first_frame_to_next(pid, shot1, last_frame, session)
+        await tasks.propagate_first_frame_to_next(pid, shot1, last_frame, session)
         await session.commit()
 
     shot2_after = await _get_shot(db_session_factory, pid, shot_id=2)
@@ -157,7 +157,7 @@ async def test_continuity_preserves_user_override(db_session_factory):
         shot1 = (await session.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
-        await tasks._propagate_first_frame_to_next(pid, shot1, last_frame, session)
+        await tasks.propagate_first_frame_to_next(pid, shot1, last_frame, session)
         await session.commit()
 
     shot2_after = await _get_shot(db_session_factory, pid, shot_id=2)
@@ -185,7 +185,7 @@ async def test_continuity_repoints_stale_auto_frame(db_session_factory):
         shot1 = (await session.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
-        await tasks._propagate_first_frame_to_next(pid, shot1, new_lf, session)
+        await tasks.propagate_first_frame_to_next(pid, shot1, new_lf, session)
         await session.commit()
 
     shot2_after = await _get_shot(db_session_factory, pid, shot_id=2)
@@ -210,7 +210,7 @@ async def test_continuity_respects_use_prev_last_frame_false(db_session_factory)
         shot1 = (await session.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
-        await tasks._propagate_first_frame_to_next(pid, shot1, last_frame, session)
+        await tasks.propagate_first_frame_to_next(pid, shot1, last_frame, session)
         await session.commit()
 
     shot2_after = await _get_shot(db_session_factory, pid, shot_id=2)
@@ -238,7 +238,7 @@ async def test_continuity_skips_already_generated_next(db_session_factory):
         shot1 = (await session.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
-        await tasks._propagate_first_frame_to_next(pid, shot1, new_lf, session)
+        await tasks.propagate_first_frame_to_next(pid, shot1, new_lf, session)
         await session.commit()
 
     shot2_after = await _get_shot(db_session_factory, pid, shot_id=2)

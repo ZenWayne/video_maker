@@ -338,6 +338,30 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       onEvent?.('cc_batch_done', data)
     })
 
+    // image_candidate_started - 图片候选生成开始
+    const unsubscribeImageCandidateStarted = sse.subscribe('image_candidate_started', (data) => {
+      setLastEventTime(Date.now())
+      onEvent?.('image_candidate_started', data)
+    })
+
+    // image_candidate_completed - 图片候选生成完成
+    const unsubscribeImageCandidateCompleted = sse.subscribe('image_candidate_completed', (data) => {
+      setLastEventTime(Date.now())
+      onEvent?.('image_candidate_completed', data)
+    })
+
+    // image_candidate_failed - 图片候选生成失败
+    const unsubscribeImageCandidateFailed = sse.subscribe('image_candidate_failed', (data) => {
+      setLastEventTime(Date.now())
+      onEvent?.('image_candidate_failed', data)
+    })
+
+    // cc_candidate_ready - CC 候选准备就绪
+    const unsubscribeCcCandidateReady = sse.subscribe('cc_candidate_ready', (data) => {
+      setLastEventTime(Date.now())
+      onEvent?.('cc_candidate_ready', data)
+    })
+
     // pipeline_failed - Pipeline 失败
     const unsubscribePipelineFailed = sse.subscribe('pipeline_failed', (data) => {
       setLastEventTime(Date.now())
@@ -374,6 +398,10 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       unsubscribeCcCompleted()
       unsubscribeCcFailed()
       unsubscribeCcBatchDone()
+      unsubscribeImageCandidateStarted()
+      unsubscribeImageCandidateCompleted()
+      unsubscribeImageCandidateFailed()
+      unsubscribeCcCandidateReady()
       unsubscribePipelineFailed()
       sse.close()
     }

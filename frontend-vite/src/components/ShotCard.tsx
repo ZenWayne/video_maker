@@ -25,6 +25,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { TrimDialog } from '@/components/TrimDialog'
 import { ShotPlayer } from './ShotPlayer'
+import { CcCandidateStrip } from './CcCandidateStrip'
 import type { AspectRatio, Shot, ShotStatus } from '@/lib/types'
 
 interface ShotCardProps {
@@ -48,9 +49,10 @@ interface ShotCardProps {
   onVoiceRevert?: (shotId: number) => void
   onCharacterCalibrate?: (shotId: number) => void
   onCharacterCalibrateRevert?: (shotId: number) => void
-  onGenerateTailFrame?: (shotId: number) => void
   onDeleteTailFrame?: (shotId: number) => void
-  onGenerateFirstFrame?: (shotId: number) => void
+  onOpenGenerateImage?: (shotId: number, slot: 'first_frame' | 'tail_frame') => void
+  onAdoptCandidate?: (shotId: number, candidateId: string) => void
+  onDeleteCandidate?: (shotId: number, candidateId: string) => void
 }
 
 interface KeyframeMenuItem {
@@ -200,9 +202,10 @@ export function ShotCard({
   onVoiceRevert,
   onCharacterCalibrate,
   onCharacterCalibrateRevert,
-  onGenerateTailFrame,
   onDeleteTailFrame,
-  onGenerateFirstFrame,
+  onOpenGenerateImage,
+  onAdoptCandidate,
+  onDeleteCandidate,
 }: ShotCardProps) {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isPromptDialogOpen, setIsPromptDialogOpen] = useState(false)
@@ -918,10 +921,10 @@ export function ShotCard({
                 failed={shot.ff_status === 'failed'}
                 onPreview={setPreviewUrl}
                 onDelete={handleDeleteFirstFrame}
-                onRetry={onGenerateFirstFrame ? () => onGenerateFirstFrame(shot.shot_id) : undefined}
+                onRetry={onOpenGenerateImage ? () => onOpenGenerateImage(shot.shot_id, 'first_frame') : undefined}
                 menuItems={[
-                  ...(onGenerateFirstFrame
-                    ? [{ icon: Sparkles, label: '生成首帧', onClick: () => onGenerateFirstFrame(shot.shot_id) }]
+                  ...(onOpenGenerateImage
+                    ? [{ icon: Sparkles, label: '生成首帧…', onClick: () => onOpenGenerateImage(shot.shot_id, 'first_frame') }]
                     : []),
                   { icon: Crop, label: '提取本镜首帧', disabled: shot.status !== 'completed', onClick: handleExtractFirstFrame },
                   { icon: ArrowLeftToLine, label: '提取上一镜末帧', disabled: shot.shot_id <= 1, onClick: handleUsePrevLastFrame },
@@ -936,10 +939,10 @@ export function ShotCard({
                 failed={shot.tf_status === 'failed'}
                 onPreview={setPreviewUrl}
                 onDelete={onDeleteTailFrame ? () => onDeleteTailFrame(shot.shot_id) : undefined}
-                onRetry={onGenerateTailFrame ? () => onGenerateTailFrame(shot.shot_id) : undefined}
+                onRetry={onOpenGenerateImage ? () => onOpenGenerateImage(shot.shot_id, 'tail_frame') : undefined}
                 menuItems={[
-                  ...(onGenerateTailFrame
-                    ? [{ icon: Sparkles, label: '生成尾帧', disabled: !shot.motion_prompt, onClick: () => onGenerateTailFrame(shot.shot_id) }]
+                  ...(onOpenGenerateImage
+                    ? [{ icon: Sparkles, label: '生成尾帧…', onClick: () => onOpenGenerateImage(shot.shot_id, 'tail_frame') }]
                     : []),
                   { icon: Crop, label: '提取本镜尾帧', disabled: !shot.last_frame_path, onClick: handleExtractLastFrame },
                   { icon: Upload, label: '上传尾帧', onClick: () => tailFrameInputRef.current?.click() },
@@ -952,6 +955,16 @@ export function ShotCard({
                 <span className="text-[11px] text-red-500 mt-1">{shot.tf_error_message}</span>
               )}
             </div>
+          )}
+
+          {onAdoptCandidate && onDeleteCandidate && onCharacterCalibrate && (
+            <CcCandidateStrip
+              shot={shot}
+              currentLastFrame={shot.last_frame_path}
+              onAdopt={(cid) => onAdoptCandidate(shot.shot_id, cid)}
+              onDelete={(cid) => onDeleteCandidate(shot.shot_id, cid)}
+              onRecalibrate={() => onCharacterCalibrate(shot.shot_id)}
+            />
           )}
 
           {/* 操作栏 */}

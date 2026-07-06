@@ -7,6 +7,7 @@ from typing import AsyncGenerator
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 
+from app.api.projects import _candidate_to_dict
 from app.db import AsyncSession as session_factory
 from app.main import get_redis
 from app.models.project import Project, Shot
@@ -94,6 +95,9 @@ async def event_generator(
                         "source_frames": s.source_frames,
                         "trim_end_sec": (s.trim_frames / s.source_fps) if (s.trim_frames and s.source_fps) else None,
                         "vc_audio_url": to_media_url(s.vc_audio_path),
+                        # 必须与 GET /projects 的 _shot_to_dict 保持一致，否则 SSE 快照会把候选画廊
+                        # 清空（Playwright e2e 曾复现：refetch 后候选可见，SSE snapshot 一到就消失）。
+                        "image_candidates": [_candidate_to_dict(c) for c in s.image_candidates],
                     }
                     for s in shots
                 ],
@@ -101,7 +105,10 @@ async def event_generator(
         }
 
     # Session released — now yield snapshot and stream Redis events without holding DB connection
-    yield json.dumps(snapshot)
+    # default=str: image_candidates carry raw datetime (created_at/adopted_at) from
+    # _candidate_to_dict — matches the project-wide json.dumps(..., default=str) convention
+    # in app/services/events.py:35.
+    yield json.dumps(snapshot, default=str)
 
     try:
         async for event in subscribe_to_events(redis, project_id):

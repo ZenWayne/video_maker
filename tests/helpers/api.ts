@@ -75,3 +75,42 @@ export function seedProjectState(state: string, opts: Record<string, string> = {
   const lines = result.split('\n')
   return lines[lines.length - 1].trim()
 }
+
+/**
+ * Run a seed script INSIDE the live backend container.
+ *
+ * The dev stack's DB/storage are compose named volumes (`app-data`/`app-storage`),
+ * not the host `backend/data/dev.db` file — so seeding must go through the running
+ * container (which has the real DATABASE_URL/storage_root), not a host-side `uv run`.
+ * `backend/` is bind-mounted into the container at `/app`, so scripts under
+ * `backend/tests/e2e_seed/` are visible at `/app/tests/e2e_seed/`.
+ *
+ * Returns the last line of stdout (the seed script's printed result).
+ */
+export function execSeed(script: string, argsJson: Record<string, unknown>): string {
+  const argsStr = JSON.stringify(argsJson)
+  const result = execSync(
+    `podman exec video-maker-backend-dev uv run --project /app python /app/tests/e2e_seed/${script} '${argsStr}'`,
+    { encoding: 'utf8' }
+  ).trim()
+
+  const lines = result.split('\n')
+  return lines[lines.length - 1].trim()
+}
+
+/**
+ * Insert a completed Shot row into an EXISTING (real, API-created) project and
+ * move it to shot_review — direct DB write via execSeed, real backend/storage.
+ */
+export function seedShotReview(projectId: string, shotId = 1): void {
+  execSeed('seed_shot_review.py', { project_id: projectId, shot_id: shotId })
+}
+
+/**
+ * Insert a DONE ImageCandidate backed by a real image file (copied from the
+ * project's already-uploaded reference image; no model call, no billing).
+ * Returns the candidate_id.
+ */
+export function seedImageCandidate(projectId: string, shotId: number, slot: string): string {
+  return execSeed('seed_candidate.py', { project_id: projectId, shot_id: shotId, slot })
+}

@@ -50,6 +50,7 @@ const mockShot: Shot = {
   tf_error_message: null,
   tf_confirmed: false,
   auto_trim: true,
+  image_candidates: [],
 }
 
 // Manual rAF control — lets us tick the checkEnd loop explicitly

@@ -25,6 +25,25 @@ class ReferenceImageResponse(BaseModel):
         from_attributes = True
 
 
+# ============== Image Candidate Schemas ==============
+
+class ImageCandidateResponse(BaseModel):
+    """统一图片生成候选（first_frame | tail_frame | cc）。"""
+    id: str
+    shot_id: int
+    slot: str
+    status: str
+    file_path: Optional[str] = None
+    prompt_source: str
+    custom_prompt: Optional[str] = None
+    error: Optional[str] = None
+    created_at: datetime
+    adopted_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 # ============== Shot Schemas ==============
 
 class ShotItem(BaseModel):
@@ -67,6 +86,7 @@ class ShotResponse(BaseModel):
     tf_error_message: Optional[str] = None
     tf_confirmed: bool = False
     auto_trim: bool = True
+    image_candidates: List[ImageCandidateResponse] = Field(default_factory=list)
     # Non-destructive editing (EDL) playback descriptor
     trim_frames: Optional[int] = None
     source_fps: Optional[float] = None

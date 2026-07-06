@@ -6,6 +6,7 @@ import type {
   ProjectStatus,
   ReferenceImageKind,
   APIError,
+  ImageCandidate,
 } from './types'
 
 const BASE = import.meta.env.VITE_API_BASE || ''
@@ -98,6 +99,28 @@ async function uploadSingle<T>(path: string, file: File): Promise<T> {
     )
   }
   return response.json()
+}
+
+// 多文件 multipart 上传（表单已构建完成，字段名由调用方决定）
+async function uploadForm<T>(path: string, form: FormData): Promise<T> {
+  const response = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'X-User-Name': getUserName() },
+    body: form,
+  })
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new APIErrorClass({ code: String(response.status), message: detail })
+  }
+  return response.json()
+}
+
+export interface CreateImageCandidateOpts {
+  slot: 'first_frame' | 'tail_frame'
+  customPrompt?: string
+  refImageIds?: string[]
+  includeShotRefs?: boolean
+  files?: File[]
 }
 
 // 项目管理
@@ -496,6 +519,35 @@ export const api = {
   // 还原人物校准
   characterCalibrateRevert: (projectId: string, shotId: number): Promise<{ last_frame_path: string; version: number }> => {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/character-calibrate-revert`)
+  },
+
+  // ── 统一图片生成：候选画廊 ──
+
+  // 创建候选（202；multipart，自定义提示词/参考图勾选/临时上传均可选）
+  createImageCandidate: (
+    projectId: string, shotId: number, opts: CreateImageCandidateOpts
+  ): Promise<{ status: string; candidate: ImageCandidate }> => {
+    const form = new FormData()
+    form.append('slot', opts.slot)
+    if (opts.customPrompt?.trim()) form.append('custom_prompt', opts.customPrompt.trim())
+    if (opts.refImageIds) form.append('ref_image_ids', JSON.stringify(opts.refImageIds))
+    if (opts.includeShotRefs !== undefined) form.append('include_shot_refs', String(opts.includeShotRefs))
+    for (const f of opts.files ?? []) form.append('files', f)
+    return uploadForm(`/api/projects/${projectId}/shots/${shotId}/image-candidates`, form)
+  },
+
+  // 采纳候选 → 写入槽位
+  adoptImageCandidate: (
+    projectId: string, shotId: number, candidateId: string
+  ): Promise<{ shot_id: number; slot: string; candidate: ImageCandidate }> => {
+    return request('POST', `/api/projects/${projectId}/shots/${shotId}/image-candidates/${candidateId}/adopt`)
+  },
+
+  // 删除候选
+  deleteImageCandidate: (
+    projectId: string, shotId: number, candidateId: string
+  ): Promise<{ deleted: string }> => {
+    return request('DELETE', `/api/projects/${projectId}/shots/${shotId}/image-candidates/${candidateId}`)
   },
 
   // 资源 URL

@@ -121,7 +121,7 @@ async def health_check():
 
 
 # Import and include routers
-from app.api import projects, pipeline, uploads, assets, stream, debug, voice
+from app.api import projects, pipeline, uploads, assets, stream, debug, voice, image_candidates
 
 app.include_router(projects.router, prefix="/api")
 app.include_router(pipeline.router, prefix="/api")
@@ -130,6 +130,7 @@ app.include_router(uploads.router, prefix="/api")
 app.include_router(assets.router, prefix="/api")
 app.include_router(stream.router, prefix="/api")
 app.include_router(debug.router, prefix="/api")
+app.include_router(image_candidates.router, prefix="/api")
 
 # Mount storage directory to serve generated media files (videos, frames)
 from pathlib import Path as _Path
