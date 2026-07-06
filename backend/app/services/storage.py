@@ -44,6 +44,11 @@ def shot_custom_frames_dir(project_id: str, shot_id: int) -> Path:
     return shot_dir(project_id, shot_id) / "custom_frames"
 
 
+def shot_candidates_dir(project_id: str, shot_id: int) -> Path:
+    """Image-candidate gallery dir for a shot (generated candidates + temp ref uploads)."""
+    return shot_dir(project_id, shot_id) / "candidates"
+
+
 def shot_audio_original_path(project_id: str, shot_id: int) -> Path:
     """Get the original audio WAV path for a shot (extracted from unmodified video)."""
     return shot_dir(project_id, shot_id) / "audio_original.wav"

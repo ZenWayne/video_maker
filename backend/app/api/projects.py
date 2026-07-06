@@ -21,6 +21,22 @@ from app.services.state_machine import ProjectStatus, InvalidTransitionError
 router = APIRouter()
 
 
+def _candidate_to_dict(c) -> dict:
+    """Serialize an ImageCandidate for the API."""
+    return {
+        "id": c.id,
+        "shot_id": c.shot_id,
+        "slot": c.slot,
+        "status": c.status,
+        "file_path": to_media_url(c.file_path),
+        "prompt_source": c.prompt_source,
+        "custom_prompt": c.custom_prompt,
+        "error": c.error,
+        "created_at": c.created_at,
+        "adopted_at": c.adopted_at,
+    }
+
+
 def _shot_to_dict(s) -> dict:
     """Serialize a Shot for the API, including the non-destructive playback descriptor."""
     trim_end_sec = None
@@ -57,6 +73,7 @@ def _shot_to_dict(s) -> dict:
         "tf_status": s.tf_status,
         "tf_error_message": s.tf_error_message,
         "tf_confirmed": bool(s.tf_confirmed),
+        "image_candidates": [_candidate_to_dict(c) for c in s.image_candidates],
         # --- 非破坏式播放描述 ---
         "trim_frames": s.trim_frames,
         "source_fps": s.source_fps,

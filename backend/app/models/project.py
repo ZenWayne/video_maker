@@ -162,11 +162,50 @@ class Shot(Base):
 
     # Relationships
     project = relationship("Project", back_populates="shots")
+    image_candidates = relationship(
+        "ImageCandidate",
+        back_populates="shot",
+        cascade="all, delete-orphan",
+        order_by="ImageCandidate.created_at",
+        lazy="selectin",
+    )
 
     __table_args__ = (
         UniqueConstraint("project_id", "shot_id", name="uq_shot_project_shot_id"),
         Index("ix_shots_project_shot_id", "project_id", "shot_id"),
         Index("ix_shots_project_status", "project_id", "status"),
+    )
+
+
+class ImageCandidate(Base):
+    __tablename__ = "image_candidates"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(
+        String(36),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    shot_pk = Column(
+        Integer,
+        ForeignKey("shots.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    shot_id = Column(Integer, nullable=False)  # Shot.shot_id 序号（冗余便于查询/事件）
+    slot = Column(String(20), nullable=False)  # 'first_frame' | 'tail_frame' | 'cc'
+    status = Column(String(20), nullable=False, default="generating")  # generating|done|failed
+    file_path = Column(Text, nullable=True)
+    prompt_source = Column(String(10), nullable=False, default="auto")  # auto|custom
+    custom_prompt = Column(Text, nullable=True)
+    ref_paths = Column(Text, nullable=True)  # JSON: {"character": [...], "object": [...]}
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    adopted_at = Column(DateTime, nullable=True)
+
+    shot = relationship("Shot", back_populates="image_candidates")
+
+    __table_args__ = (
+        Index("ix_image_candidates_shot", "project_id", "shot_id"),
     )
 
 
