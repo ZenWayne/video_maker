@@ -578,6 +578,34 @@ export default function ShotsPage() {
     }
   }
 
+  // 采纳图片候选（CC 候选采纳条：替换 shot 对应槽位）
+  const handleAdoptCandidate = async (shotId: number, candidateId: string) => {
+    if (!projectId) return
+    try {
+      await api.adoptImageCandidate(projectId, shotId, candidateId)
+      await refetchProject()
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '采纳失败',
+      })
+    }
+  }
+
+  // 删除图片候选
+  const handleDeleteCandidate = async (shotId: number, candidateId: string) => {
+    if (!projectId) return
+    try {
+      await api.deleteImageCandidate(projectId, shotId, candidateId)
+      await refetchProject()
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '删除失败',
+      })
+    }
+  }
+
   // 保存 scene_overview
   const handleSaveOverview = async () => {
     if (!projectId) return
@@ -665,6 +693,8 @@ export default function ShotsPage() {
                   onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
                   onDeleteTailFrame={handleDeleteTailFrame}
                   onOpenGenerateImage={(shotId, slot) => setGenDialog({ shotId, slot })}
+                  onAdoptCandidate={handleAdoptCandidate}
+                  onDeleteCandidate={handleDeleteCandidate}
                 />
               )
             })}
@@ -857,6 +887,8 @@ export default function ShotsPage() {
                 onCharacterCalibrateRevert={handleCharacterCalibrateRevert}
                 onDeleteTailFrame={handleDeleteTailFrame}
                 onOpenGenerateImage={(shotId, slot) => setGenDialog({ shotId, slot })}
+                onAdoptCandidate={handleAdoptCandidate}
+                onDeleteCandidate={handleDeleteCandidate}
               />
             )
           })}

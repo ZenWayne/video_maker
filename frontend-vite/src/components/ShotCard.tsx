@@ -25,6 +25,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { TrimDialog } from '@/components/TrimDialog'
 import { ShotPlayer } from './ShotPlayer'
+import { CcCandidateStrip } from './CcCandidateStrip'
 import type { AspectRatio, Shot, ShotStatus } from '@/lib/types'
 
 interface ShotCardProps {
@@ -50,6 +51,8 @@ interface ShotCardProps {
   onCharacterCalibrateRevert?: (shotId: number) => void
   onDeleteTailFrame?: (shotId: number) => void
   onOpenGenerateImage?: (shotId: number, slot: 'first_frame' | 'tail_frame') => void
+  onAdoptCandidate?: (shotId: number, candidateId: string) => void
+  onDeleteCandidate?: (shotId: number, candidateId: string) => void
 }
 
 interface KeyframeMenuItem {
@@ -201,6 +204,8 @@ export function ShotCard({
   onCharacterCalibrateRevert,
   onDeleteTailFrame,
   onOpenGenerateImage,
+  onAdoptCandidate,
+  onDeleteCandidate,
 }: ShotCardProps) {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isPromptDialogOpen, setIsPromptDialogOpen] = useState(false)
@@ -950,6 +955,16 @@ export function ShotCard({
                 <span className="text-[11px] text-red-500 mt-1">{shot.tf_error_message}</span>
               )}
             </div>
+          )}
+
+          {onAdoptCandidate && onDeleteCandidate && onCharacterCalibrate && (
+            <CcCandidateStrip
+              shot={shot}
+              currentLastFrame={shot.last_frame_path}
+              onAdopt={(cid) => onAdoptCandidate(shot.shot_id, cid)}
+              onDelete={(cid) => onDeleteCandidate(shot.shot_id, cid)}
+              onRecalibrate={() => onCharacterCalibrate(shot.shot_id)}
+            />
           )}
 
           {/* 操作栏 */}
