@@ -176,3 +176,78 @@ async def delete_image_candidate(
     await session.delete(cand)
     await session.commit()
     return {"deleted": candidate_id}
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/image-candidates/{candidate_id}/adopt")
+async def adopt_image_candidate(
+    project_id: str,
+    shot_id: int,
+    candidate_id: str,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """采纳候选：复制入槽（路径即真相），同槽位其他候选取消采纳标记。"""
+    import shutil
+    from app.api.projects import _candidate_to_dict
+    from app.services.first_frame import propagate_first_frame_to_next
+    from app.services.storage import shot_custom_frames_dir, shot_dir
+
+    await _get_project_or_404(project_id, session)
+    shot = await _get_shot_or_404(project_id, shot_id, session)
+    cand = await _get_candidate_or_404(project_id, shot_id, candidate_id, session)
+
+    if cand.status != "done" or not cand.file_path or not Path(cand.file_path).exists():
+        raise HTTPException(status_code=400, detail="Candidate is not ready to adopt")
+
+    src = Path(cand.file_path)
+    extra: dict = {}
+
+    if cand.slot == "first_frame":
+        dest_dir = shot_custom_frames_dir(project_id, shot_id)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / ts_uuid_name(src.suffix or ".png")
+        shutil.copy2(src, dest)
+        shot.custom_first_frame_path = str(dest)
+        extra["custom_first_frame_path"] = to_media_url(str(dest))
+    elif cand.slot == "tail_frame":
+        dest_dir = shot_dir(project_id, shot_id)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / ts_uuid_name(src.suffix or ".png")
+        shutil.copy2(src, dest)
+        shot.target_last_frame_path = str(dest)
+        shot.tf_status = "done"
+        extra["target_last_frame_path"] = to_media_url(str(dest))
+    elif cand.slot == "cc":
+        s_dir = shot_dir(project_id, shot_id)
+        s_dir.mkdir(parents=True, exist_ok=True)
+        dest = s_dir / f"cc_{ts_uuid_name('.png')}"
+        shutil.copy2(src, dest)
+        # 旧校准帧只留最新（沿用原 CC worker 行为）；pristine last_frame_* 不动
+        for _old in s_dir.glob("cc_*.png"):
+            if _old != dest:
+                _old.unlink(missing_ok=True)
+        shot.last_frame_path = str(dest)
+        shot.cc_status = "done"
+        shot.cc_error_message = None
+        await propagate_first_frame_to_next(project_id, shot, str(dest), session)
+        extra["last_frame_path"] = to_media_url(str(dest))
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown slot: {cand.slot}")
+
+    # 同槽位互斥采纳标记
+    siblings = (await session.execute(
+        select(ImageCandidate).where(
+            ImageCandidate.project_id == project_id,
+            ImageCandidate.shot_id == shot_id,
+            ImageCandidate.slot == cand.slot,
+        )
+    )).scalars().all()
+    for c in siblings:
+        c.adopted_at = None
+        session.add(c)
+    cand.adopted_at = datetime.utcnow()
+    session.add_all([cand, shot])
+    await session.commit()
+    await session.refresh(cand)
+
+    return {"shot_id": shot_id, "slot": cand.slot, "candidate": _candidate_to_dict(cand), **extra}

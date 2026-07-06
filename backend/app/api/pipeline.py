@@ -1551,7 +1551,7 @@ async def _repoint_next_first_frame(
 ) -> tuple[int, str] | None:
     """Point the NEXT shot's auto first-frame at last_frame_path (preserve user overrides).
 
-    Mirrors worker.tasks._propagate_first_frame_to_next: re-point when the next shot's
+    Mirrors app.services.first_frame.propagate_first_frame_to_next: re-point when the next shot's
     custom_first_frame_path is empty or itself an auto-propagated last frame; never
     clobber a genuine user override stored under custom_frames/. Only touches the next
     shot while it is still un-generated.

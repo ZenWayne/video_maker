@@ -23,6 +23,7 @@ from app.services.state_machine import (
 from app.services.first_frame import (
     pick_first_frame,
     init_shot1_first_frame,
+    propagate_first_frame_to_next,
 )
 from app.services.storage import (
     storyboard_path,
@@ -489,7 +490,7 @@ async def run_shot_pipeline(
             extract_last_frame(str(video_out), str(last_frame_out))
             shot.last_frame_path = str(last_frame_out)
             # Eagerly propagate last frame to next shot's first frame for frontend visibility.
-            await _propagate_first_frame_to_next(
+            await propagate_first_frame_to_next(
                 project_id, shot, str(last_frame_out), session
             )
 
@@ -574,40 +575,6 @@ async def run_shot_pipeline(
         logger.info(
             f"Shot pipeline completed for project {project_id} ({completed_count}/{total})"
         )
-
-
-async def _propagate_first_frame_to_next(
-    project_id: str, shot: Shot, last_frame_path: str, session: AsyncSession
-) -> None:
-    """Eagerly point the NEXT shot's custom_first_frame_path at this shot's last frame.
-
-    Predicate: next shot (shot_id + 1) must exist AND use_prev_last_frame=True.
-
-    Last frames now use unique filenames (last_frame_<ts>_<hex>.png), so the value
-    must be RE-POINTED on every (re)generation/trim — a previously auto-propagated
-    path would otherwise reference a deleted, stale file. We preserve a genuine user
-    override (a frame uploaded/extracted into custom_frames/) and only re-point when
-    the existing value is empty or itself an auto-propagated last frame.
-    """
-    result = await session.execute(
-        select(Shot).where(
-            Shot.project_id == project_id,
-            Shot.shot_id == shot.shot_id + 1,
-        )
-    )
-    next_shot = result.scalar_one_or_none()
-    if next_shot is None or not next_shot.use_prev_last_frame:
-        return
-    # Only auto-adjust the NEXT shot while it is still un-generated — once it has
-    # its own rendered video, leave its first frame alone (changing it would
-    # mismatch the already-generated clip).
-    if next_shot.video_path:
-        return
-    existing = next_shot.custom_first_frame_path
-    is_user_override = bool(existing) and "custom_frames" in existing
-    if not is_user_override and existing != last_frame_path:
-        next_shot.custom_first_frame_path = last_frame_path
-        session.add(next_shot)
 
 
 async def _get_character_ref_paths(
@@ -1163,7 +1130,7 @@ async def _do_character_calibrate_one(
             shot.cc_status = "done"
             shot.cc_error_message = None
             # Next shot's first frame should reflect the calibrated face.
-            await _propagate_first_frame_to_next(project_id, shot, str(cc_out), session)
+            await propagate_first_frame_to_next(project_id, shot, str(cc_out), session)
             session.add(shot)
             await session.commit()
 
