@@ -165,3 +165,50 @@ async def test_connected_shot_without_custom_first_frame_uses_prev_last_frame(
         f"Expected prev last frame {prev!r} but got {kwargs['first_frame_path']!r}. "
         "Auto-continuity is broken: connected shot without custom override must use prev last frame."
     )
+
+
+@pytest.mark.asyncio
+async def test_stale_auto_first_frame_pointer_is_healed_on_regeneration(
+    db_session_factory, redis, tmp_path, monkeypatch
+):
+    """自动传播的首帧指针指向已删除文件时：生成用回退帧，且 DB 指针被自愈修正。"""
+    prev = _mk_frame(tmp_path, "prev_last_frame.png")
+    stale = str(tmp_path / "deleted_last_frame.png")  # never written — missing on disk
+    await _seed_db(db_session_factory, prev_last_frame=prev, shot2_custom_first_frame=stale)
+    mock_gen = _run_ctx(monkeypatch, tmp_path)
+
+    ctx = {"session_factory": db_session_factory, "redis": redis}
+    await tasks.run_shot_pipeline(ctx, PROJECT_ID, "user:tester", shot_id=2)
+
+    _, kwargs = mock_gen.call_args
+    assert kwargs["first_frame_path"] == prev, "生成必须回退到上一镜当前末帧"
+
+    from sqlalchemy import select
+    from app.models.project import Shot
+    async with db_session_factory() as s:
+        shot2 = (await s.execute(
+            select(Shot).where(Shot.project_id == PROJECT_ID, Shot.shot_id == 2)
+        )).scalar_one()
+        assert shot2.custom_first_frame_path == prev, "悬空指针应被自愈为实际使用的首帧"
+
+
+@pytest.mark.asyncio
+async def test_stale_custom_frames_override_is_never_touched(
+    db_session_factory, redis, tmp_path, monkeypatch
+):
+    """用户覆盖（custom_frames/ 路径）即使文件丢失也绝不被改写。"""
+    prev = _mk_frame(tmp_path, "prev_last_frame.png")
+    stale_user = str(tmp_path / "custom_frames" / "user_upload.png")  # missing, but user territory
+    await _seed_db(db_session_factory, prev_last_frame=prev, shot2_custom_first_frame=stale_user)
+    mock_gen = _run_ctx(monkeypatch, tmp_path)
+
+    ctx = {"session_factory": db_session_factory, "redis": redis}
+    await tasks.run_shot_pipeline(ctx, PROJECT_ID, "user:tester", shot_id=2)
+
+    from sqlalchemy import select
+    from app.models.project import Shot
+    async with db_session_factory() as s:
+        shot2 = (await s.execute(
+            select(Shot).where(Shot.project_id == PROJECT_ID, Shot.shot_id == 2)
+        )).scalar_one()
+        assert shot2.custom_first_frame_path == stale_user
