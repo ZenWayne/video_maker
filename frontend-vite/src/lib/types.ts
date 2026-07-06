@@ -55,6 +55,22 @@ export type CcStatus = 'calibrating' | 'done' | 'failed'
 export type TfStatus = 'generating' | 'done' | 'failed'
 export type FfStatus = 'generating' | 'done' | 'failed'
 
+export type ImageCandidateSlot = 'first_frame' | 'tail_frame' | 'cc'
+export type ImageCandidateStatus = 'generating' | 'done' | 'failed'
+
+export interface ImageCandidate {
+  id: string
+  shot_id: number
+  slot: ImageCandidateSlot
+  status: ImageCandidateStatus
+  file_path: string | null
+  prompt_source: 'auto' | 'custom'
+  custom_prompt: string | null
+  error: string | null
+  created_at: string
+  adopted_at: string | null
+}
+
 export interface Shot {
   id: number
   project_id: string
@@ -90,6 +106,7 @@ export interface Shot {
   source_frames?: number | null
   trim_end_sec?: number | null
   vc_audio_url?: string | null
+  image_candidates: ImageCandidate[]
 }
 
 export interface ReferenceImage {

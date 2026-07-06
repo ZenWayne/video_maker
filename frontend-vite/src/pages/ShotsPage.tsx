@@ -119,6 +119,15 @@ export default function ShotsPage() {
     if (type === 'tf_completed') {
       setStatus('shot_review')
     }
+    // 统一图片生成候选：开始/完成/失败/CC 候选就绪 — 与 tf_completed 共用同一刷新路径
+    if (
+      type === 'image_candidate_started' ||
+      type === 'image_candidate_completed' ||
+      type === 'image_candidate_failed' ||
+      type === 'cc_candidate_ready'
+    ) {
+      setStatus('shot_review')
+    }
   }, [setShots, updateShot])
 
   // 获取项目详情

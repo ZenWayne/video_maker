@@ -38,6 +38,7 @@ const baseShot: Shot = {
   tf_error_message: null,
   tf_confirmed: false,
   auto_trim: true,
+  image_candidates: [],
 }
 
 function renderShotCard(aspectRatio?: AspectRatio) {
