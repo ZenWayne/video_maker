@@ -101,6 +101,7 @@ async def test_cc_slot_routes_to_calibrate_face(worker_ctx, db_session_factory, 
     async with db_session_factory() as s:
         shot = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalar_one()
         shot.last_frame_path = str(lf)
+        shot.cc_status = "calibrating"
         await s.commit()
     cid = await _seed_candidate(db_session_factory, pid, slot="cc")
 
@@ -113,6 +114,67 @@ async def test_cc_slot_routes_to_calibrate_face(worker_ctx, db_session_factory, 
         cand = (await s.execute(select(ImageCandidate).where(ImageCandidate.id == cid))).scalar_one()
         assert cand.status == "done"
         assert shot.last_frame_path == str(lf)  # CC 候选化：不直写 last_frame
+        assert shot.cc_status is None
+        assert shot.cc_error_message is None
+
+
+async def test_cc_failure_marks_cc_status_failed(worker_ctx, db_session_factory, monkeypatch, tmp_path):
+    from app.config import settings
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    from worker.tasks import run_image_candidate
+    from app.services.storage import shot_dir
+
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _add_shot(db_session_factory, pid, 1)
+    await _add_character_image(db_session_factory, pid)
+    s_dir = shot_dir(pid, 1); s_dir.mkdir(parents=True, exist_ok=True)
+    lf = s_dir / "last_frame_1_aaaa.png"; lf.write_bytes(b"LF")
+    async with db_session_factory() as s:
+        shot = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalar_one()
+        shot.last_frame_path = str(lf)
+        shot.cc_status = "calibrating"
+        await s.commit()
+    cid = await _seed_candidate(db_session_factory, pid, slot="cc")
+
+    with patch("app.services.image_generation.calibrate_face", new=AsyncMock(side_effect=RuntimeError("cc boom"))):
+        await run_image_candidate(worker_ctx, pid, 1, cid, "user:test")
+
+    async with db_session_factory() as s:
+        shot = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalar_one()
+        cand = (await s.execute(select(ImageCandidate).where(ImageCandidate.id == cid))).scalar_one()
+        assert cand.status == "failed" and "cc boom" in cand.error
+        assert shot.cc_status == "failed"
+        assert shot.cc_error_message is not None and "cc boom" in shot.cc_error_message
+
+
+async def test_auto_first_frame_routes_to_generate_first_frame(worker_ctx, db_session_factory, monkeypatch, tmp_path):
+    from app.config import settings
+    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    from worker.tasks import run_image_candidate
+    from app.services.storage import shot_dir
+
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _add_shot(db_session_factory, pid, 1)
+    await _add_character_image(db_session_factory, pid)
+    s_dir = shot_dir(pid, 1); s_dir.mkdir(parents=True, exist_ok=True)
+    tail = s_dir / "target_last_frame_1_aaaa.png"; tail.write_bytes(b"TAIL")
+    async with db_session_factory() as s:
+        shot = (await s.execute(select(Shot).where(Shot.project_id == pid))).scalar_one()
+        shot.target_last_frame_path = str(tail)
+        await s.commit()
+    cid = await _seed_candidate(db_session_factory, pid, slot="first_frame")
+
+    with patch("app.services.image_generation.generate_first_frame", new=AsyncMock(side_effect=_fake_gen())) as gff:
+        await run_image_candidate(worker_ctx, pid, 1, cid, "user:test")
+
+    gff.assert_awaited_once()
+    kw = gff.await_args.kwargs
+    assert kw["context_frame_path"] == str(tail)
+    assert kw["visual_description"] == "Visual description 1"
+    assert kw["shot_type"] == "Medium Shot"
+    async with db_session_factory() as s:
+        cand = (await s.execute(select(ImageCandidate).where(ImageCandidate.id == cid))).scalar_one()
+        assert cand.status == "done"
 
 
 async def test_failure_marks_candidate_failed_only(worker_ctx, db_session_factory, monkeypatch, tmp_path):

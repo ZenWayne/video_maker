@@ -633,6 +633,7 @@ async def run_image_candidate(
             "data": {"shot_id": shot_id, "candidate_id": candidate_id, "slot": cand.slot},
         })
 
+        success = False
         try:
             refs = json.loads(cand.ref_paths) if cand.ref_paths else {}
             if "character" in refs:
@@ -723,15 +724,7 @@ async def run_image_candidate(
                 session.add(shot)
             session.add(cand)
             await session.commit()
-            await publish_event(redis, project_id, {
-                "type": "image_candidate_completed",
-                "data": {
-                    "shot_id": shot_id,
-                    "candidate_id": candidate_id,
-                    "slot": cand.slot,
-                    "file_path": to_media_url(out),
-                },
-            })
+            success = True
             logger.info("Image candidate %s done (slot=%s shot=%d)", candidate_id, cand.slot, shot_id)
 
         except Exception as e:
@@ -753,6 +746,25 @@ async def run_image_candidate(
                     "error_message": str(e),
                 },
             })
+
+        if success:
+            # Publish OUTSIDE the failure-handling try/except: a publish error here
+            # must never overwrite the already-committed "done" status with "failed".
+            try:
+                await publish_event(redis, project_id, {
+                    "type": "image_candidate_completed",
+                    "data": {
+                        "shot_id": shot_id,
+                        "candidate_id": candidate_id,
+                        "slot": cand.slot,
+                        "file_path": to_media_url(out),
+                    },
+                })
+            except Exception:
+                logger.error(
+                    "Failed to publish image_candidate_completed for %s", candidate_id,
+                    exc_info=True,
+                )
 
 
 @observability.traced_job("worker-tail-frame-pipeline-run", tags=["tail-frame"])
