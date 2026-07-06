@@ -310,7 +310,7 @@ async def generate_tail_frame(
         output_path=output_path,
         span_name="services-tail-frame-generate-image",
         aspect_ratio=aspect_ratio,
-        pin_aspect=False,       # 保持旧行为：尾帧不钉 ImageConfig，仅事后裁剪
+        pin_aspect=True,        # 恢复原实现的方向钉：防横版返回导致 9:16 裁切成放大观感
         temperature=1.0,
     )
     return output_path
