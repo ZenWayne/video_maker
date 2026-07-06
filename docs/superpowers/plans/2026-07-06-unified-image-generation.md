@@ -589,7 +589,7 @@ git commit -m "feat(image-gen): 统一图片服务底座 + custom 单步直出�
         output_path=output_path,
         span_name="services-tail-frame-generate-image",
         aspect_ratio=aspect_ratio,
-        pin_aspect=False,       # 保持旧行为：尾帧不钉 ImageConfig，仅事后裁剪
+        pin_aspect=True,        # 行为保持：现行代码一直钉 ImageConfig 防横版返回+错裁（Task 3 评审勘误）
         temperature=1.0,
     )
     return output_path
