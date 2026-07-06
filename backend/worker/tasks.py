@@ -1012,8 +1012,8 @@ async def _do_character_calibrate_one(
     shot_id: int,
     ref_image_paths: list[str],
 ) -> None:
-    """Calibrate face in a single shot's last frame using reference images."""
-    from app.services.image_generation import calibrate_face
+    """校准一个 shot 的 last frame → 产出 cc 候选（采纳后才替换，见 adopt 端点）。"""
+    from app.services import image_generation as ig
 
     async with session_factory() as session:
         result = await session.execute(
@@ -1030,42 +1030,49 @@ async def _do_character_calibrate_one(
             {"type": "cc_started", "data": {"shot_id": shot_id}},
         )
 
+        cand = ImageCandidate(
+            project_id=project_id, shot_pk=shot.id, shot_id=shot_id,
+            slot="cc", status="generating", prompt_source="auto",
+            ref_paths=json.dumps({"character": ref_image_paths}),
+        )
+        session.add(cand)
+        await session.commit()
+        await session.refresh(cand)
+
         try:
-            s_dir = shot_dir(project_id, shot_id)
-            # Calibrate from the un-calibrated pristine frame (never stack onto an
-            # already-calibrated one); write the result to a NEW unique cc_ file so
-            # its URL changes — no in-place overwrite, no fixed-name backup.
+            # 从未校准的 pristine 帧出发（绝不叠加已校准帧）
             pristine = pristine_last_frame_path(project_id, shot_id) or Path(shot.last_frame_path)
-            cc_out = s_dir / f"cc_{ts_uuid_name('.png')}"
-            await calibrate_face(ref_image_paths, str(pristine), str(cc_out))
+            out_dir = shot_candidates_dir(project_id, shot_id)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out = str(out_dir / ts_uuid_name(".png"))
+            await ig.calibrate_face(ref_image_paths, str(pristine), out)
 
-            # Drop the previous calibrated frame(s); keep the pristine last_frame_.
-            for _old in s_dir.glob("cc_*.png"):
-                if _old != cc_out:
-                    _old.unlink(missing_ok=True)
-
-            shot.last_frame_path = str(cc_out)
-            shot.cc_status = "done"
+            cand.file_path = out
+            cand.status = "done"
+            shot.cc_status = None
             shot.cc_error_message = None
-            # Next shot's first frame should reflect the calibrated face.
-            await propagate_first_frame_to_next(project_id, shot, str(cc_out), session)
-            session.add(shot)
+            session.add_all([cand, shot])
             await session.commit()
 
             await publish_event(
                 redis, project_id,
                 {
-                    "type": "cc_completed",
+                    "type": "cc_candidate_ready",
                     "data": {
                         "shot_id": shot_id,
-                        "last_frame_path": to_media_url(str(cc_out)),
+                        "candidate_id": cand.id,
+                        "file_path": to_media_url(out),
                     },
                 },
             )
-            logger.info("Character calibration completed for shot %d", shot_id)
+            logger.info("CC candidate ready for shot %d", shot_id)
 
         except Exception as e:
             logger.error("Character calibration failed for shot %d: %s", shot_id, e)
+            cand.status = "failed"
+            cand.error = str(e)
+            session.add(cand)
+            await session.commit()
             await _mark_shot_failed(
                 session, redis, project_id, shot, e,
                 status_field="cc_status", status_value="failed",
