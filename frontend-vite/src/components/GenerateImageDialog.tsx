@@ -141,7 +141,7 @@ export function GenerateImageDialog({ project, shot, slot: initialSlot, open, on
                 }`}
                 title={`${r.kind} 参考图`}
               >
-                <img src={refMediaUrl(r.storage_path)} className="h-full w-full object-cover" />
+                <img src={refMediaUrl(r.storage_path)} alt={`${r.kind} 参考图`} className="h-full w-full object-cover" />
                 {checkedRefIds.has(r.id) && (
                   <span className="absolute left-1 top-1 rounded bg-blue-600 p-0.5">
                     <Check className="h-3 w-3 text-white" />
@@ -162,7 +162,10 @@ export function GenerateImageDialog({ project, shot, slot: initialSlot, open, on
               accept="image/*"
               multiple
               className="hidden"
-              onChange={e => setTempFiles([...(e.target.files ?? [])])}
+              onChange={e => {
+                setTempFiles([...(e.target.files ?? [])])
+                if (fileInput.current) fileInput.current.value = ''
+              }}
             />
           </div>
         </div>
@@ -195,7 +198,7 @@ export function GenerateImageDialog({ project, shot, slot: initialSlot, open, on
                   <div className={`relative h-40 w-24 overflow-hidden rounded-md border-2 ${
                     c.adopted_at ? 'border-blue-600' : 'border-zinc-300'
                   }`}>
-                    <img src={c.file_path ?? ''} className="h-full w-full object-cover" />
+                    <img src={c.file_path ?? ''} alt="候选图" className="h-full w-full object-cover" />
                     {c.adopted_at && (
                       <span className="absolute left-1 top-1 flex items-center gap-0.5 rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
                         <Check className="h-2.5 w-2.5" /> 已采纳
