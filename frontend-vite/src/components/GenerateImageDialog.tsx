@@ -1,7 +1,7 @@
 // components/GenerateImageDialog.tsx
 // 统一图片生成弹窗：槽位切换 / 自定义提示词(可选,缺省自动) / 参考图勾选+临时上传 / 候选画廊
-import { useMemo, useRef, useState } from 'react'
-import { Loader2, Plus, Sparkles, Check } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Loader2, Plus, Sparkles, Check, X } from 'lucide-react'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
@@ -41,6 +41,21 @@ export function GenerateImageDialog({ project, shot, slot: initialSlot, open, on
     () => (shot.image_candidates ?? []).filter(c => c.slot === slot),
     [shot.image_candidates, slot],
   )
+
+  // 临时上传文件的预览 URL：随 tempFiles 变化重新创建，旧的在下一次变化/卸载时统一 revoke
+  const tempPreviewUrls = useMemo(
+    () => tempFiles.map(f => URL.createObjectURL(f)),
+    [tempFiles],
+  )
+  useEffect(() => {
+    return () => {
+      tempPreviewUrls.forEach(url => URL.revokeObjectURL(url))
+    }
+  }, [tempPreviewUrls])
+
+  const removeTempFile = (index: number) => {
+    setTempFiles(prev => prev.filter((_, i) => i !== index))
+  }
 
   const autoHint = slot === 'tail_frame'
     ? '提示词留空时自动推理：分镜动作提示词 + 首帧 → 推导尾帧（两步 CoT）'
@@ -149,12 +164,25 @@ export function GenerateImageDialog({ project, shot, slot: initialSlot, open, on
                 )}
               </button>
             ))}
+            {tempFiles.map((file, i) => (
+              <div key={`${file.name}-${i}`} className="relative h-[72px] w-[72px] overflow-hidden rounded-md border-2 border-blue-600">
+                <img src={tempPreviewUrls[i]} alt="临时参考图" className="h-full w-full object-cover" />
+                <button
+                  type="button"
+                  aria-label="移除临时参考图"
+                  onClick={() => removeTempFile(i)}
+                  className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-black/60 text-white"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
             <button
               onClick={() => fileInput.current?.click()}
               className="flex h-[72px] w-[72px] flex-col items-center justify-center gap-1 rounded-md border border-dashed border-zinc-300 text-zinc-400"
             >
               <Plus className="h-4 w-4" />
-              <span className="text-[11px]">临时上传{tempFiles.length ? ` (${tempFiles.length})` : ''}</span>
+              <span className="text-[11px]">临时上传</span>
             </button>
             <input
               ref={fileInput}
@@ -163,7 +191,8 @@ export function GenerateImageDialog({ project, shot, slot: initialSlot, open, on
               multiple
               className="hidden"
               onChange={e => {
-                setTempFiles([...(e.target.files ?? [])])
+                const newFiles = [...(e.target.files ?? [])]
+                setTempFiles(prev => [...prev, ...newFiles])
                 if (fileInput.current) fileInput.current.value = ''
               }}
             />

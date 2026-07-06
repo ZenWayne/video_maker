@@ -4,6 +4,7 @@
  * - 采纳链路：候选行 + 真实图片直插 DB（seedImageCandidate），adopt 走真实后端，
  *   断言真实 GET /api/projects/{id} 反映新的 target_last_frame_path / tf_status / adopted_at。
  */
+import * as path from 'path'
 import { test, expect } from '@playwright/test'
 import {
   createProject,
@@ -13,6 +14,8 @@ import {
   deleteProject,
   getProject,
 } from '../helpers/api'
+
+const TEST_CHARACTER_JPG = path.resolve(__dirname, '../fixtures/test-character.jpg')
 
 let projectId: string
 
@@ -57,6 +60,14 @@ test('生成弹窗从关键帧下拉打开并发出真实形状的创建请求',
   await expect(page.getByText('生成图片 — Shot #1')).toBeVisible()
 
   await page.getByPlaceholder(/少女转身面向大海/).fill('自定义提示词')
+
+  // 临时上传：选择文件后应显示缩略图，且可通过移除按钮删除
+  const dialog = page.getByLabel('生成图片 — Shot #', { exact: false })
+  await dialog.locator('input[type="file"]').setInputFiles(TEST_CHARACTER_JPG)
+  await expect(page.getByAltText('临时参考图')).toBeVisible()
+  await page.getByRole('button', { name: '移除临时参考图' }).click()
+  await expect(page.getByAltText('临时参考图')).not.toBeVisible()
+
   await page.getByRole('button', { name: /生成 1 张候选/ }).click()
   await expect.poll(() => captured).not.toBeNull()
   expect(captured!.slot).toBe('tail_frame')
