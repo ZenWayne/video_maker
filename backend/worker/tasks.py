@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app import observability
-from app.models.project import Project, Shot, ReferenceImage
+from app.models.project import Project, Shot, ReferenceImage, ImageCandidate
 from app.services.state_machine import (
     ProjectStatus,
     ShotStatus,
@@ -41,6 +41,7 @@ from app.services.storage import (
     get_original_video_for_audio,
     pristine_last_frame_path,
     ts_uuid_name,
+    shot_candidates_dir,
 )
 from app.services.events import publish_event
 from app.agents.llm import GeminiProvider
@@ -589,6 +590,169 @@ async def _get_character_ref_paths(
     )
     refs = result.scalars().all()
     return [r.storage_path for r in refs if Path(r.storage_path).exists()]
+
+
+def _resolve_ff_context(shot: Shot) -> str | None:
+    """first_frame/custom-first 的 context 帧：目标尾帧 → 实际尾帧 → 无。"""
+    ctx = resolve_tail_frame(shot.target_last_frame_path)
+    if ctx:
+        return ctx
+    if shot.last_frame_path and Path(shot.last_frame_path).exists():
+        return shot.last_frame_path
+    return None
+
+
+@observability.traced_job("worker-image-candidate-run", tags=["image-candidate"])
+async def run_image_candidate(
+    ctx: Dict[str, Any], project_id: str, shot_id: int, candidate_id: str, actor: str
+) -> None:
+    """统一图片候选生成：模式 = slot + 有无 custom_prompt；不触碰 project 状态机。"""
+    from app.services import image_generation as ig
+
+    worker_ctx = WorkerContext(ctx)
+    session_factory = worker_ctx.session_factory
+    redis = worker_ctx.redis
+
+    async with session_factory() as session:
+        project = (await session.execute(
+            select(Project).where(Project.id == project_id)
+        )).scalar_one_or_none()
+        shot = (await session.execute(
+            select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+        )).scalar_one_or_none()
+        cand = (await session.execute(
+            select(ImageCandidate).where(ImageCandidate.id == candidate_id)
+        )).scalar_one_or_none()
+        if not project or not shot or not cand:
+            logger.error("run_image_candidate: missing project/shot/candidate (%s/%s/%s)",
+                         project_id, shot_id, candidate_id)
+            return
+
+        await publish_event(redis, project_id, {
+            "type": "image_candidate_started",
+            "data": {"shot_id": shot_id, "candidate_id": candidate_id, "slot": cand.slot},
+        })
+
+        try:
+            refs = json.loads(cand.ref_paths) if cand.ref_paths else {}
+            if "character" in refs:
+                char_refs = refs["character"]
+            else:
+                char_refs = await _get_character_ref_paths(project_id, session)
+            obj_refs = refs.get("object") or None
+
+            out_dir = shot_candidates_dir(project_id, shot_id)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out = str(out_dir / ts_uuid_name(".png"))
+
+            if cand.slot == "cc":
+                pristine = pristine_last_frame_path(project_id, shot_id)
+                if pristine is None and shot.last_frame_path and Path(shot.last_frame_path).exists():
+                    pristine = Path(shot.last_frame_path)
+                if pristine is None:
+                    raise ValueError("Shot has no last frame to calibrate")
+                await ig.calibrate_face(char_refs, str(pristine), out)
+
+            elif cand.custom_prompt:
+                if cand.slot == "tail_frame":
+                    ff = await pick_first_frame(project_id, shot, session)
+                    context = str(ff) if ff else None
+                else:
+                    context = _resolve_ff_context(shot)
+                await ig.generate_custom(
+                    prompt=cand.custom_prompt,
+                    output_path=out,
+                    character_ref_paths=char_refs,
+                    object_ref_paths=obj_refs,
+                    context_frame_path=context,
+                    aspect_ratio=project.aspect_ratio,
+                )
+
+            elif cand.slot == "tail_frame":
+                first_frame = await pick_first_frame(project_id, shot, session)
+                if shot.motion_prompt and not obj_refs:
+                    motion_prompt = shot.motion_prompt
+                else:
+                    motion_prompt = await run_director_agent(
+                        shot_id=shot.shot_id,
+                        shot_type=shot.shot_type,
+                        visual_description=shot.visual_description,
+                        text=shot.text,
+                        duration=shot.shot_duration,
+                        llm_provider=get_provider(),
+                        reference_image_paths=obj_refs,
+                    )
+                    shot.motion_prompt = motion_prompt
+                    session.add(shot)
+                    await session.commit()
+
+                async def _on_cot(end_pose: str) -> None:
+                    await publish_event(redis, project_id, {
+                        "type": "tf_pose_analyzed",
+                        "data": {"shot_id": shot_id, "end_pose": end_pose},
+                    })
+
+                await ig.generate_tail_frame(
+                    character_ref_paths=char_refs,
+                    first_frame_path=str(first_frame) if first_frame else None,
+                    motion_prompt=motion_prompt,
+                    output_path=out,
+                    object_ref_paths=obj_refs,
+                    aspect_ratio=project.aspect_ratio,
+                    on_cot_complete=_on_cot,
+                )
+
+            else:  # first_frame auto
+                await ig.generate_first_frame(
+                    character_ref_paths=char_refs,
+                    context_frame_path=_resolve_ff_context(shot),
+                    visual_description=shot.visual_description,
+                    shot_type=shot.shot_type,
+                    output_path=out,
+                    motion_prompt=shot.motion_prompt,
+                    object_ref_paths=obj_refs,
+                    aspect_ratio=project.aspect_ratio,
+                )
+
+            cand.file_path = out
+            cand.status = "done"
+            cand.error = None
+            if cand.slot == "cc":
+                shot.cc_status = None
+                shot.cc_error_message = None
+                session.add(shot)
+            session.add(cand)
+            await session.commit()
+            await publish_event(redis, project_id, {
+                "type": "image_candidate_completed",
+                "data": {
+                    "shot_id": shot_id,
+                    "candidate_id": candidate_id,
+                    "slot": cand.slot,
+                    "file_path": to_media_url(out),
+                },
+            })
+            logger.info("Image candidate %s done (slot=%s shot=%d)", candidate_id, cand.slot, shot_id)
+
+        except Exception as e:
+            logger.error("Image candidate %s failed: %s", candidate_id, e, exc_info=True)
+            cand.status = "failed"
+            cand.error = str(e)
+            if cand.slot == "cc":
+                shot.cc_status = "failed"
+                shot.cc_error_message = str(e)
+                session.add(shot)
+            session.add(cand)
+            await session.commit()
+            await publish_event(redis, project_id, {
+                "type": "image_candidate_failed",
+                "data": {
+                    "shot_id": shot_id,
+                    "candidate_id": candidate_id,
+                    "slot": cand.slot,
+                    "error_message": str(e),
+                },
+            })
 
 
 @observability.traced_job("worker-tail-frame-pipeline-run", tags=["tail-frame"])
