@@ -18,29 +18,27 @@ from sqlalchemy import select
 
 
 async def test_generate_tail_frame_success(client, db_session_factory):
-    """Generate tail frame enqueues run_tail_frame_pipeline."""
+    """generate-tail-frame 现在创建 auto 候选并入队 run_image_candidate."""
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1, status="pending")
 
     r = await client.post(
-        f"/api/projects/{pid}/shots/1/generate-tail-frame",
-        headers=HEADERS,
+        f"/api/projects/{pid}/shots/1/generate-tail-frame", headers=HEADERS
     )
     assert r.status_code == 202
-    assert r.json()["status"] == "queued"
+    body = r.json()
+    assert body["status"] == "queued"
+    cid = body["candidate_id"]
 
     client.arq.enqueue_job.assert_called_once_with(
-        "run_tail_frame_pipeline", pid, 1, f"user:{USER}"
+        "run_image_candidate", pid, 1, cid, f"user:{USER}"
     )
-
-    # Shot tf_status should be "generating"
+    from app.models.project import ImageCandidate
     async with db_session_factory() as s:
-        result = await s.execute(
-            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
-        )
-        shot = result.scalar_one()
-        assert shot.tf_status == "generating"
-        assert shot.tf_confirmed is False
+        cand = (await s.execute(
+            select(ImageCandidate).where(ImageCandidate.id == cid)
+        )).scalar_one()
+        assert cand.slot == "tail_frame" and cand.prompt_source == "auto"
 
 
 async def test_generate_tail_frame_shot_not_found(client, db_session_factory):
@@ -52,15 +50,15 @@ async def test_generate_tail_frame_shot_not_found(client, db_session_factory):
     assert r.status_code == 404
 
 
-async def test_generate_tail_frame_wrong_status(client, db_session_factory):
-    """Cannot generate tail frame when project is in draft."""
+async def test_generate_tail_frame_any_status_ok(client, db_session_factory):
+    """候选生成不再要求状态机 transition，即便 project 处于 draft 也是 202."""
     pid = await _make_project(db_session_factory, status="draft")
     await _add_shot(db_session_factory, pid, 1, status="pending")
     r = await client.post(
         f"/api/projects/{pid}/shots/1/generate-tail-frame",
         headers=HEADERS,
     )
-    assert r.status_code == 409
+    assert r.status_code == 202
 
 
 # ── POST /projects/{id}/shots/{shot_id}/confirm-tail-frame ───────────────────

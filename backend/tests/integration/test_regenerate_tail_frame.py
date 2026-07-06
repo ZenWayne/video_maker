@@ -3,7 +3,7 @@
 Task 3 requirements:
 - Part A: regenerate_shots must leave target_last_frame_path untouched (path-as-truth)
 - Part B: _enqueue_next_shot_task must always enqueue run_shot_pipeline (no auto tail-frame routing)
-- Regression: explicit generate-tail-frame endpoint still enqueues run_tail_frame_pipeline
+- Regression: explicit generate-tail-frame endpoint still enqueues run_image_candidate
 """
 import pytest
 from sqlalchemy import select
@@ -137,9 +137,11 @@ async def test_regenerate_connected_shot_no_target_enqueues_shot_pipeline(
 
 
 async def test_explicit_generate_tail_frame_endpoint_still_works(client, db_session_factory):
-    """Regression: the explicit generate-tail-frame endpoint still enqueues run_tail_frame_pipeline.
+    """Regression: the explicit generate-tail-frame endpoint still enqueues a job.
 
     This endpoint is out of scope for Task 3 changes and must remain working.
+    Since Task 9, it enqueues run_image_candidate (auto tail_frame candidate)
+    instead of the deleted run_tail_frame_pipeline.
     """
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, shot_id=1, status="pending")
@@ -151,6 +153,7 @@ async def test_explicit_generate_tail_frame_endpoint_still_works(client, db_sess
         headers=HEADERS,
     )
     assert r.status_code == 202
+    cid = r.json()["candidate_id"]
     client.arq.enqueue_job.assert_called_once_with(
-        "run_tail_frame_pipeline", pid, 1, f"user:{USER}"
+        "run_image_candidate", pid, 1, cid, f"user:{USER}"
     )
