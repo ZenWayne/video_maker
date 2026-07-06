@@ -63,7 +63,7 @@ export default function WaveformTrack({
     // 说话结束竖线（黄线画在灰显之上，确保在已裁剪区仍清晰可见）
     if (speechEndFrame != null) {
       const sx = pixelForFrame(speechEndFrame, width, totalFrames)
-      g.fillStyle = '#B45309' // amber-700
+      g.fillStyle = '#F59E0B' // amber-500 —— 图例叫"黄线"，用真正的黄
       g.fillRect(sx - 1, 0, 2, TRACK_HEIGHT)
     }
 

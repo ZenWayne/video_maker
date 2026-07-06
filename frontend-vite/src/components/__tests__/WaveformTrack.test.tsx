@@ -158,7 +158,7 @@ describe('WaveformTrack', () => {
       />,
     )
     const greyOverlayIndex = fillStyleLog.indexOf('rgba(244, 244, 245, 0.78)')
-    const amberLineIndex = fillStyleLog.indexOf('#B45309')
+    const amberLineIndex = fillStyleLog.indexOf('#F59E0B')
     expect(greyOverlayIndex).toBeGreaterThan(-1)
     expect(amberLineIndex).toBeGreaterThan(-1)
     expect(amberLineIndex).toBeGreaterThan(greyOverlayIndex) // 黄线在灰显之后绘制
