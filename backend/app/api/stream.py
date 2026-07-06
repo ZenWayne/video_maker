@@ -105,7 +105,10 @@ async def event_generator(
         }
 
     # Session released — now yield snapshot and stream Redis events without holding DB connection
-    yield json.dumps(snapshot)
+    # default=str: image_candidates carry raw datetime (created_at/adopted_at) from
+    # _candidate_to_dict — matches the project-wide json.dumps(..., default=str) convention
+    # in app/services/events.py:35.
+    yield json.dumps(snapshot, default=str)
 
     try:
         async for event in subscribe_to_events(redis, project_id):
