@@ -18,11 +18,11 @@ from google.genai import types
 from app.agents.frame_porter import center_crop_to_aspect
 from app.config import settings
 from app import observability
-from app.services.tail_frame_generator import (
+from app.services.image_generation import (
     _call_with_timeout,
     _extract_text,
-    _get_client,
     _mime_for,
+    get_client as _get_client,
 )
 
 logger = logging.getLogger(__name__)

@@ -639,7 +639,7 @@ async def run_tail_frame_pipeline(
         shot_id: Shot sequence number
         actor: Who triggered this
     """
-    from app.services.tail_frame_generator import generate_tail_frame
+    from app.services.image_generation import generate_tail_frame
 
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory

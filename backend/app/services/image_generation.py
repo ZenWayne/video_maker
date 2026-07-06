@@ -2,8 +2,8 @@
 
 共享：Vertex genai client（按 project/location 记忆化）、超时包装、
 图像步（generate_content IMAGE + 空响应处理 + 写文件 + 裁剪）、观测。
-模式函数在后续任务中从 tail_frame_generator / first_frame_generator /
-face_calibration_client 迁移进来。
+模式函数在后续任务中从 first_frame_generator / face_calibration_client
+迁移进来（尾帧生成已迁移为 generate_tail_frame）。
 """
 
 import asyncio
@@ -22,6 +22,28 @@ from app import observability
 logger = logging.getLogger(__name__)
 
 _clients: dict[tuple[str, str], genai.Client] = {}
+
+# Minimum characters the CoT end-pose description must have before we accept it.
+_COT_MIN_LEN = 30
+
+# Phrases that signal the CoT tried to shortcut with a "no change" answer.
+_COT_CONSERVATIVE_MARKERS = (
+    "same as starting",
+    "same as the starting",
+    "unchanged",
+    "no movement",
+    "no change",
+    "identical to the starting",
+    "no visible change",
+)
+
+
+def _is_cot_too_weak(text: str) -> bool:
+    stripped = (text or "").strip()
+    if len(stripped) < _COT_MIN_LEN:
+        return True
+    lowered = stripped.lower()
+    return any(marker in lowered for marker in _COT_CONSERVATIVE_MARKERS)
 
 
 def get_client(project: Optional[str] = None, location: Optional[str] = None) -> genai.Client:
@@ -176,3 +198,119 @@ async def generate_custom(
         pin_aspect=True,
         temperature=1.0,
     )
+
+
+async def generate_tail_frame(
+    character_ref_paths: List[str],
+    first_frame_path: Optional[str],
+    motion_prompt: str,
+    output_path: str,
+    object_ref_paths: Optional[List[str]] = None,
+    aspect_ratio: str = "9:16",
+    on_cot_complete: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> str:
+    """Generate a target tail frame based on the director's motion prompt.
+
+    Two-step process using gemini-3.1-flash-image-preview:
+      Step 1 (TEXT): Analyze the motion prompt to derive the final pose.
+      Step 2 (IMAGE): Generate the tail frame image with the analyzed pose.
+
+    Args:
+        character_ref_paths: Paths to character reference images (identity).
+        first_frame_path: Path to the shot's first frame (starting state).
+        motion_prompt: Director-generated motion prompt describing the action.
+        output_path: Path to write the generated tail frame image.
+        object_ref_paths: Optional paths to object/prop reference images.
+
+    Returns:
+        The output_path.
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    client = get_client()
+    model = settings.tf_model
+
+    # --- Collect image parts once, keyed by role ---
+    char_parts = parts_from_paths(character_ref_paths)
+    obj_parts = parts_from_paths(object_ref_paths)
+    first_frame_parts = parts_from_paths([first_frame_path] if first_frame_path else [])
+
+    logger.info(
+        "TF: calling %s  char_refs=%d  obj_refs=%d  first_frame=%s",
+        model,
+        len(character_ref_paths),
+        len(object_ref_paths) if object_ref_paths else 0,
+        first_frame_path,
+    )
+
+    # --- Step 1: CoT analysis (TEXT only) — use text model to reason about end pose ---
+    # CoT only sees text output; image order doesn't affect conditioning weight,
+    # so keep the legacy order here.
+    cot_image_parts = char_parts + obj_parts + first_frame_parts
+    cot_prompt = settings.tf_cot_prompt.format(motion_prompt=motion_prompt)
+    cot_parts = cot_image_parts + [types.Part(text=cot_prompt)]
+
+    with observability.generation(
+        name="services-tail-frame-cot-analysis",
+        model=settings.tf_cot_model,
+        input={"motion_prompt": motion_prompt},
+        model_parameters={"temperature": 0.6},
+    ) as cot_gen:
+        cot_response = await _call_with_timeout(
+            lambda: client.aio.models.generate_content(
+                model=settings.tf_cot_model,
+                contents=[types.Content(role="user", parts=cot_parts)],
+                config=types.GenerateContentConfig(temperature=0.6),
+            ),
+            label="TF CoT API call",
+        )
+        end_pose = _extract_text(cot_response)
+        observability.update_span(cot_gen, output=end_pose)
+    logger.info("TF CoT end pose: %s", end_pose[:500])
+
+    # Retry once if the CoT produced empty/too-short/conservative output — those
+    # correlate strongly with the image step outputting a near-copy of an input
+    # image. Re-roll the SAME prompt at a higher temperature so the resample
+    # actually diverges from the weak first answer.
+    if _is_cot_too_weak(end_pose):
+        logger.warning("TF CoT output too weak, re-rolling at higher temperature")
+        retry_response = await client.aio.models.generate_content(
+            model=settings.tf_cot_model,
+            contents=[types.Content(role="user", parts=cot_parts)],
+            config=types.GenerateContentConfig(temperature=0.9),
+        )
+        retry_text = _extract_text(retry_response)
+        logger.info("TF CoT retry end pose: %s", retry_text[:500])
+        if not _is_cot_too_weak(retry_text):
+            end_pose = retry_text
+        else:
+            # Hard fallback: make sure the image step still sees a strong
+            # "must differ" instruction even when CoT keeps failing.
+            end_pose = (
+                "The character MUST be in a pose visibly different from the "
+                "starting frame (different head angle, hand position, or eye "
+                "direction). Base the end pose on this action: "
+                f"{motion_prompt}"
+            )
+
+    if on_cot_complete:
+        await on_cot_complete(end_pose)
+
+    # --- Step 2: Image generation (IMAGE only) with CoT result ---
+    # Reordered: [first_frame] (context) → [object refs] → [character refs] (identity).
+    # Putting first_frame last was over-conditioning the model into "edit-this-image"
+    # behavior, causing it to copy the starting pose. Character ref is now last so
+    # facial identity stays strong, paired with an explicit "only features, not pose"
+    # instruction in tf_prompt.
+    img_image_parts = first_frame_parts + obj_parts + char_parts
+    img_prompt = settings.tf_prompt.format(motion_prompt=motion_prompt, end_pose=end_pose)
+    await run_image_step(
+        image_parts=img_image_parts,
+        prompt=img_prompt,
+        output_path=output_path,
+        span_name="services-tail-frame-generate-image",
+        aspect_ratio=aspect_ratio,
+        pin_aspect=False,       # 保持旧行为：尾帧不钉 ImageConfig，仅事后裁剪
+        temperature=1.0,
+    )
+    return output_path
