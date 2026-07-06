@@ -31,7 +31,7 @@ export function CcCandidateStrip({ shot, currentLastFrame, onAdopt, onDelete, on
       <div className="flex items-center gap-2.5">
         <div className="flex flex-col items-center gap-1">
           <div className="h-[135px] w-[76px] overflow-hidden rounded-md bg-zinc-300">
-            {currentLastFrame && <img src={currentLastFrame} className="h-full w-full object-cover" />}
+            {currentLastFrame && <img src={currentLastFrame} alt="当前尾帧" className="h-full w-full object-cover" />}
           </div>
           <span className="text-[11px] text-zinc-500">当前尾帧</span>
         </div>
@@ -48,7 +48,7 @@ export function CcCandidateStrip({ shot, currentLastFrame, onAdopt, onDelete, on
               </div>
             ) : (
               <div className="h-[135px] w-[76px] overflow-hidden rounded-md border-2 border-blue-500">
-                <img src={c.file_path ?? ''} className="h-full w-full object-cover" />
+                <img src={c.file_path ?? ''} alt="校准候选" className="h-full w-full object-cover" />
               </div>
             )}
             <div className="flex gap-2 text-xs">
