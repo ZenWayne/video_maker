@@ -11,9 +11,9 @@
 
 1. **尾帧生成** `app/services/tail_frame_generator.py` — 两步 CoT（`tf_cot_prompt` 推结束姿势 → `tf_prompt` 生图），模型 `gemini-3.1-flash-image-preview`。
 2. **CC 人脸校准** `app/services/face_calibration_client.py` — 对 shot 的 `last_frame` 做身份修复编辑（`cc_prompt`），直写替换。
-3. **首帧生成（未合并原型）** — `feat-generate-first-frame` worktree 里的 `first_frame_generator.py`，复用尾帧生成器 helper，按 `visual_description` + 上下文帧 + 角色参考图生成首帧（`ff_cot_prompt`/`ff_prompt` 仅存在于该 worktree）。
+3. **首帧生成** — `app/services/first_frame_generator.py`（已并入 master），复用尾帧生成器 helper，按 `visual_description` + 上下文帧 + 角色参考图生成首帧（`ff_cot_prompt`/`ff_prompt` 在 `config.py`；端点 `generate-first-frame`、worker `run_first_frame_pipeline` 均已存在）。
 
-能力缺口：首帧没有 AI 生成入口（只能上传/提取/连贯链）；无法用自定义合成提示词生成；无法反向"尾帧→推首帧"；参考图参与不可选（自动带 character）；生成结果直写槽位、无对比挑选。
+能力缺口：无法用自定义合成提示词生成；首帧生成不支持"尾帧→反推首帧"方向；参考图参与不可选（自动带 character）；生成结果直写槽位、无对比挑选。
 
 ## 已确认的产品决策
 
@@ -160,5 +160,5 @@ created_at, adopted_at NULL
 ## 风险 / 注意
 
 - CC 候选化改变现有"批量校准直接生效"的节奏：批量校准后需逐 shot 采纳。设计上以候选条集中呈现降低点击成本；若实际使用嫌繁琐，可后续加"全部采纳"批量按钮（暂不做）。
-- `feat-generate-first-frame` worktree 的 `ff_` 提示词是原型质量，合入时需按 `first_frame` 模式的输入（尾帧作 context 反推）重新校订方向性措辞（原型是"从 visual_description 正向生成"，本设计要求同时支持反推场景）。
+- 现有 `ff_` 提示词按"从 visual_description 正向生成"撰写，本设计要求同时支持"尾帧作 context 反推"场景，收编时需在 `ff_cot_prompt` 中补充方向性措辞。
 - 旧 `run_tail_frame_pipeline` 迁移期间需保证 MCP 工具与现有前端不断链（wrapper 先行，前端切换后再删）。
