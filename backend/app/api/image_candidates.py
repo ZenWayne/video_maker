@@ -107,6 +107,8 @@ async def create_image_candidate(
             ids = json.loads(ref_image_ids)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="ref_image_ids must be a JSON array")
+        if not isinstance(ids, list):
+            raise HTTPException(status_code=400, detail="ref_image_ids must be a JSON array")
         if ids:
             rows = (await session.execute(
                 select(ReferenceImage).where(

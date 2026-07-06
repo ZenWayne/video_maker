@@ -83,6 +83,17 @@ async def test_create_rejects_bad_slot(client, db_session_factory):
     assert r.status_code == 400  # cc 候选只能由校准端点产生
 
 
+async def test_create_rejects_malformed_ref_image_ids(client, db_session_factory):
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _add_shot(db_session_factory, pid, 1)
+    # not JSON at all
+    r1 = await _create(client, pid, data={"slot": "tail_frame", "ref_image_ids": "{not json"})
+    assert r1.status_code == 400
+    # valid JSON but not an array
+    r2 = await _create(client, pid, data={"slot": "tail_frame", "ref_image_ids": "5"})
+    assert r2.status_code == 400
+
+
 async def test_delete_candidate(client, db_session_factory, tmp_path):
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1)
