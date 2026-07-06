@@ -151,6 +151,10 @@ export type SSEEventType =
   | 'ff_started'
   | 'ff_completed'
   | 'ff_failed'
+  | 'image_candidate_started'
+  | 'image_candidate_completed'
+  | 'image_candidate_failed'
+  | 'cc_candidate_ready'
 
 export interface WorkerStatusData {
   message: string
