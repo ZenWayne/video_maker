@@ -95,6 +95,30 @@ export default function ShotsPage() {
 
   const updateShot = useStore((s) => s.updateShot)
 
+  // 拉取项目详情并通过统一的 state setter 写入 store + 本地 state
+  // 供挂载时初次加载复用，也供 SSE 候选事件触发的重拉复用
+  const refetchProject = useCallback(async () => {
+    if (!projectId) return
+
+    try {
+      const project = await api.getProject(projectId)
+      setCurrentProject(project)
+      setStatus(project.status as ProjectStatus)
+      setSceneOverview(project.scene_overview || '')
+      setShots((project.shots || []).map(versionShotMedia))
+      setReferenceVoiceShotId(project.reference_voice_shot_id ?? null)
+      setReferenceVoicePath(project.reference_voice_path ?? null)
+      setAutoVoiceCalibrate(project.auto_voice_calibrate ?? false)
+      setHasCharacterRefs(project.reference_images?.some((r) => r.kind === 'character') ?? false)
+      setReferenceImages(project.reference_images ?? [])
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : '获取项目失败',
+      })
+    }
+  }, [projectId, setCurrentProject, setShots, addToast])
+
   const handleSSEEvent = useCallback((type: string, data?: unknown) => {
     if (type === 'all_shots_ready' || type === 'shot_review_ready') {
       setStatus('shot_review')
@@ -119,43 +143,27 @@ export default function ShotsPage() {
     if (type === 'tf_completed') {
       setStatus('shot_review')
     }
-    // 统一图片生成候选：开始/完成/失败/CC 候选就绪 — 与 tf_completed 共用同一刷新路径
+    // 统一图片生成候选：开始/完成/失败/CC 候选就绪
+    // 候选事件 payload 只有 {shot_id, candidate_id, slot, file_path|error}，
+    // 没有完整的 candidate 对象，无法像 tf_completed 那样靠 updateShot 局部 patch，
+    // 必须真实重拉项目数据，候选画廊才能拿到 shot.image_candidates
+    if (type === 'image_candidate_started') {
+      setStatus('shot_review')
+    }
     if (
-      type === 'image_candidate_started' ||
       type === 'image_candidate_completed' ||
       type === 'image_candidate_failed' ||
       type === 'cc_candidate_ready'
     ) {
       setStatus('shot_review')
+      refetchProject()
     }
-  }, [setShots, updateShot])
+  }, [setShots, updateShot, refetchProject])
 
-  // 获取项目详情
+  // 获取项目详情（挂载时）
   useEffect(() => {
-    if (!projectId) return
-
-    const fetchProject = async () => {
-      try {
-        const project = await api.getProject(projectId)
-        setCurrentProject(project)
-        setStatus(project.status as ProjectStatus)
-        setSceneOverview(project.scene_overview || '')
-        setShots((project.shots || []).map(versionShotMedia))
-        setReferenceVoiceShotId(project.reference_voice_shot_id ?? null)
-        setReferenceVoicePath(project.reference_voice_path ?? null)
-        setAutoVoiceCalibrate(project.auto_voice_calibrate ?? false)
-        setHasCharacterRefs(project.reference_images?.some((r) => r.kind === 'character') ?? false)
-        setReferenceImages(project.reference_images ?? [])
-      } catch (error) {
-        addToast({
-          type: 'error',
-          message: error instanceof Error ? error.message : '获取项目失败',
-        })
-      }
-    }
-
-    fetchProject()
-  }, [projectId, setCurrentProject, setShots, addToast])
+    refetchProject()
+  }, [refetchProject])
 
   // 计算断层警告
   const warnings = useMemo(() => {
