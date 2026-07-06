@@ -410,3 +410,30 @@ async def generate_first_frame(
         temperature=1.0,
     )
     return output_path
+
+
+async def calibrate_face(
+    reference_image_paths: List[str],
+    source_frame_path: str,
+    output_frame_path: str,
+) -> str:
+    """CC 人脸校准（edit 模式）：只换脸部身份，姿态/背景保持 BASE 帧。
+
+    身份参考在前、BASE 帧最后 — 模型把 "edit-this-image" 锚定在最后一张图上，
+    帧在最后其姿态才被保留（帧在前会导致复制参考图姿态）。不做裁剪。
+    """
+    image_parts = parts_from_paths(reference_image_paths)
+    image_parts += parts_from_paths([source_frame_path])
+    logger.info(
+        "CC: calling %s refs=%d frame=%s",
+        settings.cc_model, len(reference_image_paths), source_frame_path,
+    )
+    return await run_image_step(
+        image_parts=image_parts,
+        prompt=settings.cc_prompt,
+        output_path=output_frame_path,
+        span_name="services-face-calibration-generate-image",
+        model=settings.cc_model,
+        aspect_ratio=None,
+        client=get_client(settings.cc_project, settings.cc_location),
+    )

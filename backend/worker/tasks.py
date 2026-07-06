@@ -1128,7 +1128,7 @@ async def _do_character_calibrate_one(
     ref_image_paths: list[str],
 ) -> None:
     """Calibrate face in a single shot's last frame using reference images."""
-    from app.services.face_calibration_client import calibrate_face
+    from app.services.image_generation import calibrate_face
 
     async with session_factory() as session:
         result = await session.execute(
