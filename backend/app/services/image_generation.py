@@ -2,8 +2,8 @@
 
 共享：Vertex genai client（按 project/location 记忆化）、超时包装、
 图像步（generate_content IMAGE + 空响应处理 + 写文件 + 裁剪）、观测。
-模式函数在后续任务中从 first_frame_generator / face_calibration_client
-迁移进来（尾帧生成已迁移为 generate_tail_frame）。
+模式函数在后续任务中从 face_calibration_client 迁移进来（尾帧生成已迁移为
+generate_tail_frame，首帧生成已迁移为 generate_first_frame）。
 """
 
 import asyncio
@@ -311,6 +311,102 @@ async def generate_tail_frame(
         span_name="services-tail-frame-generate-image",
         aspect_ratio=aspect_ratio,
         pin_aspect=True,        # 恢复原实现的方向钉：防横版返回导致 9:16 裁切成放大观感
+        temperature=1.0,
+    )
+    return output_path
+
+
+async def generate_first_frame(
+    character_ref_paths: List[str],
+    context_frame_path: Optional[str],
+    visual_description: str,
+    shot_type: str,
+    output_path: str,
+    motion_prompt: Optional[str] = None,
+    object_ref_paths: Optional[List[str]] = None,
+    aspect_ratio: str = "9:16",
+) -> str:
+    """Generate an opening first frame for a shot.
+
+    Args:
+        character_ref_paths: Paths to character reference images (identity).
+        context_frame_path: Optional context frame — this may be either the
+            CURRENT opening frame (forward continuity) or the shot's ENDING
+            frame (backward continuity) — used only for background/lighting/
+            wardrobe continuity, never for pose.
+        visual_description: The shot's visual description (primary input).
+        shot_type: Close-up / Medium Shot / Wide Shot (framing hint).
+        output_path: Path to write the generated first frame image.
+        motion_prompt: Optional motion prompt — the opening frame must be a
+            natural starting point for it.
+        object_ref_paths: Optional paths to object/prop reference images.
+
+    Returns:
+        The output_path.
+    """
+    client = get_client()
+    model = settings.tf_model
+
+    # --- Collect image parts once, keyed by role ---
+    char_parts = parts_from_paths(character_ref_paths)
+    obj_parts = parts_from_paths(object_ref_paths)
+    context_parts = parts_from_paths([context_frame_path] if context_frame_path else [])
+
+    logger.info(
+        "FF: calling %s  char_refs=%d  obj_refs=%d  context_frame=%s",
+        model,
+        len(character_ref_paths),
+        len(object_ref_paths) if object_ref_paths else 0,
+        context_frame_path,
+    )
+
+    # --- Step 1: CoT analysis (TEXT only) — reason about the opening composition ---
+    cot_image_parts = char_parts + obj_parts + context_parts
+    cot_prompt = settings.ff_cot_prompt.format(
+        shot_type=shot_type,
+        visual_description=visual_description,
+        motion_prompt=motion_prompt or "(not specified)",
+    )
+    cot_parts = cot_image_parts + [types.Part(text=cot_prompt)]
+
+    with observability.generation(
+        name="services-first-frame-cot-analysis",
+        model=settings.tf_cot_model,
+        input={"visual_description": visual_description, "shot_type": shot_type},
+        model_parameters={"temperature": 0.6},
+    ) as cot_gen:
+        cot_response = await _call_with_timeout(
+            lambda: client.aio.models.generate_content(
+                model=settings.tf_cot_model,
+                contents=[types.Content(role="user", parts=cot_parts)],
+                config=types.GenerateContentConfig(temperature=0.6),
+            ),
+            label="FF CoT API call",
+        )
+        opening_composition = _extract_text(cot_response)
+        observability.update_span(cot_gen, output=opening_composition)
+    logger.info("FF CoT opening composition: %s", opening_composition[:500])
+
+    if not opening_composition.strip():
+        # Hard fallback: keep the image step grounded in the shot description.
+        opening_composition = (
+            f"A {shot_type} opening frame matching: {visual_description}"
+        )
+
+    # --- Step 2: Image generation (IMAGE only) with CoT result ---
+    # Same ordering rationale as tail frame: context first, character identity last.
+    img_image_parts = context_parts + obj_parts + char_parts
+    img_prompt = settings.ff_prompt.format(
+        visual_description=visual_description,
+        opening_composition=opening_composition,
+    )
+    await run_image_step(
+        image_parts=img_image_parts,
+        prompt=img_prompt,
+        output_path=output_path,
+        span_name="services-first-frame-generate-image",
+        aspect_ratio=aspect_ratio,
+        pin_aspect=True,        # 保持旧行为：首帧钉 ImageConfig
         temperature=1.0,
     )
     return output_path

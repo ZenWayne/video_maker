@@ -785,7 +785,7 @@ async def run_first_frame_pipeline(
     marks it as a user override so continuity propagation won't clobber it.
     After completion, transitions back to SHOT_REVIEW.
     """
-    from app.services.first_frame_generator import generate_first_frame
+    from app.services.image_generation import generate_first_frame
 
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory

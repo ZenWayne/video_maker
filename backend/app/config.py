@@ -215,7 +215,11 @@ class Settings(BaseSettings):
         "- If object reference images are provided, the opening frame MUST "
         "show them clearly.\n\n"
         "Output a concise description of the OPENING COMPOSITION only (no "
-        "preamble): framing, scene, character pose, and object placement."
+        "preamble): framing, scene, character pose, and object placement.\n\n"
+        "Note: the provided context frame (if any) may be either the CURRENT "
+        "opening frame or the shot's ENDING frame. If it is the ending frame, "
+        "reason BACKWARDS: derive an opening composition that would naturally "
+        "evolve into that ending state."
     )
 
     # Step 2: Image generation (IMAGE only) — generate with CoT result

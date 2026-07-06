@@ -1,7 +1,7 @@
 """Integration tests for first frame generation (generate-first-frame + worker).
 
 Mirrors test_tail_frame_pipeline.py. The billed model call
-(first_frame_generator.generate_first_frame) is always mocked.
+(image_generation.generate_first_frame) is always mocked.
 """
 import json
 import pytest
@@ -18,7 +18,7 @@ from tests.integration.conftest import (
 from app.config import settings
 from app.models.project import Project, Shot, ProjectStatus, ShotStatus
 import worker.tasks as tasks
-import app.services.first_frame_generator as ff_generator
+import app.services.image_generation as ff_generator
 
 
 # ── POST /projects/{id}/shots/{shot_id}/generate-first-frame ─────────────────
