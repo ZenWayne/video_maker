@@ -8,11 +8,17 @@ interface WaveformTrackProps {
   speechEndFrame: number | null
   /** 预览播放时的当前播放位置(帧);非播放时为 null,不绘制播放头。 */
   playheadFrame?: number | null
+  /** 前段静音手柄位置(帧);0/undefined 时不绘制前手柄。 */
+  headMuteFrame?: number
   onScrub: (frame: number) => void
+  /** 前手柄拖拽回调;缺省时前手柄区域退化为普通裁剪点(尾)交互。 */
+  onHeadMuteScrub?: (frame: number) => void
 }
 
 const TRACK_HEIGHT = 84
 const FALLBACK_WIDTH = 500
+const HEAD_MUTE_ZONE_RATIO = 0.15
+const HEAD_MUTE_HANDLE_HIT_PX = 10
 
 export default function WaveformTrack({
   peaks,
@@ -20,7 +26,9 @@ export default function WaveformTrack({
   endFrame,
   speechEndFrame,
   playheadFrame = null,
+  headMuteFrame,
   onScrub,
+  onHeadMuteScrub,
 }: WaveformTrackProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const draggingRef = useRef(false)
@@ -53,6 +61,15 @@ export default function WaveformTrack({
       g.fillRect(i * barWidth, mid - h / 2, barWidth, h)
     })
 
+    // 前段静音：左侧淡蓝遮罩 + 蓝色手柄线
+    if (headMuteFrame && headMuteFrame > 0) {
+      const hx = pixelForFrame(headMuteFrame, width, totalFrames)
+      g.fillStyle = 'rgba(37, 99, 235, 0.14)' // blue-600 淡
+      g.fillRect(0, 0, hx, TRACK_HEIGHT)
+      g.fillStyle = '#2563EB' // blue-600
+      g.fillRect(hx - 1, 0, 2, TRACK_HEIGHT)
+    }
+
     // 已裁剪区磨砂灰显（波形透灰可见）+ 裁剪竖线
     const cx = pixelForFrame(endFrame, width, totalFrames)
     g.fillStyle = 'rgba(244, 244, 245, 0.78)' // zinc-100 磨砂
@@ -73,17 +90,29 @@ export default function WaveformTrack({
       g.fillStyle = '#15803D' // green-700
       g.fillRect(px - 1, 0, 2, TRACK_HEIGHT)
     }
-  }, [peaks, endFrame, speechEndFrame, totalFrames, playheadFrame])
+  }, [peaks, endFrame, speechEndFrame, totalFrames, playheadFrame, headMuteFrame])
 
-  // ---- 交互:点击/拖拽设裁剪点 ----
+  // ---- 交互:点击/拖拽设裁剪点(尾)或前段静音手柄(头)----
   const scrubTo = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const width = canvasRef.current?.offsetWidth || FALLBACK_WIDTH
       const rect = canvasRef.current?.getBoundingClientRect()
       const offsetX = rect ? e.clientX - rect.left : 0
+
+      if (onHeadMuteScrub) {
+        const handleX = headMuteFrame ? pixelForFrame(headMuteFrame, width, totalFrames) : 0
+        const nearHandle = !!headMuteFrame && headMuteFrame > 0
+          && Math.abs(offsetX - handleX) <= HEAD_MUTE_HANDLE_HIT_PX
+        const inLeftZone = offsetX <= width * HEAD_MUTE_ZONE_RATIO
+        if (nearHandle || inLeftZone) {
+          onHeadMuteScrub(frameFromOffsetX(offsetX, width, totalFrames))
+          return
+        }
+      }
+
       onScrub(frameFromOffsetX(offsetX, width, totalFrames))
     },
-    [onScrub, totalFrames],
+    [onScrub, onHeadMuteScrub, totalFrames, headMuteFrame],
   )
 
   // 无音频时降级隐藏
@@ -95,6 +124,7 @@ export default function WaveformTrack({
         <span className="text-xs font-semibold text-zinc-600">声纹波形</span>
         <span className="text-[11px] text-zinc-400">
           蓝=人声 · 灰=已裁剪 · 黄线=说话结束 · 红线=裁剪点 · 绿线=播放
+          {onHeadMuteScrub ? ' · 蓝前段=静音' : ''}
         </span>
       </div>
       <canvas

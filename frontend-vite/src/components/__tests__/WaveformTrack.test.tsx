@@ -163,4 +163,52 @@ describe('WaveformTrack', () => {
     expect(amberLineIndex).toBeGreaterThan(-1)
     expect(amberLineIndex).toBeGreaterThan(greyOverlayIndex) // 黄线在灰显之后绘制
   })
+
+  it('headMuteFrame>0 时画蓝色前手柄线 + 左侧淡蓝遮罩', () => {
+    render(
+      <WaveformTrack peaks={samplePeaks} totalFrames={240} endFrame={240}
+        speechEndFrame={null} headMuteFrame={30} onScrub={() => {}} onHeadMuteScrub={() => {}} />,
+    )
+    // 蓝色前手柄线 #3B82F6 与淡蓝遮罩 rgba(59, 130, 246, 0.14) 均被绘制
+    expect(fillStyleLog).toContain('#2563EB')          // 前手柄竖线 blue-600
+    expect(fillStyleLog).toContain('rgba(37, 99, 235, 0.14)')  // 左侧遮罩
+  })
+
+  it('headMuteFrame 缺省或为 0 时不绘制前手柄', () => {
+    render(
+      <WaveformTrack peaks={samplePeaks} totalFrames={240} endFrame={240}
+        speechEndFrame={null} onScrub={() => {}} />,
+    )
+    expect(fillStyleLog).not.toContain('#2563EB')
+    expect(fillStyleLog).not.toContain('rgba(37, 99, 235, 0.14)')
+  })
+
+  it('点击波形左侧 15% 区域内且传入 onHeadMuteScrub 时上报前手柄帧', () => {
+    const onScrub = vi.fn()
+    const onHeadMuteScrub = vi.fn()
+    render(
+      <WaveformTrack peaks={samplePeaks} totalFrames={240} endFrame={240}
+        speechEndFrame={null} headMuteFrame={0} onScrub={onScrub} onHeadMuteScrub={onHeadMuteScrub} />,
+    )
+    const canvas = document.querySelector('canvas') as HTMLCanvasElement
+    Object.defineProperty(canvas, 'offsetWidth', { value: 500, configurable: true })
+    // offsetX=50 → 500*0.15=75,落在左 15% 区
+    fireEvent.pointerDown(canvas, { clientX: 50 })
+    expect(onHeadMuteScrub).toHaveBeenCalledWith(24)
+    expect(onScrub).not.toHaveBeenCalled()
+  })
+
+  it('点击波形中段(非前手柄区)且传入 onHeadMuteScrub 时仍走 onScrub', () => {
+    const onScrub = vi.fn()
+    const onHeadMuteScrub = vi.fn()
+    render(
+      <WaveformTrack peaks={samplePeaks} totalFrames={240} endFrame={240}
+        speechEndFrame={null} headMuteFrame={0} onScrub={onScrub} onHeadMuteScrub={onHeadMuteScrub} />,
+    )
+    const canvas = document.querySelector('canvas') as HTMLCanvasElement
+    Object.defineProperty(canvas, 'offsetWidth', { value: 500, configurable: true })
+    fireEvent.pointerDown(canvas, { clientX: 250 })
+    expect(onScrub).toHaveBeenCalledWith(120)
+    expect(onHeadMuteScrub).not.toHaveBeenCalled()
+  })
 })

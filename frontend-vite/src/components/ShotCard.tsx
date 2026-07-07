@@ -1118,6 +1118,7 @@ export function ShotCard({
           aspectRatio={aspectRatio}
           open={isTrimOpen}
           onOpenChange={setIsTrimOpen}
+          onShotUpdated={onShotUpdated}
           onTrimmed={({ video_path, last_frame_path, trim_frames, trim_end_sec, version, next_shot }) => {
             setVideoVersion(version)
             onShotUpdated?.(shot.shot_id, {

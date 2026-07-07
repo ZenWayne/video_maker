@@ -18,6 +18,10 @@ vi.mock('@/lib/api', () => ({
     }),
     getWaveform: vi.fn().mockResolvedValue({ peaks: [0.2, 0.6, 0.4, 0.8, 0.3] }),
     trimShot: vi.fn(),
+    detectSpeechStart: vi.fn(),
+    setAudioHeadMute: vi.fn().mockResolvedValue({
+      shot_id: 1, audio_head_mute_frames: null, audio_head_mute_sec: null,
+    }),
   },
 }))
 
@@ -373,5 +377,91 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     expect(screen.getByText('裁掉 40 帧')).toBeInTheDocument()
     const slider = document.querySelector('input[type="range"]') as HTMLInputElement
     expect(slider.max).toBe('240')
+  })
+
+  it('点击"检测开头静音"命中前段静音后帧信息显示"前段静音"', async () => {
+    vi.mocked(api.detectSpeechStart).mockResolvedValueOnce({
+      has_lead_silence: true,
+      suggested_start_frame: 30,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    renderDialog()
+    await screen.findByText(/帧:/)
+
+    // 检测前不显示前段静音信息
+    expect(screen.queryByText(/前段静音/)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('检测开头静音').closest('button')!)
+
+    expect(await screen.findByText(/前段静音: 前 30 帧/)).toBeInTheDocument()
+    expect(api.detectSpeechStart).toHaveBeenCalledWith('proj-1', 1)
+  })
+
+  it('未检测到开头静音时提示"未检测到开头静音"', async () => {
+    vi.mocked(api.detectSpeechStart).mockResolvedValueOnce({
+      has_lead_silence: false,
+      suggested_start_frame: null,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    renderDialog()
+    await screen.findByText(/帧:/)
+
+    fireEvent.click(screen.getByText('检测开头静音').closest('button')!)
+
+    expect(await screen.findByText('未检测到开头静音')).toBeInTheDocument()
+    expect(screen.queryByText(/前段静音/)).not.toBeInTheDocument()
+  })
+
+  it('确认裁剪时若前段静音帧有变化,调用 setAudioHeadMute 并通知父层刷新', async () => {
+    vi.mocked(api.trimShot).mockResolvedValue({
+      video_path: '/fake/video.mp4',
+      last_frame_path: '/fake/last.png',
+      trim_frames: 240,
+      trim_end_sec: null,
+      version: 2,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    vi.mocked(api.detectSpeechStart).mockResolvedValueOnce({
+      has_lead_silence: true,
+      suggested_start_frame: 30,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    const onShotUpdated = vi.fn()
+    const onOpenChange = vi.fn()
+    const onTrimmed = vi.fn()
+    render(
+      <TrimDialog
+        shot={mockShot}
+        projectId="proj-1"
+        open={true}
+        onOpenChange={onOpenChange}
+        onTrimmed={onTrimmed}
+        onShotUpdated={onShotUpdated}
+      />,
+    )
+    await screen.findByText(/帧:/)
+
+    fireEvent.click(screen.getByText('检测开头静音').closest('button')!)
+    await screen.findByText(/前段静音: 前 30 帧/)
+
+    fireEvent.click(screen.getByText('确认裁剪').closest('button')!)
+
+    await waitFor(() => {
+      expect(api.setAudioHeadMute).toHaveBeenCalledWith('proj-1', 1, 30)
+    })
+    await waitFor(() => {
+      expect(onShotUpdated).toHaveBeenCalledWith(1, {
+        audio_head_mute_frames: null,
+        audio_head_mute_sec: null,
+      })
+    })
   })
 })
