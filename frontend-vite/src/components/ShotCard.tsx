@@ -6,6 +6,7 @@ import { useState, useRef, useEffect } from 'react'
 import type { ComponentType } from 'react'
 import { Edit, Link, Scissors, CheckSquare, Square, AlertTriangle, Sparkles, Loader2, RefreshCw, X, ImagePlus, Mic, Undo2, User, ChevronDown, Crop, Upload, ArrowLeftToLine } from 'lucide-react'
 import { api } from '@/lib/api'
+import { usePreview } from '@/components/ImagePreview'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -222,7 +223,7 @@ export function ShotCard({
   const [isUploading, setIsUploading] = useState(false)
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const setPreviewUrl = usePreview()  // 全局共享 lightbox（替代原本地预览模态）
   const [isTrimOpen, setIsTrimOpen] = useState(false)
   const [videoVersion, setVideoVersion] = useState(0)
   const refUploadRef = useRef<HTMLInputElement>(null)
@@ -1136,22 +1137,6 @@ export function ShotCard({
       )}
 
       {/* 参考图预览 */}
-      {previewUrl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={() => setPreviewUrl(null)}>
-          <button
-            className="absolute top-4 right-4 w-8 h-8 bg-white rounded-full flex items-center justify-center shadow"
-            onClick={() => setPreviewUrl(null)}
-          >
-            <X className="w-5 h-5 text-zinc-700" />
-          </button>
-          <img
-            src={previewUrl}
-            alt="预览"
-            className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          />
-        </div>
-      )}
     </>
   )
 }
