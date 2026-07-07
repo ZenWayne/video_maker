@@ -157,6 +157,7 @@ class Shot(Base):
     source_fps = Column(Float, nullable=True)         # 源视频 fps（生成时写入）
     source_frames = Column(Integer, nullable=True)    # 源视频总帧数
     vc_audio_path = Column(Text, nullable=True)       # 替换音轨 wav；None=用源原音
+    audio_head_mute_frames = Column(Integer, nullable=True)  # 前 [0,N) 帧静音；None/0=不静音
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

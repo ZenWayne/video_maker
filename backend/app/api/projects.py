@@ -42,6 +42,9 @@ def _shot_to_dict(s) -> dict:
     trim_end_sec = None
     if s.trim_frames and s.source_fps:
         trim_end_sec = s.trim_frames / s.source_fps
+    audio_head_mute_sec = None
+    if s.audio_head_mute_frames and s.source_fps:
+        audio_head_mute_sec = s.audio_head_mute_frames / s.source_fps
     return {
         "id": s.id,
         "shot_id": s.shot_id,
@@ -79,6 +82,8 @@ def _shot_to_dict(s) -> dict:
         "source_fps": s.source_fps,
         "source_frames": s.source_frames,
         "trim_end_sec": trim_end_sec,
+        "audio_head_mute_frames": s.audio_head_mute_frames,
+        "audio_head_mute_sec": audio_head_mute_sec,
         "vc_audio_url": to_media_url(s.vc_audio_path),
         "created_at": s.created_at,
         "updated_at": s.updated_at,
