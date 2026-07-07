@@ -58,6 +58,8 @@ const mockProject = {
       trim_frames: 100,
       source_fps: 24.0,
       source_frames: 117,
+      audio_head_mute_frames: null,
+      audio_head_mute_sec: null,
     },
   ],
 }
@@ -155,5 +157,18 @@ test.describe('裁剪弹窗 · 声纹波形轨', () => {
     await expect(page.getByText('静音参考: 第 104 帧')).toBeVisible()
     // 图例含灰显说明
     await expect(page.getByText(/灰=已裁剪/)).toBeVisible()
+  })
+
+  test('前段静音：波形前手柄 + 帧信息', async ({ page }) => {
+    await page.route('**/api/projects/*/shots/*/detect-speech-start', (route) =>
+      route.fulfill({ json: { has_lead_silence: true, suggested_start_frame: 24, fps: 24, total_frames: 117, duration: 4.875 } }))
+    await page.route('**/api/projects/*/shots/*/audio-head-mute', (route) =>
+      route.fulfill({ json: { shot_id: 1, audio_head_mute_frames: 24, audio_head_mute_sec: 1.0 } }))
+    await page.goto(`/projects/${PROJECT_ID}/shots`)
+    await expect(page.getByTestId('shots-list')).toBeVisible({ timeout: 10_000 })
+    await page.getByRole('button', { name: '裁剪' }).first().click()
+    await expect(page.getByText('裁剪视频 — Shot #1')).toBeVisible({ timeout: 5_000 })
+    await page.getByRole('button', { name: /检测开头静音/ }).click()
+    await expect(page.getByText(/前段静音:\s*前\s*24\s*帧/)).toBeVisible()
   })
 })
