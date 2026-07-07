@@ -1849,6 +1849,61 @@ async def detect_silence(
     return {"has_silence": True, **suggestion}
 
 
+@router.post("/projects/{project_id}/shots/{shot_id}/detect-speech-start")
+async def detect_speech_start_ep(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """从开头静音推断语音起始帧 — 只读，不写文件。"""
+    from app.agents.video_trimmer import detect_speech_start, get_video_info
+
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot or not shot.video_path:
+        raise HTTPException(status_code=404, detail="Shot or video not found")
+
+    source = _dialog_source(project_id, shot_id, shot.video_path)
+    info = get_video_info(source)
+    start_sec = detect_speech_start(source)
+    if start_sec is None:
+        return {"has_lead_silence": False, "suggested_start_frame": None, **info,
+                "source_video_url": to_media_url(source)}
+    return {"has_lead_silence": True,
+            "suggested_start_frame": int(round(start_sec * info["fps"])),
+            "speech_start_sec": start_sec, **info,
+            "source_video_url": to_media_url(source)}
+
+
+@router.put("/projects/{project_id}/shots/{shot_id}/audio-head-mute")
+async def set_audio_head_mute(
+    project_id: str,
+    shot_id: int,
+    body: dict,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """写前段静音帧数（0 = 清除）。纯 EDL，不动素材/trim/vc。"""
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    n = int(body.get("head_mute_frames") or 0)
+    shot.audio_head_mute_frames = n if n > 0 else None
+    session.add(shot)
+    await session.commit()
+    sec = (shot.audio_head_mute_frames / shot.source_fps) if (shot.audio_head_mute_frames and shot.source_fps) else None
+    return {"shot_id": shot_id, "audio_head_mute_frames": shot.audio_head_mute_frames,
+            "audio_head_mute_sec": sec}
+
+
 # Voice cloning / 音色校准 routes moved to app/api/voice.py (see voice.router).
 
 

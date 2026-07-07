@@ -79,6 +79,31 @@ def detect_speech_end(
     return last_start
 
 
+def detect_speech_start(
+    video_path: str,
+    silence_threshold_db: float = -30,
+    min_silence_duration: float = 0.3,
+) -> float | None:
+    """检测开头静音结束（语音起始）的时间戳（秒）。
+
+    用 ffmpeg silencedetect 找从 0 开始的 LEADING 静音段；返回其 silence_end
+    （= 语音开始）。没有开头静音 → None。
+    """
+    result = subprocess.run(
+        ["ffmpeg", "-i", video_path,
+         "-af", f"silencedetect=noise={silence_threshold_db}dB:d={min_silence_duration}",
+         "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    output = result.stderr
+    starts = [float(m.group(1)) for m in re.finditer(r"silence_start:\s*(-?[\d.]+)", output)]
+    ends = [float(m.group(1)) for m in re.finditer(r"silence_end:\s*([\d.]+)", output)]
+    # leading 静音：第一个 silence_start 在 ~0 处，取其配对的 silence_end
+    if starts and ends and starts[0] <= 0.05 and ends[0] > starts[0]:
+        return ends[0]
+    return None
+
+
 def speech_end_info(video_path: str, fps: float) -> tuple[float | None, int | None]:
     """(尾部静音起点秒, 对应帧号);无尾部静音返回 (None, None)。
 
