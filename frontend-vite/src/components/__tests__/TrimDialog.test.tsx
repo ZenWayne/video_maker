@@ -464,4 +464,47 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
       })
     })
   })
+
+  it('确认裁剪时若前段静音保存失败,保持对话框打开并显示错误,但裁剪结果仍应用', async () => {
+    vi.mocked(api.trimShot).mockResolvedValue({
+      video_path: '/fake/video.mp4',
+      last_frame_path: '/fake/last.png',
+      trim_frames: 240,
+      trim_end_sec: null,
+      version: 2,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    vi.mocked(api.detectSpeechStart).mockResolvedValueOnce({
+      has_lead_silence: true,
+      suggested_start_frame: 30,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    vi.mocked(api.setAudioHeadMute).mockRejectedValueOnce(new Error('前段静音保存失败'))
+    const onOpenChange = vi.fn()
+    const onTrimmed = vi.fn()
+    render(
+      <TrimDialog
+        shot={mockShot}
+        projectId="proj-1"
+        open={true}
+        onOpenChange={onOpenChange}
+        onTrimmed={onTrimmed}
+      />,
+    )
+    await screen.findByText(/帧:/)
+
+    fireEvent.click(screen.getByText('检测开头静音').closest('button')!)
+    await screen.findByText(/前段静音: 前 30 帧/)
+
+    fireEvent.click(screen.getByText('确认裁剪').closest('button')!)
+
+    expect(await screen.findByText('前段静音保存失败')).toBeInTheDocument()
+    expect(onTrimmed).toHaveBeenCalled()
+    expect(onOpenChange).not.toHaveBeenCalledWith(false)
+    expect(screen.getByText('裁剪视频 — Shot #1')).toBeInTheDocument()
+  })
 })

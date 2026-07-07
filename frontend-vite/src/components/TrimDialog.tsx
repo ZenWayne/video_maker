@@ -190,6 +190,7 @@ export function TrimDialog({
       })
 
       // 前段静音与裁剪正交:独立 PUT,不阻塞/不依赖 trim 结果
+      let headMuteOk = true
       if (headMuteFrame !== initialHeadMuteFrameRef.current) {
         try {
           const muteResult = await api.setAudioHeadMute(projectId, shot.shot_id, headMuteFrame)
@@ -199,6 +200,7 @@ export function TrimDialog({
             audio_head_mute_sec: muteResult.audio_head_mute_sec,
           })
         } catch (e) {
+          headMuteOk = false
           setError(e instanceof Error ? e.message : '前段静音保存失败')
         }
       }
@@ -206,7 +208,10 @@ export function TrimDialog({
       setTotalFrames(result.total_frames)
       setDuration(result.duration)
       setEndFrame(result.total_frames)
-      onOpenChange(false)
+      // 前段静音保存失败时保持对话框打开,让错误提示可见;裁剪本身已成功,状态更新照常执行
+      if (headMuteOk) {
+        onOpenChange(false)
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Trim failed')
     } finally {
