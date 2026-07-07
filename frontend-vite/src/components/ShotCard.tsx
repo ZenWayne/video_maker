@@ -717,6 +717,7 @@ export function ShotCard({
                 videoUrl={shot.video_path}
                 trimEndSec={shot.trim_end_sec ?? null}
                 audioUrl={shot.vc_audio_url ?? null}
+                headMuteSec={shot.audio_head_mute_sec ?? null}
                 poster={shot.last_frame_path || shot.custom_first_frame_path || null}
               />
             </div>

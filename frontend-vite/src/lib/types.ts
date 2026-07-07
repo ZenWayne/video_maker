@@ -106,6 +106,8 @@ export interface Shot {
   source_frames?: number | null
   trim_end_sec?: number | null
   vc_audio_url?: string | null
+  audio_head_mute_frames?: number | null
+  audio_head_mute_sec?: number | null
   image_candidates: ImageCandidate[]
 }
 

@@ -401,6 +401,24 @@ export const api = {
     return request('POST', `/api/projects/${projectId}/shots/${shotId}/detect-silence`)
   },
 
+  // 前段静音检测（只读，返回建议起始帧，不实际写入）
+  detectSpeechStart: (
+    projectId: string,
+    shotId: number
+  ): Promise<{
+    has_lead_silence: boolean; suggested_start_frame: number | null
+    fps: number; total_frames: number; duration: number; source_video_url?: string | null
+  }> => request('POST', `/api/projects/${projectId}/shots/${shotId}/detect-speech-start`),
+
+  // 设置前段静音（写入 audio_head_mute_frames）
+  setAudioHeadMute: (
+    projectId: string,
+    shotId: number,
+    headMuteFrames: number
+  ): Promise<{
+    shot_id: number; audio_head_mute_frames: number | null; audio_head_mute_sec: number | null
+  }> => request('PUT', `/api/projects/${projectId}/shots/${shotId}/audio-head-mute`, { head_mute_frames: headMuteFrames }),
+
   // 设置基准音色
   setReferenceVoice: (projectId: string, shotId: number): Promise<{ reference_voice_shot_id: number }> => {
     return request('POST', `/api/projects/${projectId}/reference-voice`, { shot_id: shotId })

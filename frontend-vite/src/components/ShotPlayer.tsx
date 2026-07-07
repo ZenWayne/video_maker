@@ -6,6 +6,7 @@ export interface ShotPlayerProps {
   videoUrl: string
   trimEndSec: number | null
   audioUrl: string | null
+  headMuteSec?: number | null
   poster?: string | null
 }
 
@@ -20,7 +21,7 @@ function fmt(t: number): string {
  *  present a CUSTOM timeline scaled to the trimmed range (trimEndSec): the
  *  progress bar, time label and seeking are all bounded to it, and playback stops
  *  at the trim point — native <video controls> would show the full source length. */
-export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, poster }: ShotPlayerProps) {
+export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null, poster }: ShotPlayerProps) {
   const hasVc = !!audioUrl
   const [useVc, setUseVc] = useState(true)
   const [audioError, setAudioError] = useState(false)
@@ -31,7 +32,7 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, poster }: ShotPlaye
   const [fullDuration, setFullDuration] = useState(0)
 
   const { videoRef, audioRef, onPlay, onPause, onSeeked, onTimeUpdate } =
-    useShotSync({ trimEndSec, audioEnabled })
+    useShotSync({ trimEndSec, audioEnabled, headMuteSec })
 
   // effective end = the trim point when set, else the full source duration
   const end = trimEndSec != null && trimEndSec > 0 ? trimEndSec : fullDuration
