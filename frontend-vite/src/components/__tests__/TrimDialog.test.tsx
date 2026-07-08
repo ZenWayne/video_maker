@@ -321,4 +321,36 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
       expect(api.getWaveform).toHaveBeenCalledWith('proj-1', 1),
     )
   })
+
+  it('尾部静音时显示帧数剪切参考(尾部静音帧数 / 建议帧 / 可裁帧)', async () => {
+    await renderReady()
+    // 参考条：尾部静音 60 帧 · 建议剪到第 180 帧
+    const ref = screen.getByTestId('silence-ref')
+    expect(ref).toHaveTextContent(/尾部静音\s*60\s*帧/)
+    expect(ref).toHaveTextContent(/建议剪到第\s*180\s*帧/)
+    // 读数：可裁静音 60 帧
+    expect(ref).toHaveTextContent(/可裁静音\s*60\s*帧/)
+  })
+
+  it('无尾部静音时不显示参考条', async () => {
+    ;(api.getVideoInfo as any).mockResolvedValueOnce({
+      fps: 24, total_frames: 240, duration: 10.0, has_backup: false,
+      speech_end_frame: null, speech_end_sec: null,
+    })
+    await renderReady()
+    expect(screen.queryByTestId('silence-ref')).not.toBeInTheDocument()
+  })
+
+  it('点采用参考:裁剪点吸附到建议帧,确认裁剪变可用', async () => {
+    await renderReady()
+    // 初始 endFrame == totalFrames → 确认裁剪禁用
+    expect(screen.getByText('确认裁剪').closest('button')).toBeDisabled()
+
+    fireEvent.click(screen.getByText(/采用参考/).closest('button')!)
+
+    // endFrame → 180；当前帧读数更新
+    expect(screen.getByText(/帧: 180 \/ 240/)).toBeInTheDocument()
+    // 有可裁内容 → 确认裁剪可用
+    expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
+  })
 })
