@@ -68,3 +68,64 @@ async def test_join_preview_stays_in_sync_with_voice_cloned_shot(
     assert a_dur == pytest.approx(v_dur, abs=0.2), (
         f"audio {a_dur} does not span the video {v_dur}"
     )
+
+    # Both shots carry an edit here, so both are baked and normalized before the
+    # merge; this reproduces the reported incident but cannot tell which of the
+    # two fixes regressed.  test_join_preview_stays_in_sync_when_only_one_shot_is_baked
+    # isolates the merge-side fix.
+
+
+@pytest.mark.asyncio
+async def test_join_preview_stays_in_sync_when_only_one_shot_is_baked(
+    client, db_session_factory
+):
+    """Isolates the concat-filter fix from the audio-normalization fix.
+
+    When both shots carry an edit, build_effective_clip re-encodes both and
+    hands merge_shots two already-homogeneous clips — so even the old concat
+    demuxer stitched them cleanly.  The demuxer's defect only surfaces when the
+    merge inputs genuinely differ: here shot 1 passes through untouched (44.1 kHz
+    mono, straight from the source) while shot 2 is baked to canonical 48 kHz
+    stereo by its voice clone.  Under the demuxer the container carried a single
+    decoder config for both segments and the audio ran long — 8.7s against an
+    8.0s video — without emitting a single decode error.
+    """
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _add_shot(db_session_factory, pid, 1, status="completed")
+    await _add_shot(db_session_factory, pid, 2, status="completed")
+    # 120 frames @ 30fps = 4.0s each
+    await seed_shot_with_source(db_session_factory, pid, 1, frames=120)
+    await seed_shot_with_source(db_session_factory, pid, 2, frames=120)
+
+    # shot 1: no edits at all -> passthrough, keeps the source's 44.1 kHz mono.
+    # shot 2: voice-cloned -> baked to canonical 48 kHz stereo.
+    vc_wav = shot_dir(pid, 2) / "audio_vc.wav"
+    make_vc_wav(vc_wav, seconds=5.0)
+    async with db_session_factory() as s:
+        shot2 = (await s.execute(
+            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 2)
+        )).scalar_one()
+        shot2.vc_audio_path = str(vc_wav)
+        await s.commit()
+
+    r = await client.post(
+        f"/api/projects/{pid}/join-preview",
+        json={"shot_ids": [1, 2]},
+        headers=HEADERS,
+    )
+    assert r.status_code == 200, r.text
+
+    previews = sorted(join_preview_path(pid).parent.glob("join_preview*.mp4"))
+    assert previews, "no join preview produced"
+    out = str(previews[-1])
+
+    assert decode_errors(out) == 0, "preview has audio decode errors"
+
+    # The demuxer regression shows up here, not in decode_errors: mismatched
+    # inputs made the audio run ~0.7s past the video.
+    v_dur = stream_duration(out, "v")
+    a_dur = stream_duration(out, "a")
+    assert v_dur == pytest.approx(8.0, abs=0.2), f"video {v_dur}"
+    assert a_dur == pytest.approx(v_dur, abs=0.2), (
+        f"audio {a_dur} does not span the video {v_dur}"
+    )
