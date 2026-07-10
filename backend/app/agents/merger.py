@@ -8,6 +8,13 @@ from ffmpeg import FFmpeg
 
 logger = logging.getLogger(__name__)
 
+# The canonical audio format for every re-encoded clip and every merged video.
+# ffmpeg's concat demuxer writes ONE audio decoder config for all segments, so
+# clips whose rate/layout differ decode as garbage.  Pinning both ends here is
+# what keeps that from happening.
+CANONICAL_SAMPLE_RATE = 48000
+CANONICAL_CHANNELS = 2
+
 
 def _get_durations(shot_paths: list[str]) -> list[float]:
     """Get frame-based duration (total_frames / fps) for each shot video.
