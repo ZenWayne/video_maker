@@ -63,6 +63,8 @@ export function TrimDialog({
   const rvfcRef = useRef<number>(0)
   // 载入时的前段静音帧,用于判断确认时是否需要保存(与 trim 正交、独立 PUT)
   const initialHeadMuteFrameRef = useRef(0)
+  // 载入时的裁剪点(trim_frames),用于判断确认时是否需要调用 trimShot(与前段静音正交、独立 PUT)
+  const initialEndFrameRef = useRef(0)
 
   const stopPreview = useCallback(() => {
     const v = videoRef.current
@@ -145,7 +147,9 @@ export function TrimDialog({
       setTotalFrames(info.total_frames)
       setDuration(info.duration)
       // Reflect the current (non-destructive) trim point, not the full source length
-      setEndFrame(shot.trim_frames ?? info.total_frames)
+      const loadedEndFrame = shot.trim_frames ?? info.total_frames
+      setEndFrame(loadedEndFrame)
+      initialEndFrameRef.current = loadedEndFrame
       setHasBackup(info.has_backup)
       setSpeechEndFrame(info.speech_end_frame)
       setSourceVideoUrl(info.source_video_url ?? null)
@@ -179,15 +183,22 @@ export function TrimDialog({
     setIsTrimming(true)
     setError('')
     try {
-      const result = await api.trimShot(projectId, shot.shot_id, endFrame)
-      onTrimmed({
-        video_path: result.video_path,
-        last_frame_path: result.last_frame_path,
-        trim_frames: result.trim_frames,
-        trim_end_sec: result.trim_end_sec,
-        version: result.version,
-        next_shot: result.next_shot,
-      })
+      // 裁剪与前段静音正交、各自独立 PUT:只调用值发生变化的那个接口
+      if (endFrame !== initialEndFrameRef.current) {
+        const result = await api.trimShot(projectId, shot.shot_id, endFrame)
+        initialEndFrameRef.current = endFrame
+        onTrimmed({
+          video_path: result.video_path,
+          last_frame_path: result.last_frame_path,
+          trim_frames: result.trim_frames,
+          trim_end_sec: result.trim_end_sec,
+          version: result.version,
+          next_shot: result.next_shot,
+        })
+        setTotalFrames(result.total_frames)
+        setDuration(result.duration)
+        setEndFrame(result.total_frames)
+      }
 
       // 前段静音与裁剪正交:独立 PUT,不阻塞/不依赖 trim 结果
       let headMuteOk = true
@@ -205,9 +216,6 @@ export function TrimDialog({
         }
       }
 
-      setTotalFrames(result.total_frames)
-      setDuration(result.duration)
-      setEndFrame(result.total_frames)
       // 前段静音保存失败时保持对话框打开,让错误提示可见;裁剪本身已成功,状态更新照常执行
       if (headMuteOk) {
         onOpenChange(false)
