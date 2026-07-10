@@ -1,6 +1,6 @@
 """Task 10: end-to-end md5 invariant — lossless source → effective clip → merge → last frame.
 
-Note: This test exercises build_effective_clip + merge_shots_with_crossfade directly with
+Note: This test exercises build_effective_clip + merge_shots directly with
 lossless ffv1 fixtures.  It does NOT exercise run_merger (the full ARQ worker path needs
 Veo/DB/redis); that path is verified separately via AST-check + integration suite.
 """
@@ -14,7 +14,7 @@ import pytest
 
 from app.agents.effective_clip import effective_clip_paths, build_effective_clip
 from app.agents.frame_porter import extract_frame_at
-from app.agents.merger import merge_shots_with_crossfade
+from app.agents.merger import merge_shots
 
 
 def _md5(p: Path) -> str:
@@ -36,7 +36,7 @@ def test_single_shot_export_last_frame_md5(tmp_path):
                          out_path=str(clip), vcodec="ffv1", acodec="pcm_s16le")
     # 单输入 merge 走 c=copy → 字节保真
     final = tmp_path / "final.mkv"
-    merge_shots_with_crossfade([str(clip)], str(final), crossfade_duration=0.3)
+    merge_shots([str(clip)], str(final))
 
     f_last = tmp_path / "f.png"
     s59 = tmp_path / "s.png"

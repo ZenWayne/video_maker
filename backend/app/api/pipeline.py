@@ -22,7 +22,7 @@ from app.models.project import Project, Shot, ReferenceImage
 from app.models.schemas import (
     ProjectResponse, StoryboardUpdate, StoryboardReplace, ShotUpdate, ShotAiEditRequest,
     ShotTrimRequest, RegenerateShotsRequest, PipelineActionResponse,
-    ExportRequest, JoinPreviewRequest,
+    JoinPreviewRequest,
 )
 from app.services.first_frame import pick_first_frame
 from app.services.state_machine import (
@@ -711,7 +711,6 @@ async def rewrite_motion_prompt(
 @router.post("/projects/{project_id}/export", status_code=202)
 async def export_project(
     project_id: str,
-    body: ExportRequest = ExportRequest(),
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
@@ -740,7 +739,7 @@ async def export_project(
 
     # Enqueue merger task
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_merger", project_id, f"user:{user}", body.crossfade_duration)
+    await arq.enqueue_job("run_merger", project_id, f"user:{user}")
 
     return {"status": "queued", "message": "Export queued"}
 

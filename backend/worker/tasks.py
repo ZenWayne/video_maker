@@ -47,7 +47,7 @@ from app.agents.screenwriter import run_screenwriter as run_screenwriter_agent
 from app.agents.director import run_director as run_director_agent
 from app.agents.video_generator import generate_video
 from app.agents.frame_porter import extract_last_frame
-from app.agents.merger import merge_shots, merge_shots_with_crossfade
+from app.agents.merger import merge_shots
 
 logger = logging.getLogger(__name__)
 
@@ -786,7 +786,6 @@ async def run_merger(
     ctx: Dict[str, Any],
     project_id: str,
     actor: str,
-    crossfade_duration: float | None = None,
 ) -> None:
     """
     Merge all completed shots into final video.
@@ -795,7 +794,6 @@ async def run_merger(
         ctx: arq context
         project_id: Project ID
         actor: Who triggered this
-        crossfade_duration: Override for crossfade (None = use settings default)
     """
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory
@@ -833,8 +831,7 @@ async def run_merger(
             shot_paths = effective_clip_paths(list(shots), tmp_dir)
             if not shot_paths:
                 raise ValueError("No completed shots to merge")
-            cf = crossfade_duration if crossfade_duration is not None else settings.crossfade_duration
-            merge_shots_with_crossfade(shot_paths, str(final_path), crossfade_duration=cf)
+            merge_shots(shot_paths, str(final_path))
 
             project.final_video_path = str(final_path)
             session.add(project)
