@@ -30,118 +30,153 @@
 | `backend/app/api/pipeline.py` | `/export`、`/join-preview` 端点 | 导出端点去掉 body；enqueue 去掉第三个参数 |
 | `backend/app/models/schemas.py` | 请求体 schema | 删除 `ExportRequest` |
 | `backend/app/config.py` | 全局设置 | 删除 `crossfade_duration` |
+| `backend/tests/ffprobe_helpers.py` | **新建** | unit 与 integration 共用的 ffprobe/ffmpeg 断言工具 |
 | `backend/tests/unit/test_ffmpeg_agents.py` | merger 单测 | 删掉两个旧类；`TestMergeShots` 加音频 fixture、加回归/守卫测试 |
-| `backend/tests/unit/test_effective_clip_audio.py` | **新建** | 断言重编码片段是 48 kHz 立体声 |
+| `backend/tests/unit/test_effective_clip.py` | `build_effective_clip` 单测（已存在 200 行） | 追加两个音频格式断言 |
 | `backend/tests/unit/test_merger_effective.py` | 末帧 md5 不变性 | 改调 `merge_shots` |
 | `backend/tests/integration/test_join_preview_vc_audio.py` | **新建** | 真实 `/join-preview` 端点：trim + VC 混合，断言音视频时长对齐、零解码错误 |
 
 依赖方向：`effective_clip.py` → `merger.py`（导入常量）。`merger.py` 不 import `effective_clip.py`，无循环。
+
+`backend/tests/` 是带 `__init__.py` 的包，`from tests.ffprobe_helpers import ...` 在 unit 与 integration 两侧均可解析（已验证）。
 
 ---
 
 ### Task 1: effective_clip 固定输出为规范音频格式
 
 **Files:**
-- Create: `backend/tests/unit/test_effective_clip_audio.py`
+- Create: `backend/tests/ffprobe_helpers.py`
+- Modify: `backend/tests/unit/test_effective_clip.py`（追加两个测试 + 一个 fixture）
 - Modify: `backend/app/agents/merger.py`（仅新增常量，函数暂不动）
 - Modify: `backend/app/agents/effective_clip.py:49`
 
 **Interfaces:**
 - Produces: `merger.CANONICAL_SAMPLE_RATE: int = 48000`、`merger.CANONICAL_CHANNELS: int = 2`
+- Produces: `tests.ffprobe_helpers.stream_duration(path, kind) -> float`、`audio_params(path) -> tuple[int, int]`、`decode_errors(path) -> int`、`make_vc_wav(path, seconds=5.0) -> None`
 - Produces: `build_effective_clip(...)` 重编码路径的输出音频恒为 48 kHz 立体声
 
-- [ ] **Step 1: 写失败测试**
+- [ ] **Step 1: 建共享 helper 模块**
 
-新建 `backend/tests/unit/test_effective_clip_audio.py`：
+新建 `backend/tests/ffprobe_helpers.py`：
 
 ```python
-"""Regression: a voice-cloned effective clip must be baked at the canonical
-audio format (48 kHz stereo), not at whatever rate/layout the VC wav happens
-to have.  A 24 kHz mono clip cannot be concat-copied with a 48 kHz stereo one.
+"""ffprobe / ffmpeg assertions shared by the unit and integration suites.
+
+Deliberately not a conftest fixture: `tests.unit` and `tests.integration` both
+import this, and neither should depend on the other's fixtures.
 """
 
-import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
 
-from app.agents.effective_clip import build_effective_clip
-from app.agents.merger import CANONICAL_CHANNELS, CANONICAL_SAMPLE_RATE
-
-pytestmark = pytest.mark.skipif(
-    shutil.which("ffmpeg") is None,
-    reason="ffmpeg binary not found in PATH",
-)
-
-
-def _audio_params(path: Path) -> tuple[int, int]:
-    """Return (sample_rate, channels) of the first audio stream."""
+def stream_duration(path, kind: str) -> float:
+    """Duration in seconds of the first stream of `kind` ('v' or 'a')."""
     out = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-select_streams", "a:0",
-            "-show_entries", "stream=sample_rate,channels",
-            "-of", "csv=p=0", str(path),
-        ],
+        ["ffprobe", "-v", "error", "-select_streams", f"{kind}:0",
+         "-show_entries", "stream=duration", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    return float(out.stdout.strip())
+
+
+def audio_params(path) -> tuple[int, int]:
+    """(sample_rate, channels) of the first audio stream.
+
+    ffprobe emits these fields in stream-struct order regardless of the order
+    they are requested in, so sample_rate always comes first.
+    """
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=sample_rate,channels",
+         "-of", "csv=p=0", str(path)],
         capture_output=True, text=True, check=True,
     )
     rate, channels = out.stdout.strip().split(",")
     return int(rate), int(channels)
 
 
-def _make_source(path: Path, frames: int = 60) -> None:
-    subprocess.run(
-        ["ffmpeg", "-y",
-         "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=30",
-         "-f", "lavfi", "-i", "sine=frequency=440",
-         "-frames:v", str(frames),
-         "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac",
-         "-shortest", str(path)],
-        check=True, capture_output=True,
+def decode_errors(path) -> int:
+    """Decoder failures over a full decode pass.  Zero for a healthy file."""
+    out = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-f", "null", "-"],
+        capture_output=True, text=True,
     )
+    return out.stderr.count("Error submitting packet")
 
 
-def _make_vc_wav(path: Path, seconds: float = 3.0) -> None:
+def make_vc_wav(path, seconds: float = 5.0) -> None:
     """A CosyVoice-shaped wav: 24 kHz, mono."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["ffmpeg", "-y",
-         "-f", "lavfi", "-i", f"sine=frequency=330:sample_rate=24000:duration={seconds}",
+         "-f", "lavfi",
+         "-i", f"sine=frequency=330:sample_rate=24000:duration={seconds}",
          "-ac", "1", "-c:a", "pcm_s16le", str(path)],
         check=True, capture_output=True,
     )
-
-
-def test_vc_clip_is_normalized_to_canonical_audio(tmp_path):
-    src = tmp_path / "output.mp4"
-    wav = tmp_path / "audio_vc.wav"
-    out = tmp_path / "eff.mp4"
-    _make_source(src)
-    _make_vc_wav(wav)
-
-    build_effective_clip(str(src), trim_frames=None, vc_audio_path=str(wav),
-                         out_path=str(out))
-
-    assert _audio_params(out) == (CANONICAL_SAMPLE_RATE, CANONICAL_CHANNELS)
-
-
-def test_trimmed_clip_is_normalized_to_canonical_audio(tmp_path):
-    src = tmp_path / "output.mp4"
-    out = tmp_path / "eff.mp4"
-    _make_source(src)
-
-    build_effective_clip(str(src), trim_frames=30, vc_audio_path=None,
-                         out_path=str(out))
-
-    assert _audio_params(out) == (CANONICAL_SAMPLE_RATE, CANONICAL_CHANNELS)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [ ] **Step 2: 写失败测试**
 
-Run: `uv run --project backend pytest backend/tests/unit/test_effective_clip_audio.py -q`
+在 `backend/tests/unit/test_effective_clip.py` 的 import 区追加：
+
+```python
+from app.agents.merger import CANONICAL_CHANNELS, CANONICAL_SAMPLE_RATE
+from tests.ffprobe_helpers import audio_params, make_vc_wav
+```
+
+在文件末尾追加一个 fixture 与两个测试（`lossless_src` 是 ffv1/pcm 的无损源，这里要的是普通 h264/aac 源，故另起一个）：
+
+```python
+@pytest.fixture
+def lossy_src(tmp_path):
+    """A Veo-shaped source: h264 + aac."""
+    out = tmp_path / "output.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=440",
+            "-frames:v", "60",
+            "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac",
+            "-shortest", str(out),
+        ],
+        check=True, capture_output=True,
+    )
+    return out
+
+
+def test_vc_clip_is_normalized_to_canonical_audio(lossy_src, tmp_path):
+    """A VC clip must be baked at the canonical format, not at whatever
+    rate/layout the CosyVoice wav happens to carry — a 24 kHz mono clip
+    cannot be concatenated with a 48 kHz stereo one."""
+    wav = tmp_path / "audio_vc.wav"
+    out = tmp_path / "eff.mp4"
+    make_vc_wav(wav, seconds=3.0)
+
+    build_effective_clip(str(lossy_src), trim_frames=None,
+                         vc_audio_path=str(wav), out_path=str(out))
+
+    assert audio_params(out) == (CANONICAL_SAMPLE_RATE, CANONICAL_CHANNELS)
+
+
+def test_trimmed_clip_is_normalized_to_canonical_audio(lossy_src, tmp_path):
+    out = tmp_path / "eff.mp4"
+
+    build_effective_clip(str(lossy_src), trim_frames=30, vc_audio_path=None,
+                         out_path=str(out))
+
+    assert audio_params(out) == (CANONICAL_SAMPLE_RATE, CANONICAL_CHANNELS)
+```
+
+- [ ] **Step 3: 跑测试确认失败**
+
+Run: `uv run --project backend pytest backend/tests/unit/test_effective_clip.py -q`
 
 Expected: FAIL —— 收集阶段就报 `ImportError: cannot import name 'CANONICAL_CHANNELS' from 'app.agents.merger'`（常量还不存在）。
 
-- [ ] **Step 3: 在 merger.py 顶部加常量**
+- [ ] **Step 4: 在 merger.py 顶部加常量**
 
 在 `backend/app/agents/merger.py` 的 `logger = logging.getLogger(__name__)` 之后插入：
 
@@ -154,7 +189,7 @@ CANONICAL_SAMPLE_RATE = 48000
 CANONICAL_CHANNELS = 2
 ```
 
-- [ ] **Step 4: 在 effective_clip.py 里应用常量**
+- [ ] **Step 5: 在 effective_clip.py 里应用常量**
 
 在 `backend/app/agents/effective_clip.py` 的 import 区加：
 
@@ -187,22 +222,29 @@ from app.agents.merger import CANONICAL_CHANNELS, CANONICAL_SAMPLE_RATE
     - Re-encoded output is always CANONICAL_SAMPLE_RATE / CANONICAL_CHANNELS audio.
 ```
 
-- [ ] **Step 5: 跑测试确认通过**
+- [ ] **Step 6: 跑测试确认通过**
 
-Run: `uv run --project backend pytest backend/tests/unit/test_effective_clip_audio.py -q`
+Run: `uv run --project backend pytest backend/tests/unit/test_effective_clip.py -q`
 
-Expected: PASS，2 passed。
+Expected: PASS，**8 passed**（原有 6 个 + 新增 2 个）。该文件已 import `subprocess` 与 `pytest`，无需补 import。
 
-- [ ] **Step 6: 确认没打破末帧 md5 不变性**
+- [ ] **Step 7: 确认没打破末帧 md5 不变性**
 
 Run: `uv run --project backend pytest backend/tests/unit/test_merger_effective.py -q`
 
 Expected: PASS，1 passed。（该测试用 `ffv1`/`pcm_s16le` 无损烤片；`ar`/`ac` 只影响音频轨，它断言的是视频帧 md5。）
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: 跑整个 unit 套件确认无回归**
+
+Run: `uv run --project backend pytest backend/tests/unit/ -q`
+
+Expected: PASS，全绿。
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add backend/app/agents/merger.py backend/app/agents/effective_clip.py backend/tests/unit/test_effective_clip_audio.py
+git add backend/app/agents/merger.py backend/app/agents/effective_clip.py \
+        backend/tests/ffprobe_helpers.py backend/tests/unit/test_effective_clip.py
 git commit -m "fix(effective_clip): 重编码片段固定为 48kHz 立体声
 
 VC 片段此前继承 CosyVoice wav 的 24k mono，与 trim 片段的 48k stereo
@@ -226,7 +268,13 @@ VC 片段此前继承 CosyVoice wav 的 24k mono，与 trim 片段的 48k stereo
 
 - [ ] **Step 1: 写失败测试**
 
-在 `backend/tests/unit/test_ffmpeg_agents.py` 的 helper 区（`_pix_fmt` 之后）追加三个 helper：
+在 `backend/tests/unit/test_ffmpeg_agents.py` 的 import 区追加（`stream_duration` / `decode_errors` 来自 Task 1 建好的共享模块）：
+
+```python
+from tests.ffprobe_helpers import decode_errors, stream_duration
+```
+
+在 helper 区（`_pix_fmt` 之后）追加一个本文件专用的 helper：
 
 ```python
 def _make_clip_with_audio_format(path: Path, *, duration: int, rate: int, channels: int) -> None:
@@ -241,25 +289,6 @@ def _make_clip_with_audio_format(path: Path, *, duration: int, rate: int, channe
          "-shortest", str(path)],
         check=True, capture_output=True,
     )
-
-
-def _stream_duration(path: Path, kind: str) -> float:
-    """kind is 'v' or 'a'."""
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", f"{kind}:0",
-         "-show_entries", "stream=duration", "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True, check=True,
-    )
-    return float(out.stdout.strip())
-
-
-def _decode_errors(path: Path) -> int:
-    """Count decoder failures across a full decode pass."""
-    out = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(path), "-f", "null", "-"],
-        capture_output=True, text=True,
-    )
-    return out.stderr.count("Error submitting packet")
 ```
 
 然后把 `TestMergeShots` 里两个多片段测试的 fixture 换成带音频的版本，并新增三个测试。替换：
@@ -356,9 +385,9 @@ def _decode_errors(path: Path) -> int:
 
         merge_shots([str(v1), str(v2)], str(output))
 
-        assert _decode_errors(output) == 0
-        v_dur = _stream_duration(output, "v")
-        a_dur = _stream_duration(output, "a")
+        assert decode_errors(output) == 0
+        v_dur = stream_duration(output, "v")
+        a_dur = stream_duration(output, "a")
         assert v_dur == pytest.approx(4.0, abs=0.15), f"video {v_dur}"
         assert a_dur == pytest.approx(v_dur, abs=0.15), (
             f"audio {a_dur} does not span the video {v_dur}"
@@ -557,15 +586,17 @@ Note: This test exercises build_effective_clip + merge_shots_with_crossfade dire
 Note: This test exercises build_effective_clip + merge_shots directly with
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [ ] **Step 3: 跑测试确认改测试没引入回归**
+
+本任务是纯删除/重接线，没有新行为要 TDD——测试先改成目标状态，此刻就应该是绿的。
 
 Run: `uv run --project backend pytest backend/tests/unit/test_merger_effective.py -q`
 
-Expected: PASS（`merge_shots` 已存在且单片段走 copy）。这一步是确认改测试没有引入回归——本任务的"失败"在下一步的 import 上。
+Expected: PASS，1 passed（`merge_shots` 已存在且单片段走 copy）。
 
 Run: `uv run --project backend pytest backend/tests/unit/ -q`
 
-Expected: PASS。（旧函数尚在，删除它们才会暴露 `worker/tasks.py` 的 import 错误。）
+Expected: PASS。（旧函数尚在，删除它们才会暴露 `worker/tasks.py` 的 import 错误——那是 Step 4-5 的事。）
 
 - [ ] **Step 4: 删除 merger.py 里的旧函数**
 
@@ -707,6 +738,7 @@ merge_shots_with_reencoding 走的也是 concat demuxer，对格式不一致的
 
 **Interfaces:**
 - Consumes: `merge_shots`（Task 2）、`build_effective_clip` 的规范化（Task 1）
+- Consumes: `tests.ffprobe_helpers` 的 `decode_errors` / `make_vc_wav` / `stream_duration`（Task 1）
 - Consumes: 既有 fixture `client`、`db_session_factory`，以及 `tests.integration.conftest` 的 `HEADERS`、`_make_project`、`_add_shot`、`seed_shot_with_source`
 
 这一层驱动真实端点、真实 DB、真实 ffmpeg，不 mock 任何东西（没有 LLM 调用，无计费）。这正是用户遇到的场景：shot 1 裁剪、shot 2 音色校准。
@@ -727,45 +759,15 @@ garbage and the <video> element's audio-driven clock stalled.
 
 Drives the real /join-preview endpoint against the real DB and real ffmpeg.
 """
-import subprocess
-from pathlib import Path
-
 import pytest
 from sqlalchemy import select
 
 from app.models.project import Shot
 from app.services.storage import join_preview_path, shot_dir
+from tests.ffprobe_helpers import decode_errors, make_vc_wav, stream_duration
 from tests.integration.conftest import (
     HEADERS, _make_project, _add_shot, seed_shot_with_source,
 )
-
-
-def _make_vc_wav(path: Path, seconds: float = 5.0) -> None:
-    """A CosyVoice-shaped wav: 24 kHz, mono, longer than the source video."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["ffmpeg", "-y",
-         "-f", "lavfi", "-i", f"sine=frequency=330:sample_rate=24000:duration={seconds}",
-         "-ac", "1", "-c:a", "pcm_s16le", str(path)],
-        check=True, capture_output=True,
-    )
-
-
-def _stream_duration(path: str, kind: str) -> float:
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", f"{kind}:0",
-         "-show_entries", "stream=duration", "-of", "csv=p=0", path],
-        capture_output=True, text=True, check=True,
-    )
-    return float(out.stdout.strip())
-
-
-def _decode_errors(path: str) -> int:
-    out = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", path, "-f", "null", "-"],
-        capture_output=True, text=True,
-    )
-    return out.stderr.count("Error submitting packet")
 
 
 @pytest.mark.asyncio
@@ -780,8 +782,9 @@ async def test_join_preview_stays_in_sync_with_voice_cloned_shot(
     await seed_shot_with_source(db_session_factory, pid, 2, frames=120)
 
     # shot 1: trimmed to 60 frames (2.0s).  shot 2: voice-cloned, untrimmed.
+    # The wav is 5.0s -- longer than the 4.0s video, so -shortest bounds it.
     vc_wav = shot_dir(pid, 2) / "audio_vc.wav"
-    _make_vc_wav(vc_wav)
+    make_vc_wav(vc_wav, seconds=5.0)
     async with db_session_factory() as s:
         shot1 = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
@@ -805,12 +808,12 @@ async def test_join_preview_stays_in_sync_with_voice_cloned_shot(
     out = str(previews[-1])
 
     # The preview must decode cleanly end to end...
-    assert _decode_errors(out) == 0, "preview has audio decode errors"
+    assert decode_errors(out) == 0, "preview has audio decode errors"
 
     # ...and its audio must span the whole 2.0s + 4.0s timeline, not stop at
     # the segment boundary.
-    v_dur = _stream_duration(out, "v")
-    a_dur = _stream_duration(out, "a")
+    v_dur = stream_duration(out, "v")
+    a_dur = stream_duration(out, "a")
     assert v_dur == pytest.approx(6.0, abs=0.2), f"video {v_dur}"
     assert a_dur == pytest.approx(v_dur, abs=0.2), (
         f"audio {a_dur} does not span the video {v_dur}"
@@ -928,7 +931,8 @@ Expected:
 | 删除 `ExportRequest`、导出端点去 body | Task 3 Step 6-7；Task 5 Step 2 验证 |
 | 删除 `settings.crossfade_duration` | Task 3 Step 7 |
 | 回归测试：零解码错误 + 音视频时长对齐 | Task 2 Step 1（单测）、Task 4 Step 1（集成） |
-| 单元测试：VC 片段是 48000/2 | Task 1 Step 1 |
+| 单元测试：VC 片段是 48000/2 | Task 1 Step 2（并入现有 `test_effective_clip.py`） |
+| ffprobe helper 不跨文件重复 | Task 1 Step 1 建 `tests/ffprobe_helpers.py`，Task 2 / Task 4 导入 |
 | 保留 join_preview 既有集成测试 | Task 4 Step 3 |
 | 清理引用旧函数的测试 | Task 3 Step 2 |
 | 「每个分镜必须有音频轨」约束 | Task 2 `test_raises_when_input_has_no_audio` + `_has_audio` 守卫 |
