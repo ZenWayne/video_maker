@@ -8,6 +8,10 @@ wrote a single audio decoder config for both -- so shot 2's audio decoded as
 garbage and the <video> element's audio-driven clock stalled.
 
 Drives the real /join-preview endpoint against the real DB and real ffmpeg.
+
+Two scenarios: both shots edited (reproduces the incident), and only shot 2
+edited (isolates the merge-side concat-filter fix, since shot 1 then reaches
+merge_shots as a raw 44.1 kHz mono passthrough).
 """
 import pytest
 from sqlalchemy import select
@@ -24,6 +28,14 @@ from tests.integration.conftest import (
 async def test_join_preview_stays_in_sync_with_voice_cloned_shot(
     client, db_session_factory
 ):
+    """Reproduces the reported incident: shot 1 trimmed, shot 2 voice-cloned.
+
+    Both shots carry an edit, so build_effective_clip bakes and normalizes both
+    before the merge.  That means this test cannot tell which of the two fixes
+    regressed — the concat demuxer stitches already-homogeneous inputs cleanly.
+    test_join_preview_stays_in_sync_when_only_one_shot_is_baked isolates the
+    merge-side fix.
+    """
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1, status="completed")
     await _add_shot(db_session_factory, pid, 2, status="completed")
@@ -68,11 +80,6 @@ async def test_join_preview_stays_in_sync_with_voice_cloned_shot(
     assert a_dur == pytest.approx(v_dur, abs=0.2), (
         f"audio {a_dur} does not span the video {v_dur}"
     )
-
-    # Both shots carry an edit here, so both are baked and normalized before the
-    # merge; this reproduces the reported incident but cannot tell which of the
-    # two fixes regressed.  test_join_preview_stays_in_sync_when_only_one_shot_is_baked
-    # isolates the merge-side fix.
 
 
 @pytest.mark.asyncio
