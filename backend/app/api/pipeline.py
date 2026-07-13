@@ -1548,6 +1548,34 @@ async def get_shot_waveform(
     return {"peaks": peaks}
 
 
+@router.get("/projects/{project_id}/shots/{shot_id}/filmstrip")
+async def get_shot_filmstrip(
+    project_id: str,
+    shot_id: int,
+    count: int = 12,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return a horizontal thumbnail sprite URL for the shot's source video."""
+    from app.agents.video_trimmer import extract_filmstrip_sprite
+    from app.services.storage import shot_dir, ts_uuid_name
+
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot or not shot.video_path:
+        raise HTTPException(status_code=404, detail="Shot or video not found")
+    source = _dialog_source(project_id, shot_id, shot.video_path)
+    n = max(4, min(count, 24))
+    out = shot_dir(project_id, shot_id) / f"filmstrip_{ts_uuid_name('.png')}"
+    try:
+        actual = extract_filmstrip_sprite(source, str(out), count=n)
+    except Exception:
+        raise HTTPException(status_code=500, detail="filmstrip 生成失败")
+    return {"url": to_media_url(str(out)), "count": actual, "cell_aspect": 16 / 9}
+
+
 async def _repoint_next_first_frame(
     project_id: str, shot_id: int, last_frame_path: str, session: AsyncSession
 ) -> tuple[int, str] | None:

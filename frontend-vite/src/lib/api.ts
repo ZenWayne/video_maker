@@ -355,6 +355,11 @@ export const api = {
     return request('GET', `/api/projects/${projectId}/shots/${shotId}/waveform`)
   },
 
+  // 视频缩略图胶片条 sprite（后端一次 ffmpeg tile 生成）
+  getFilmstrip: (projectId: string, shotId: number, count = 12): Promise<{ url: string; count: number; cell_aspect: number }> => {
+    return request('GET', `/api/projects/${projectId}/shots/${shotId}/filmstrip?count=${count}`)
+  },
+
   // 视频元信息
   getVideoInfo: (projectId: string, shotId: number): Promise<{
     fps: number
