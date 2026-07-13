@@ -1,5 +1,6 @@
 """Pipeline API routes for video generation workflow."""
 
+import hashlib
 import json
 import logging
 import shutil
@@ -1555,9 +1556,18 @@ async def get_shot_filmstrip(
     count: int = 12,
     session: AsyncSession = Depends(get_session),
 ):
-    """Return a horizontal thumbnail sprite URL for the shot's source video."""
-    from app.agents.video_trimmer import extract_filmstrip_sprite
-    from app.services.storage import shot_dir, ts_uuid_name
+    """Return a horizontal thumbnail sprite URL for the shot's source video.
+
+    Filename is deterministic (hash of the resolved source path + requested
+    count), so re-opening the trim dialog on the same source reuses the
+    cached sprite and skips the ffmpeg tile pass entirely — otherwise every
+    dialog-open would run ffmpeg again and leave a fresh PNG behind (accumulating
+    one orphan per open, forever). Any other stale filmstrip_*.png in the shot
+    dir (e.g. left over from before a re-trim/VC changed the source) is cleaned
+    up on each call, mirroring join_preview's glob+unlink cleanup pattern.
+    """
+    from app.agents.video_trimmer import extract_filmstrip_sprite, get_video_info
+    from app.services.storage import shot_dir
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1568,11 +1578,33 @@ async def get_shot_filmstrip(
         raise HTTPException(status_code=404, detail="Shot or video not found")
     source = _dialog_source(project_id, shot_id, shot.video_path)
     n = max(4, min(count, 24))
-    out = shot_dir(project_id, shot_id) / f"filmstrip_{ts_uuid_name('.png')}"
-    try:
-        actual = extract_filmstrip_sprite(source, str(out), count=n)
-    except Exception:
-        raise HTTPException(status_code=500, detail="filmstrip 生成失败")
+
+    digest = hashlib.md5(str(Path(source).resolve()).encode()).hexdigest()[:12]
+    d = shot_dir(project_id, shot_id)
+    fname = f"filmstrip_{digest}_{n}.png"
+    out = d / fname
+
+    # Clean up sprites for a DIFFERENT source/count so a re-trim/VC that
+    # changes the underlying video doesn't leave orphaned PNGs behind.
+    if d.is_dir():
+        for stale in d.glob("filmstrip_*.png"):
+            if stale.name != fname:
+                stale.unlink(missing_ok=True)
+
+    if out.exists():
+        # Cache hit: same source already sprited — skip the ffmpeg tile pass.
+        # A cheap ffprobe (not the expensive tile ffmpeg call) recomputes the
+        # actual cell count in case the source is shorter than `count` frames.
+        try:
+            info = get_video_info(source)
+            actual = max(1, min(n, max(1, int(info["total_frames"]))))
+        except Exception:
+            actual = n
+    else:
+        try:
+            actual = extract_filmstrip_sprite(source, str(out), count=n)
+        except Exception:
+            raise HTTPException(status_code=500, detail="filmstrip 生成失败")
     return {"url": to_media_url(str(out)), "count": actual, "cell_aspect": 16 / 9}
 
 

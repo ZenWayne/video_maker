@@ -642,4 +642,16 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     fireEvent.pointerMove(vt, { clientX: 60 })
     expect(video.currentTime).toBeCloseTo(60 / 24, 1)
   })
+
+  it('渲染视频/音频轨道标签、图例和 hover 提示（消解"裁视频还是动音频"的歧义）', async () => {
+    await renderReady()
+    // 轨道左侧标签
+    expect(screen.getByTestId('track-label-video')).toHaveTextContent('视频')
+    expect(screen.getByTestId('track-label-audio')).toHaveTextContent('音频')
+    // 图例（至少覆盖裁剪线 + 开头静音手柄两项，颜色由 CSS token 解码）
+    expect(screen.getByText(/裁剪\(视频\+音频一起裁\)/)).toBeInTheDocument()
+    expect(screen.getByText(/开头静音手柄/)).toBeInTheDocument()
+    // 视频预览器旁的 hover 提示
+    expect(screen.getByText('指针在视频轨上移动 → 预览器跳到该帧')).toBeInTheDocument()
+  })
 })

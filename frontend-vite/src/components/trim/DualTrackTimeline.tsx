@@ -60,21 +60,31 @@ export function DualTrackTimeline({
       <div data-testid="video-hover" style={{ height: V_H }} onPointerMove={hoverMove} onPointerLeave={() => onHoverFrame(null)}>
         <VideoFilmstripTrack spriteUrl={spriteUrl} trimFrac={frac(endFrame)} height={V_H} />
       </div>
+      {/* 轨道标签：叠放在轨道左缘之上（absolute + pointer-events-none），不占布局宽度、
+          不影响 wrapRef 的整宽指针→帧映射（frameAtClientX 仍按 wrapRef 全宽计算）。 */}
+      <span data-testid="track-label-video" className="absolute left-1 z-20 pointer-events-none select-none text-xs text-zinc-500 bg-white/70 px-1 rounded" style={{ top: 4 }}>
+        视频
+      </span>
       <div style={{ height: GAP }} />
       <div style={{ height: A_H }} className="relative">
         <AudioWaveformTrack peaks={peaks} trimFrac={frac(endFrame)} headMuteFrac={frac(headMuteFrame)} speechEndFrac={speechEndFrame != null ? frac(speechEndFrame) : null} height={A_H} />
-        {/* 前段静音蓝手柄：只在音频轨 */}
+        {/* 前段静音蓝手柄：只在音频轨。z-10：当与裁剪线（红）落点相近时，静音手柄须能被抓取，
+            不能被后渲染、贯穿全高的裁剪线盖住抢走指针。 */}
         <div data-testid="headmute-handle" role="slider" aria-label="前段静音"
           onPointerDown={startDrag('mute')} onPointerMove={onMove} onPointerUp={endDrag}
-          className="absolute top-0 h-full cursor-ew-resize" style={{ left: muteLeft, width: 16, transform: 'translateX(-8px)' }}>
+          className="absolute top-0 h-full cursor-ew-resize z-10" style={{ left: muteLeft, width: 16, transform: 'translateX(-8px)' }}>
           <div className="absolute inset-y-0" style={{ left: 7, width: 2.5, background: '#2563EB' }} />
           <div className="absolute" style={{ top: '38%', left: 2, width: 12, height: 40, borderRadius: 6, background: '#2563EB' }} />
         </div>
       </div>
-      {/* 裁剪线：贯穿两轨；抓手在中缝 */}
+      <span data-testid="track-label-audio" className="absolute left-1 z-20 pointer-events-none select-none text-xs text-zinc-500 bg-white/70 px-1 rounded" style={{ top: V_H + GAP + 4 }}>
+        音频
+      </span>
+      {/* 裁剪线：贯穿两轨；抓手在中缝。z-0（低于 headmute-handle 的 z-10），
+          避免两者落点接近(~16px 内)时红线盖住蓝手柄导致其无法被抓取。 */}
       <div data-testid="cut-line" role="slider" aria-label="裁剪"
         onPointerDown={startDrag('trim')} onPointerMove={onMove} onPointerUp={endDrag}
-        className="absolute top-0 cursor-ew-resize" style={{ left: cutLeft, height: totalH, width: 16, transform: 'translateX(-8px)' }}>
+        className="absolute top-0 cursor-ew-resize z-0" style={{ left: cutLeft, height: totalH, width: 16, transform: 'translateX(-8px)' }}>
         <div className="absolute inset-y-0" style={{ left: 7, width: 3, background: '#EF4444' }} />
         <div className="absolute" style={{ top: V_H + GAP / 2 - 30, left: 1, width: 15, height: 60, borderRadius: 7, background: '#EF4444' }} />
       </div>

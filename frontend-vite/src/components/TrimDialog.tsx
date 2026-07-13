@@ -341,6 +341,11 @@ export function TrimDialog({
               />
             </div>
 
+            {/* Hover hint — 常驻提示,解释视频轨 hover 的擦洗预览行为 */}
+            <p className="shrink-0 text-[11px] text-zinc-400">
+              指针在视频轨上移动 → 预览器跳到该帧
+            </p>
+
             {/* Dual-track timeline — 视频胶片轨 + 音频波形轨,共享同一裁剪线 */}
             <div className="shrink-0">
               <DualTrackTimeline
@@ -355,6 +360,38 @@ export function TrimDialog({
                 onHeadMuteChange={(f) => setHeadMuteFrame(Math.max(0, Math.min(f, totalFrames)))}
                 onHoverFrame={(f) => { if (f != null && !isPreviewing) seekToFrame(f) }}
               />
+            </div>
+
+            {/* Legend — 解码双轨的每种颜色/线条,消解"在裁视频还是动音频"的歧义 */}
+            <div className="shrink-0 flex flex-col gap-0.5 text-[11px] text-zinc-500">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-3 h-3 rounded-sm" style={{ background: '#3B82F6' }} />
+                  人声
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-3 h-3 rounded-sm bg-zinc-300" />
+                  静音/已裁剪
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-0.5 h-3" style={{ background: '#EF4444' }} />
+                  裁剪(视频+音频一起裁)
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-0.5 h-3" style={{ background: '#2563EB' }} />
+                  开头静音手柄(只静音音频,不裁帧)
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-0.5 h-3" style={{ background: '#F59E0B' }} />
+                  说话结束
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-0.5 h-3" style={{ background: '#15803D' }} />
+                  播放头(预览时)
+                </span>
+              </div>
             </div>
 
             {/* Frame info */}

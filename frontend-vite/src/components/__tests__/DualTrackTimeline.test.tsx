@@ -54,4 +54,22 @@ describe('DualTrackTimeline', () => {
     fireEvent.pointerLeave(hover)
     expect(p.onHoverFrame).toHaveBeenCalledWith(null)
   })
+  it('渲染视频/音频轨道标签（左缘叠加，不占布局宽度）', () => {
+    render(<DualTrackTimeline {...base()} />)
+    expect(screen.getByTestId('track-label-video')).toHaveTextContent('视频')
+    expect(screen.getByTestId('track-label-audio')).toHaveTextContent('音频')
+  })
+  it('裁剪线与前段静音手柄落点相近时，手柄仍可被抓取（手柄层级须高于裁剪线）', () => {
+    // 两者落点都在 x=200（240 帧的 120 帧处），验证手柄不被裁剪线的 z 序盖住
+    const p = { ...base(), endFrame: 120, headMuteFrame: 120 }
+    render(<DualTrackTimeline {...p} />)
+    const handle = screen.getByTestId('headmute-handle')
+    const cutLine = screen.getByTestId('cut-line')
+    // 手柄的 z-index class 须严格高于裁剪线（cut-line 后渲染的贯穿全高线不能盖住手柄）
+    expect(handle.className).toMatch(/\bz-10\b/)
+    expect(cutLine.className).toMatch(/\bz-0\b/)
+    // 拖手柄仍应正常上报静音帧变化，而不是被裁剪线抢走指针
+    fireEvent.pointerDown(handle, { clientX: 210 })
+    expect(p.onHeadMuteChange).toHaveBeenCalledWith(126) // 210/400*240
+  })
 })
