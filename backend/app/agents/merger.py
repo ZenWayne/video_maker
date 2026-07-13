@@ -79,8 +79,25 @@ def merge_shots(
         raise ValueError(f"Cannot concat: no audio stream in {silent[0]}")
 
     n = len(valid_paths)
-    streams = "".join(f"[{i}:v][{i}:a]" for i in range(n))
-    filter_complex = f"{streams}concat=n={n}:v=1:a=1[v][a]"
+
+    # Bound each segment's audio to its own video duration before concat.  The
+    # concat filter concatenates audio and video streams independently, so a
+    # source whose audio outruns its video (a passthrough Veo clip, or any clip
+    # where trimming didn't cut the audio) leaks the overhang: the filter either
+    # freezes that segment's last frame to cover the extra audio (non-last
+    # segment → an earlier shot's audio bleeds over the next shot's picture) or
+    # lets the audio run past the final frame (last segment → A/V length
+    # mismatch).  atrim to the frame-based video duration keeps every segment's
+    # audio == its video, so concatenation stays in lockstep.
+    from app.agents.video_trimmer import get_video_info
+    vdurs = [info["total_frames"] / info["fps"]
+             for info in (get_video_info(p) for p in valid_paths)]
+    abind = "".join(
+        f"[{i}:a]apad,atrim=0:{vdurs[i]:.6f},asetpts=N/SR/TB[a{i}];"
+        for i in range(n)
+    )
+    streams = "".join(f"[{i}:v][a{i}]" for i in range(n))
+    filter_complex = f"{abind}{streams}concat=n={n}:v=1:a=1[v][a]"
 
     cmd = ["ffmpeg", "-y"]
     for p in valid_paths:
