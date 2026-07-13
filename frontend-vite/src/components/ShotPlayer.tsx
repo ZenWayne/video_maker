@@ -1,5 +1,5 @@
 // frontend-vite/src/components/ShotPlayer.tsx
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useShotSync } from '../hooks/useShotSync'
 
 export interface ShotPlayerProps {
@@ -33,6 +33,23 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null,
 
   const { videoRef, audioRef, onPlay, onPause, onSeeked, onTimeUpdate } =
     useShotSync({ trimEndSec, audioEnabled, headMuteSec })
+
+  // Keep the vc <audio>'s play state in lockstep with (playing && audioEnabled).
+  // The A/B toggle flips audioEnabled mid-playback but only ever changed the
+  // `muted` attribute; the audio element's play/pause was driven solely by the
+  // video's play event, so switching back to 配音 while the video played left
+  // the audio paused → muted video + paused audio = silence.
+  useEffect(() => {
+    const v = videoRef.current
+    const a = audioRef.current
+    if (!a) return
+    if (audioEnabled && playing) {
+      if (v) a.currentTime = v.currentTime
+      a.play?.()?.catch?.(() => {})
+    } else if (!a.paused) {
+      a.pause()
+    }
+  }, [audioEnabled, playing, videoRef, audioRef])
 
   // effective end = the trim point when set, else the full source duration
   const end = trimEndSec != null && trimEndSec > 0 ? trimEndSec : fullDuration
