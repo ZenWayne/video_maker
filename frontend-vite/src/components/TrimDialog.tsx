@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Loader2, ChevronLeft, ChevronRight, Play, Square, Undo2, Crosshair, AudioLines } from 'lucide-react'
+import { Loader2, ChevronLeft, ChevronRight, Play, Square, Undo2, Crosshair, AudioLines, VolumeX } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -25,6 +25,8 @@ interface TrimDialogProps {
     version: number
     next_shot?: { shot_id: number; custom_first_frame_path: string }
   }) => void
+  /** 前段静音(audio_head_mute_frames)保存后回调,与 onTrimmed 正交、独立触发。 */
+  onShotUpdated?: (shotId: number, updates: Partial<Shot>) => void
 }
 
 export function TrimDialog({
@@ -34,6 +36,7 @@ export function TrimDialog({
   open,
   onOpenChange,
   onTrimmed,
+  onShotUpdated,
 }: TrimDialogProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [fps, setFps] = useState(24)
@@ -41,11 +44,14 @@ export function TrimDialog({
   const [duration, setDuration] = useState(0)
   const [endFrame, setEndFrame] = useState(0)
   const [speechEndFrame, setSpeechEndFrame] = useState<number | null>(null)
+  const [sourceVideoUrl, setSourceVideoUrl] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isTrimming, setIsTrimming] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
   const [isAligning, setIsAligning] = useState(false)
   const [isDetectingSilence, setIsDetectingSilence] = useState(false)
+  const [isDetectingSpeechStart, setIsDetectingSpeechStart] = useState(false)
+  const [headMuteFrame, setHeadMuteFrame] = useState(0)
   const [peaks, setPeaks] = useState<number[] | null>(null)
   const [notice, setNotice] = useState('')
   const [isPreviewing, setIsPreviewing] = useState(false)
@@ -55,6 +61,10 @@ export function TrimDialog({
   const minFrames = 24
 
   const rvfcRef = useRef<number>(0)
+  // 载入时的前段静音帧,用于判断确认时是否需要保存(与 trim 正交、独立 PUT)
+  const initialHeadMuteFrameRef = useRef(0)
+  // 载入时的裁剪点(trim_frames),用于判断确认时是否需要调用 trimShot(与前段静音正交、独立 PUT)
+  const initialEndFrameRef = useRef(0)
 
   const stopPreview = useCallback(() => {
     const v = videoRef.current
@@ -129,14 +139,20 @@ export function TrimDialog({
     setNotice('')
     setPeaks(null)
     setPlayheadFrame(null)
+    const loadedHeadMuteFrame = shot.audio_head_mute_frames ?? 0
+    setHeadMuteFrame(loadedHeadMuteFrame)
+    initialHeadMuteFrameRef.current = loadedHeadMuteFrame
     api.getVideoInfo(projectId, shot.shot_id).then((info) => {
       setFps(info.fps)
       setTotalFrames(info.total_frames)
       setDuration(info.duration)
       // Reflect the current (non-destructive) trim point, not the full source length
-      setEndFrame(shot.trim_frames ?? info.total_frames)
+      const loadedEndFrame = shot.trim_frames ?? info.total_frames
+      setEndFrame(loadedEndFrame)
+      initialEndFrameRef.current = loadedEndFrame
       setHasBackup(info.has_backup)
       setSpeechEndFrame(info.speech_end_frame)
+      setSourceVideoUrl(info.source_video_url ?? null)
       setIsLoading(false)
     }).catch((e) => {
       setError(e instanceof Error ? e.message : 'Failed to load video info')
@@ -164,23 +180,46 @@ export function TrimDialog({
   }
 
   const handleTrim = async () => {
-    if (endFrame >= totalFrames) return
     setIsTrimming(true)
     setError('')
     try {
-      const result = await api.trimShot(projectId, shot.shot_id, endFrame)
-      onTrimmed({
-        video_path: result.video_path,
-        last_frame_path: result.last_frame_path,
-        trim_frames: result.trim_frames,
-        trim_end_sec: result.trim_end_sec,
-        version: result.version,
-        next_shot: result.next_shot,
-      })
-      setTotalFrames(result.total_frames)
-      setDuration(result.duration)
-      setEndFrame(result.total_frames)
-      onOpenChange(false)
+      // 裁剪与前段静音正交、各自独立 PUT:只调用值发生变化的那个接口
+      if (endFrame !== initialEndFrameRef.current) {
+        const result = await api.trimShot(projectId, shot.shot_id, endFrame)
+        initialEndFrameRef.current = endFrame
+        onTrimmed({
+          video_path: result.video_path,
+          last_frame_path: result.last_frame_path,
+          trim_frames: result.trim_frames,
+          trim_end_sec: result.trim_end_sec,
+          version: result.version,
+          next_shot: result.next_shot,
+        })
+        setTotalFrames(result.total_frames)
+        setDuration(result.duration)
+        setEndFrame(result.total_frames)
+      }
+
+      // 前段静音与裁剪正交:独立 PUT,不阻塞/不依赖 trim 结果
+      let headMuteOk = true
+      if (headMuteFrame !== initialHeadMuteFrameRef.current) {
+        try {
+          const muteResult = await api.setAudioHeadMute(projectId, shot.shot_id, headMuteFrame)
+          initialHeadMuteFrameRef.current = headMuteFrame
+          onShotUpdated?.(shot.shot_id, {
+            audio_head_mute_frames: muteResult.audio_head_mute_frames,
+            audio_head_mute_sec: muteResult.audio_head_mute_sec,
+          })
+        } catch (e) {
+          headMuteOk = false
+          setError(e instanceof Error ? e.message : '前段静音保存失败')
+        }
+      }
+
+      // 前段静音保存失败时保持对话框打开,让错误提示可见;裁剪本身已成功,状态更新照常执行
+      if (headMuteOk) {
+        onOpenChange(false)
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Trim failed')
     } finally {
@@ -255,6 +294,24 @@ export function TrimDialog({
     }
   }
 
+  const handleDetectSpeechStart = async () => {
+    setIsDetectingSpeechStart(true)
+    setError('')
+    setNotice('')
+    try {
+      const r = await api.detectSpeechStart(projectId, shot.shot_id)
+      if (r.has_lead_silence && r.suggested_start_frame != null) {
+        setHeadMuteFrame(r.suggested_start_frame)
+      } else {
+        setNotice('未检测到开头静音')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '检测失败')
+    } finally {
+      setIsDetectingSpeechStart(false)
+    }
+  }
+
   const currentTime = fps > 0 ? (endFrame / fps).toFixed(2) : '0'
   const trimmedPercent = totalFrames > 0 ? (endFrame / totalFrames) * 100 : 100
 
@@ -275,7 +332,7 @@ export function TrimDialog({
             <div className="min-h-0 flex-1 flex items-center justify-center bg-black rounded-lg overflow-hidden">
               <video
                 ref={videoRef}
-                src={shot.video_path || undefined}
+                src={sourceVideoUrl ?? shot.video_path ?? undefined}
                 preload="auto"
                 className="max-w-full max-h-full object-contain"
                 onLoadedMetadata={() => seekToFrame(endFrame)}
@@ -291,7 +348,9 @@ export function TrimDialog({
                 endFrame={endFrame}
                 speechEndFrame={speechEndFrame}
                 playheadFrame={playheadFrame}
+                headMuteFrame={headMuteFrame}
                 onScrub={handleSliderChange}
+                onHeadMuteScrub={(f) => setHeadMuteFrame(Math.max(0, Math.min(f, totalFrames)))}
               />
             </div>
 
@@ -303,7 +362,7 @@ export function TrimDialog({
                   style={{ width: `${trimmedPercent}%` }}
                 />
                 <div
-                  className="absolute inset-y-0 bg-red-300/50 rounded-r-full"
+                  className="absolute inset-y-0 bg-zinc-300 rounded-r-full"
                   style={{ left: `${trimmedPercent}%`, right: 0 }}
                 />
               </div>
@@ -325,6 +384,16 @@ export function TrimDialog({
                 {endFrame < totalFrames && (
                   <span className="text-red-500 ml-2">
                     裁掉 {totalFrames - endFrame} 帧
+                  </span>
+                )}
+                {speechEndFrame != null && (
+                  <span className="text-amber-700 ml-2 font-medium">
+                    静音参考: 第 {speechEndFrame} 帧
+                  </span>
+                )}
+                {headMuteFrame > 0 && (
+                  <span className="text-blue-600 ml-2">
+                    前段静音: 前 {headMuteFrame} 帧 / {(headMuteFrame / fps).toFixed(2)}s
                   </span>
                 )}
                 {playheadFrame != null && (
@@ -393,7 +462,7 @@ export function TrimDialog({
                     variant="outline"
                     size="sm"
                     onClick={handleRestore}
-                    disabled={isRestoring || isTrimming || isAligning || isPreviewing || isDetectingSilence}
+                    disabled={isRestoring || isTrimming || isAligning || isPreviewing || isDetectingSilence || isDetectingSpeechStart}
                   >
                     {isRestoring ? (
                       <><Loader2 className="w-4 h-4 mr-1 animate-spin" />还原中...</>
@@ -407,7 +476,7 @@ export function TrimDialog({
                     variant="outline"
                     size="sm"
                     onClick={handleAlignTailFrame}
-                    disabled={isAligning || isTrimming || isRestoring || isPreviewing || isDetectingSilence}
+                    disabled={isAligning || isTrimming || isRestoring || isPreviewing || isDetectingSilence || isDetectingSpeechStart}
                   >
                     {isAligning ? (
                       <><Loader2 className="w-4 h-4 mr-1 animate-spin" />校准中...</>
@@ -420,12 +489,24 @@ export function TrimDialog({
                   variant="outline"
                   size="sm"
                   onClick={handleDetectSilence}
-                  disabled={isDetectingSilence || isTrimming || isAligning || isRestoring || isPreviewing}
+                  disabled={isDetectingSilence || isTrimming || isAligning || isRestoring || isPreviewing || isDetectingSpeechStart}
                 >
                   {isDetectingSilence ? (
                     <><Loader2 className="w-4 h-4 mr-1 animate-spin" />检测中...</>
                   ) : (
                     <><AudioLines className="w-4 h-4 mr-1" />静音裁剪</>
+                  )}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDetectSpeechStart}
+                  disabled={isDetectingSpeechStart || isTrimming || isAligning || isRestoring || isPreviewing || isDetectingSilence}
+                >
+                  {isDetectingSpeechStart ? (
+                    <><Loader2 className="w-4 h-4 mr-1 animate-spin" />检测中...</>
+                  ) : (
+                    <><VolumeX className="w-4 h-4 mr-1" />检测开头静音</>
                   )}
                 </Button>
               </div>
@@ -435,7 +516,7 @@ export function TrimDialog({
                 </Button>
                 <Button
                   onClick={handleTrim}
-                  disabled={isTrimming || isDetectingSilence || endFrame >= totalFrames}
+                  disabled={isTrimming || isDetectingSilence || isDetectingSpeechStart}
                 >
                   {isTrimming ? (
                     <><Loader2 className="w-4 h-4 mr-1 animate-spin" />裁剪中...</>

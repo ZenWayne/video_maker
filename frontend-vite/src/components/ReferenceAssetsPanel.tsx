@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { Images } from 'lucide-react'
+import { PreviewableImage } from '@/components/ImagePreview'
 import type { ReferenceImage } from '@/lib/types'
 
 // Reference images are served via the /api/media static mount from their
@@ -15,7 +16,7 @@ function ThumbGroup({ label, images }: { label: string; images: ReferenceImage[]
       <div className="flex flex-wrap gap-2.5">
         {images.map((img) => (
           <div key={img.id} className="flex w-16 flex-col gap-1">
-            <img
+            <PreviewableImage
               src={refMediaUrl(img.storage_path)}
               alt={img.filename}
               className="h-16 w-16 rounded border border-zinc-200 object-cover"

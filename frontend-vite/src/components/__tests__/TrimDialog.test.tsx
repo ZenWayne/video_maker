@@ -14,9 +14,14 @@ vi.mock('@/lib/api', () => ({
       has_backup: false,
       speech_end_frame: 180,
       speech_end_sec: 7.5,
+      source_video_url: '/api/media/projects/p/shots/shot_1/output_1_a.mp4',
     }),
     getWaveform: vi.fn().mockResolvedValue({ peaks: [0.2, 0.6, 0.4, 0.8, 0.3] }),
     trimShot: vi.fn(),
+    detectSpeechStart: vi.fn(),
+    setAudioHeadMute: vi.fn().mockResolvedValue({
+      shot_id: 1, audio_head_mute_frames: null, audio_head_mute_sec: null,
+    }),
   },
 }))
 
@@ -122,6 +127,24 @@ async function renderReady() {
   await waitFor(() => {
     expect(screen.getByText(/帧: 240 \/ 240/)).toBeInTheDocument()
   })
+
+  return { onOpenChange, onTrimmed }
+}
+
+/** Render dialog with an optional shot override (inline render, no wait) */
+function renderDialog(shotOverride?: Shot) {
+  const onOpenChange = vi.fn()
+  const onTrimmed = vi.fn()
+
+  render(
+    <TrimDialog
+      shot={shotOverride ?? mockShot}
+      projectId="proj-1"
+      open={true}
+      onOpenChange={onOpenChange}
+      onTrimmed={onTrimmed}
+    />
+  )
 
   return { onOpenChange, onTrimmed }
 }
@@ -290,19 +313,33 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     expect(video.pause).toHaveBeenCalledTimes(1)
   })
 
-  it('confirm button stays disabled until slider is moved', async () => {
+  it('confirm button is enabled at full length (last frame = untrimmed)', async () => {
     await renderReady()
 
-    // Initially endFrame == totalFrames → nothing to trim
-    expect(screen.getByText('确认裁剪').closest('button')).toBeDisabled()
+    // Initially endFrame == totalFrames (full length) → button is ENABLED
+    // (last frame means "not trimmed" — confirm at full length clears the trim)
+    expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
 
-    // Move slider → now there's something to trim
+    // Move slider to trim → button stays enabled
     fireEvent.change(screen.getByRole('slider'), { target: { value: '200' } })
     expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
 
-    // Move back to max → nothing to trim again
+    // Move back to max (full length) → button still enabled
     fireEvent.change(screen.getByRole('slider'), { target: { value: '240' } })
-    expect(screen.getByText('确认裁剪').closest('button')).toBeDisabled()
+    expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
+  })
+
+  it('confirm button is enabled when already-trimmed shot loads at full timeline', async () => {
+    // Render a shot that was previously trimmed to frame 200
+    renderDialog({ ...mockShot, trim_frames: 200 })
+
+    // Wait for load — total timeline is 240, but endFrame initialized to trim_frames (200)
+    await waitFor(() => {
+      expect(screen.getByText(/帧:\s*200\s*\/\s*240/)).toBeInTheDocument()
+    })
+
+    // Confirm button is enabled (can always confirm, even at non-full-length)
+    expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
   })
 
   it('加载后渲染声纹波形轨', async () => {
@@ -320,5 +357,261 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     await waitFor(() =>
       expect(api.getWaveform).toHaveBeenCalledWith('proj-1', 1),
     )
+  })
+
+  it('帧信息行常显静音参考帧数(琥珀色)', async () => {
+    renderDialog()
+    expect(await screen.findByText('静音参考: 第 180 帧')).toBeInTheDocument()
+  })
+
+  it('预览 video 使用源片 URL 而非 shot.video_path', async () => {
+    renderDialog()
+    await screen.findByText(/帧:/)
+    const video = document.querySelector('video')!
+    expect(video.getAttribute('src')).toBe('/api/media/projects/p/shots/shot_1/output_1_a.mp4')
+  })
+
+  it('已裁剪 shot 打开时时间轴仍是全段、裁剪点在 trim_frames', async () => {
+    renderDialog({ ...mockShot, trim_frames: 200 })
+    expect(await screen.findByText(/帧:\s*200\s*\/\s*240/)).toBeInTheDocument()
+    expect(screen.getByText('裁掉 40 帧')).toBeInTheDocument()
+    const slider = document.querySelector('input[type="range"]') as HTMLInputElement
+    expect(slider.max).toBe('240')
+  })
+
+  it('点击"检测开头静音"命中前段静音后帧信息显示"前段静音"', async () => {
+    vi.mocked(api.detectSpeechStart).mockResolvedValueOnce({
+      has_lead_silence: true,
+      suggested_start_frame: 30,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    renderDialog()
+    await screen.findByText(/帧:/)
+
+    // 检测前不显示前段静音信息
+    expect(screen.queryByText(/前段静音/)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('检测开头静音').closest('button')!)
+
+    expect(await screen.findByText(/前段静音: 前 30 帧/)).toBeInTheDocument()
+    expect(api.detectSpeechStart).toHaveBeenCalledWith('proj-1', 1)
+  })
+
+  it('未检测到开头静音时提示"未检测到开头静音"', async () => {
+    vi.mocked(api.detectSpeechStart).mockResolvedValueOnce({
+      has_lead_silence: false,
+      suggested_start_frame: null,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    renderDialog()
+    await screen.findByText(/帧:/)
+
+    fireEvent.click(screen.getByText('检测开头静音').closest('button')!)
+
+    expect(await screen.findByText('未检测到开头静音')).toBeInTheDocument()
+    expect(screen.queryByText(/前段静音/)).not.toBeInTheDocument()
+  })
+
+  it('确认裁剪时若前段静音帧有变化,调用 setAudioHeadMute 并通知父层刷新', async () => {
+    vi.mocked(api.trimShot).mockResolvedValue({
+      video_path: '/fake/video.mp4',
+      last_frame_path: '/fake/last.png',
+      trim_frames: 240,
+      trim_end_sec: null,
+      version: 2,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    vi.mocked(api.detectSpeechStart).mockResolvedValueOnce({
+      has_lead_silence: true,
+      suggested_start_frame: 30,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    const onShotUpdated = vi.fn()
+    const onOpenChange = vi.fn()
+    const onTrimmed = vi.fn()
+    render(
+      <TrimDialog
+        shot={mockShot}
+        projectId="proj-1"
+        open={true}
+        onOpenChange={onOpenChange}
+        onTrimmed={onTrimmed}
+        onShotUpdated={onShotUpdated}
+      />,
+    )
+    await screen.findByText(/帧:/)
+
+    fireEvent.click(screen.getByText('检测开头静音').closest('button')!)
+    await screen.findByText(/前段静音: 前 30 帧/)
+
+    fireEvent.click(screen.getByText('确认裁剪').closest('button')!)
+
+    await waitFor(() => {
+      expect(api.setAudioHeadMute).toHaveBeenCalledWith('proj-1', 1, 30)
+    })
+    await waitFor(() => {
+      expect(onShotUpdated).toHaveBeenCalledWith(1, {
+        audio_head_mute_frames: null,
+        audio_head_mute_sec: null,
+      })
+    })
+  })
+
+  it('确认裁剪时若前段静音保存失败,保持对话框打开并显示错误,但裁剪结果仍应用', async () => {
+    vi.mocked(api.trimShot).mockResolvedValue({
+      video_path: '/fake/video.mp4',
+      last_frame_path: '/fake/last.png',
+      trim_frames: 240,
+      trim_end_sec: null,
+      version: 2,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    vi.mocked(api.detectSpeechStart).mockResolvedValueOnce({
+      has_lead_silence: true,
+      suggested_start_frame: 30,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    vi.mocked(api.setAudioHeadMute).mockRejectedValueOnce(new Error('前段静音保存失败'))
+    const onOpenChange = vi.fn()
+    const onTrimmed = vi.fn()
+    render(
+      <TrimDialog
+        shot={mockShot}
+        projectId="proj-1"
+        open={true}
+        onOpenChange={onOpenChange}
+        onTrimmed={onTrimmed}
+      />,
+    )
+    await screen.findByText(/帧:/)
+
+    // 裁剪与前段静音现已正交:也需改动裁剪点,才能触发 trimShot / onTrimmed
+    fireEvent.click(screen.getByText('-1').closest('button')!)
+
+    fireEvent.click(screen.getByText('检测开头静音').closest('button')!)
+    await screen.findByText(/前段静音: 前 30 帧/)
+
+    fireEvent.click(screen.getByText('确认裁剪').closest('button')!)
+
+    expect(await screen.findByText('前段静音保存失败')).toBeInTheDocument()
+    expect(api.trimShot).toHaveBeenCalled()
+    expect(onTrimmed).toHaveBeenCalled()
+    expect(onOpenChange).not.toHaveBeenCalledWith(false)
+    expect(screen.getByText('裁剪视频 — Shot #1')).toBeInTheDocument()
+  })
+
+  it('只改前段静音时,仅调用 setAudioHeadMute,不触发 trimShot', async () => {
+    // api mock 调用历史跨用例累积(文件未全局 clearMocks),此处显式清空以隔离断言
+    vi.mocked(api.trimShot).mockClear()
+    vi.mocked(api.setAudioHeadMute).mockClear()
+    vi.mocked(api.detectSpeechStart).mockResolvedValueOnce({
+      has_lead_silence: true,
+      suggested_start_frame: 30,
+      fps: 24,
+      total_frames: 240,
+      duration: 10.0,
+    })
+    const onOpenChange = vi.fn()
+    render(
+      <TrimDialog
+        shot={mockShot}
+        projectId="proj-1"
+        open={true}
+        onOpenChange={onOpenChange}
+        onTrimmed={vi.fn()}
+      />,
+    )
+    await screen.findByText(/帧:/)
+
+    fireEvent.click(screen.getByText('检测开头静音').closest('button')!)
+    await screen.findByText(/前段静音: 前 30 帧/)
+
+    // 裁剪点未改动
+    fireEvent.click(screen.getByText('确认裁剪').closest('button')!)
+
+    await waitFor(() => {
+      expect(api.setAudioHeadMute).toHaveBeenCalledWith('proj-1', 1, 30)
+    })
+    expect(api.trimShot).not.toHaveBeenCalled()
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false)
+    })
+  })
+
+  it('只改裁剪时,仅调用 trimShot,不触发 setAudioHeadMute', async () => {
+    vi.mocked(api.trimShot).mockClear()
+    vi.mocked(api.setAudioHeadMute).mockClear()
+    vi.mocked(api.trimShot).mockResolvedValue({
+      video_path: '/fake/video.mp4',
+      last_frame_path: '/fake/last.png',
+      trim_frames: 230,
+      trim_end_sec: 230 / 24,
+      version: 2,
+      fps: 24,
+      total_frames: 230,
+      duration: 230 / 24,
+    })
+    const onOpenChange = vi.fn()
+    const onTrimmed = vi.fn()
+    render(
+      <TrimDialog
+        shot={mockShot}
+        projectId="proj-1"
+        open={true}
+        onOpenChange={onOpenChange}
+        onTrimmed={onTrimmed}
+      />,
+    )
+    await screen.findByText(/帧:/)
+
+    // 只改动裁剪点(-10 帧步进),前段静音保持初始值
+    fireEvent.click(screen.getByText('-10').closest('button')!)
+
+    fireEvent.click(screen.getByText('确认裁剪').closest('button')!)
+
+    await waitFor(() => {
+      expect(api.trimShot).toHaveBeenCalledWith('proj-1', 1, 230)
+    })
+    expect(api.setAudioHeadMute).not.toHaveBeenCalled()
+    expect(onTrimmed).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false)
+    })
+  })
+
+  it('裁剪点与前段静音均未改动时,不发起任何保存请求,直接关闭对话框', async () => {
+    vi.mocked(api.trimShot).mockClear()
+    vi.mocked(api.setAudioHeadMute).mockClear()
+    const onOpenChange = vi.fn()
+    render(
+      <TrimDialog
+        shot={mockShot}
+        projectId="proj-1"
+        open={true}
+        onOpenChange={onOpenChange}
+        onTrimmed={vi.fn()}
+      />,
+    )
+    await screen.findByText(/帧:/)
+
+    fireEvent.click(screen.getByText('确认裁剪').closest('button')!)
+
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false)
+    })
+    expect(api.trimShot).not.toHaveBeenCalled()
+    expect(api.setAudioHeadMute).not.toHaveBeenCalled()
   })
 })

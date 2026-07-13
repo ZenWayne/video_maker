@@ -94,6 +94,11 @@ async def event_generator(
                         "source_fps": s.source_fps,
                         "source_frames": s.source_frames,
                         "trim_end_sec": (s.trim_frames / s.source_fps) if (s.trim_frames and s.source_fps) else None,
+                        "audio_head_mute_frames": s.audio_head_mute_frames,
+                        "audio_head_mute_sec": (
+                            s.audio_head_mute_frames / s.source_fps
+                            if (s.audio_head_mute_frames and s.source_fps) else None
+                        ),
                         "vc_audio_url": to_media_url(s.vc_audio_path),
                         # 必须与 GET /projects 的 _shot_to_dict 保持一致，否则 SSE 快照会把候选画廊
                         # 清空（Playwright e2e 曾复现：refetch 后候选可见，SSE snapshot 一到就消失）。

@@ -1,6 +1,7 @@
 // components/CcCandidateStrip.tsx
 // CC 人物校准候选条：当前尾帧 → 候选对比 → 采纳/删除/再校准
 import { ArrowRight, Loader2, RefreshCw, UserCheck } from 'lucide-react'
+import { PreviewableImage } from '@/components/ImagePreview'
 import type { Shot } from '@/lib/types'
 
 interface Props {
@@ -31,7 +32,7 @@ export function CcCandidateStrip({ shot, currentLastFrame, onAdopt, onDelete, on
       <div className="flex items-center gap-2.5">
         <div className="flex flex-col items-center gap-1">
           <div className="h-[135px] w-[76px] overflow-hidden rounded-md bg-zinc-300">
-            {currentLastFrame && <img src={currentLastFrame} alt="当前尾帧" className="h-full w-full object-cover" />}
+            {currentLastFrame && <PreviewableImage src={currentLastFrame} alt="当前尾帧" className="h-full w-full object-cover" />}
           </div>
           <span className="text-[11px] text-zinc-500">当前尾帧</span>
         </div>
@@ -48,7 +49,7 @@ export function CcCandidateStrip({ shot, currentLastFrame, onAdopt, onDelete, on
               </div>
             ) : (
               <div className="h-[135px] w-[76px] overflow-hidden rounded-md border-2 border-blue-500">
-                <img src={c.file_path ?? ''} alt="校准候选" className="h-full w-full object-cover" />
+                <PreviewableImage src={c.file_path ?? ''} alt="校准候选" className="h-full w-full object-cover" />
               </div>
             )}
             <div className="flex gap-2 text-xs">

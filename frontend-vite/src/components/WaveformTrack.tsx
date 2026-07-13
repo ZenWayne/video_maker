@@ -8,11 +8,17 @@ interface WaveformTrackProps {
   speechEndFrame: number | null
   /** 预览播放时的当前播放位置(帧);非播放时为 null,不绘制播放头。 */
   playheadFrame?: number | null
+  /** 前段静音手柄位置(帧);0/undefined 时不绘制前手柄。 */
+  headMuteFrame?: number
   onScrub: (frame: number) => void
+  /** 前手柄拖拽回调;缺省时前手柄区域退化为普通裁剪点(尾)交互。 */
+  onHeadMuteScrub?: (frame: number) => void
 }
 
 const TRACK_HEIGHT = 84
 const FALLBACK_WIDTH = 500
+const HEAD_MUTE_ZONE_RATIO = 0.15
+const HEAD_MUTE_HANDLE_HIT_PX = 10
 
 export default function WaveformTrack({
   peaks,
@@ -20,7 +26,9 @@ export default function WaveformTrack({
   endFrame,
   speechEndFrame,
   playheadFrame = null,
+  headMuteFrame,
   onScrub,
+  onHeadMuteScrub,
 }: WaveformTrackProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const draggingRef = useRef(false)
@@ -38,13 +46,11 @@ export default function WaveformTrack({
 
     const mid = TRACK_HEIGHT / 2
 
-    // 静音高亮带 + 说话结束竖线
+    // 静音高亮带（背景，保持在柱子下层）
     if (speechEndFrame != null) {
       const sx = pixelForFrame(speechEndFrame, width, totalFrames)
       g.fillStyle = 'rgba(252, 211, 77, 0.18)' // amber 18%
       g.fillRect(sx, 0, width - sx, TRACK_HEIGHT)
-      g.fillStyle = '#B45309' // amber-700
-      g.fillRect(sx - 1, 0, 2, TRACK_HEIGHT)
     }
 
     // 峰值柱
@@ -55,12 +61,28 @@ export default function WaveformTrack({
       g.fillRect(i * barWidth, mid - h / 2, barWidth, h)
     })
 
-    // 待裁区 + 裁剪竖线
+    // 前段静音：左侧淡蓝遮罩 + 蓝色手柄线
+    if (headMuteFrame && headMuteFrame > 0) {
+      const hx = pixelForFrame(headMuteFrame, width, totalFrames)
+      g.fillStyle = 'rgba(37, 99, 235, 0.14)' // blue-600 淡
+      g.fillRect(0, 0, hx, TRACK_HEIGHT)
+      g.fillStyle = '#2563EB' // blue-600
+      g.fillRect(hx - 1, 0, 2, TRACK_HEIGHT)
+    }
+
+    // 已裁剪区磨砂灰显（波形透灰可见）+ 裁剪竖线
     const cx = pixelForFrame(endFrame, width, totalFrames)
-    g.fillStyle = 'rgba(239, 68, 68, 0.12)' // red 12%
+    g.fillStyle = 'rgba(244, 244, 245, 0.78)' // zinc-100 磨砂
     g.fillRect(cx, 0, width - cx, TRACK_HEIGHT)
     g.fillStyle = '#EF4444' // red-500
     g.fillRect(cx - 1, 0, 3, TRACK_HEIGHT)
+
+    // 说话结束竖线（黄线画在灰显之上，确保在已裁剪区仍清晰可见）
+    if (speechEndFrame != null) {
+      const sx = pixelForFrame(speechEndFrame, width, totalFrames)
+      g.fillStyle = '#F59E0B' // amber-500 —— 图例叫"黄线"，用真正的黄
+      g.fillRect(sx - 1, 0, 2, TRACK_HEIGHT)
+    }
 
     // 播放头(预览播放时跟随 currentTime)
     if (playheadFrame != null) {
@@ -68,17 +90,29 @@ export default function WaveformTrack({
       g.fillStyle = '#15803D' // green-700
       g.fillRect(px - 1, 0, 2, TRACK_HEIGHT)
     }
-  }, [peaks, endFrame, speechEndFrame, totalFrames, playheadFrame])
+  }, [peaks, endFrame, speechEndFrame, totalFrames, playheadFrame, headMuteFrame])
 
-  // ---- 交互:点击/拖拽设裁剪点 ----
+  // ---- 交互:点击/拖拽设裁剪点(尾)或前段静音手柄(头)----
   const scrubTo = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const width = canvasRef.current?.offsetWidth || FALLBACK_WIDTH
       const rect = canvasRef.current?.getBoundingClientRect()
       const offsetX = rect ? e.clientX - rect.left : 0
+
+      if (onHeadMuteScrub) {
+        const handleX = headMuteFrame ? pixelForFrame(headMuteFrame, width, totalFrames) : 0
+        const nearHandle = !!headMuteFrame && headMuteFrame > 0
+          && Math.abs(offsetX - handleX) <= HEAD_MUTE_HANDLE_HIT_PX
+        const inLeftZone = offsetX <= width * HEAD_MUTE_ZONE_RATIO
+        if (nearHandle || inLeftZone) {
+          onHeadMuteScrub(frameFromOffsetX(offsetX, width, totalFrames))
+          return
+        }
+      }
+
       onScrub(frameFromOffsetX(offsetX, width, totalFrames))
     },
-    [onScrub, totalFrames],
+    [onScrub, onHeadMuteScrub, totalFrames, headMuteFrame],
   )
 
   // 无音频时降级隐藏
@@ -89,7 +123,8 @@ export default function WaveformTrack({
       <div className="flex items-center justify-between">
         <span className="text-xs font-semibold text-zinc-600">声纹波形</span>
         <span className="text-[11px] text-zinc-400">
-          蓝=人声 · 黄线=说话结束 · 红线=裁剪点 · 绿线=播放
+          蓝=人声 · 灰=已裁剪 · 黄线=说话结束 · 红线=裁剪点 · 绿线=播放
+          {onHeadMuteScrub ? ' · 蓝前段=静音' : ''}
         </span>
       </div>
       <canvas

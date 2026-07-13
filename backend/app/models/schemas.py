@@ -92,6 +92,8 @@ class ShotResponse(BaseModel):
     source_fps: Optional[float] = None
     source_frames: Optional[int] = None
     trim_end_sec: Optional[float] = None
+    audio_head_mute_frames: Optional[int] = None
+    audio_head_mute_sec: Optional[float] = None
     vc_audio_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime

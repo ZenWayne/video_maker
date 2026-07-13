@@ -33,6 +33,7 @@ from app.services.storage import (
     storyboard_path, archived_storyboard_path, shot_custom_frames_dir, to_media_url,
     shot_pre_vc_video_path, shot_audio_original_path, shot_audio_vc_path,
     shot_pre_cc_last_frame_path, join_preview_path, shot_dir, ts_uuid_name,
+    shot_source_path,
 )
 from app.services.events import publish_event
 
@@ -1474,6 +1475,17 @@ async def reorder_shot_references(
     return _ref_images_response(shot)
 
 
+def _dialog_source(project_id: str, shot_id: int, video_path: str) -> str:
+    """裁剪弹窗只读端点的统一「源片视角」。
+
+    trim 端点按源片帧号裁剪（shot_source_path），弹窗展示的时间轴/波形/静音
+    检测必须基于同一文件，否则 VC 后（video_path 指向物理剪过的派生文件）
+    时间轴只剩剪后长度。找不到源片时回退 video_path。
+    """
+    src = shot_source_path(project_id, shot_id)
+    return str(src) if src is not None else video_path
+
+
 @router.get("/projects/{project_id}/shots/{shot_id}/video-info")
 async def get_shot_video_info(
     project_id: str,
@@ -1491,18 +1503,23 @@ async def get_shot_video_info(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    info = get_video_info(shot.video_path)
+    source = _dialog_source(project_id, shot_id, shot.video_path)
+    info = get_video_info(source)
+    # 容器时长可能含超出视频的音频尾巴（老生成产物）——时间轴统一按视频流计
+    if info.get("fps"):
+        info["duration"] = round(info["total_frames"] / info["fps"], 3)
     # Restore is possible when a pristine output_ exists and the current clip is a
     # derived (trimmed_/vc_) file, i.e. not the pristine itself.
     from app.services.storage import pristine_video_path
     pristine = pristine_video_path(project_id, shot_id)
     info["has_backup"] = pristine is not None and Path(shot.video_path) != pristine
     try:
-        sec, frame = speech_end_info(shot.video_path, info["fps"])
+        sec, frame = speech_end_info(source, info["fps"])
     except Exception:  # 静音检测失败不应阻塞裁剪元数据返回
         sec, frame = None, None
     info["speech_end_sec"] = sec
     info["speech_end_frame"] = frame
+    info["source_video_url"] = to_media_url(source)
     return info
 
 
@@ -1513,7 +1530,7 @@ async def get_shot_waveform(
     session: AsyncSession = Depends(get_session),
 ):
     """Return audio waveform peaks for the shot video as a list of floats in [0,1]."""
-    from app.agents.video_trimmer import extract_waveform_peaks
+    from app.agents.video_trimmer import extract_waveform_peaks, get_video_info
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1523,7 +1540,10 @@ async def get_shot_waveform(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
     try:
-        peaks = extract_waveform_peaks(shot.video_path)
+        source = _dialog_source(project_id, shot_id, shot.video_path)
+        info = get_video_info(source)
+        video_seconds = info["total_frames"] / info["fps"] if info.get("fps") else None
+        peaks = extract_waveform_peaks(source, max_seconds=video_seconds)
     except Exception:
         peaks = []
     return {"peaks": peaks}
@@ -1817,15 +1837,71 @@ async def detect_silence(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    suggestion = suggest_silence_trim(shot.video_path)
+    source = _dialog_source(project_id, shot_id, shot.video_path)
+    suggestion = suggest_silence_trim(source)
     if suggestion is None:
         return {
             "has_silence": False,
             "suggested_end_frame": None,
             "silence_start_time": None,
-            **get_video_info(shot.video_path),
+            **get_video_info(source),
         }
     return {"has_silence": True, **suggestion}
+
+
+@router.post("/projects/{project_id}/shots/{shot_id}/detect-speech-start")
+async def detect_speech_start_ep(
+    project_id: str,
+    shot_id: int,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """从开头静音推断语音起始帧 — 只读，不写文件。"""
+    from app.agents.video_trimmer import detect_speech_start, get_video_info
+
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot or not shot.video_path:
+        raise HTTPException(status_code=404, detail="Shot or video not found")
+
+    source = _dialog_source(project_id, shot_id, shot.video_path)
+    info = get_video_info(source)
+    start_sec = detect_speech_start(source)
+    if start_sec is None:
+        return {"has_lead_silence": False, "suggested_start_frame": None, **info,
+                "source_video_url": to_media_url(source)}
+    return {"has_lead_silence": True,
+            "suggested_start_frame": int(round(start_sec * info["fps"])),
+            "speech_start_sec": start_sec, **info,
+            "source_video_url": to_media_url(source)}
+
+
+@router.put("/projects/{project_id}/shots/{shot_id}/audio-head-mute")
+async def set_audio_head_mute(
+    project_id: str,
+    shot_id: int,
+    body: dict,
+    user: str = Depends(_require_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """写前段静音帧数（0 = 清除）。纯 EDL，不动素材/trim/vc。"""
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    n = int(body.get("head_mute_frames") or 0)
+    shot.audio_head_mute_frames = n if n > 0 else None
+    session.add(shot)
+    await session.commit()
+    sec = (shot.audio_head_mute_frames / shot.source_fps) if (shot.audio_head_mute_frames and shot.source_fps) else None
+    return {"shot_id": shot_id, "audio_head_mute_frames": shot.audio_head_mute_frames,
+            "audio_head_mute_sec": sec}
 
 
 # Voice cloning / 音色校准 routes moved to app/api/voice.py (see voice.router).

@@ -79,6 +79,31 @@ def detect_speech_end(
     return last_start
 
 
+def detect_speech_start(
+    video_path: str,
+    silence_threshold_db: float = -30,
+    min_silence_duration: float = 0.3,
+) -> float | None:
+    """检测开头静音结束（语音起始）的时间戳（秒）。
+
+    用 ffmpeg silencedetect 找从 0 开始的 LEADING 静音段；返回其 silence_end
+    （= 语音开始）。没有开头静音 → None。
+    """
+    result = subprocess.run(
+        ["ffmpeg", "-i", video_path,
+         "-af", f"silencedetect=noise={silence_threshold_db}dB:d={min_silence_duration}",
+         "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    output = result.stderr
+    starts = [float(m.group(1)) for m in re.finditer(r"silence_start:\s*(-?[\d.]+)", output)]
+    ends = [float(m.group(1)) for m in re.finditer(r"silence_end:\s*([\d.]+)", output)]
+    # leading 静音：第一个 silence_start 在 ~0 处，取其配对的 silence_end
+    if starts and ends and starts[0] <= 0.05 and ends[0] > starts[0]:
+        return ends[0]
+    return None
+
+
 def speech_end_info(video_path: str, fps: float) -> tuple[float | None, int | None]:
     """(尾部静音起点秒, 对应帧号);无尾部静音返回 (None, None)。
 
@@ -332,21 +357,32 @@ def suggest_silence_trim(
     }
 
 
-def extract_waveform_peaks(video_path: str, buckets: int = 200) -> list[float]:
+def extract_waveform_peaks(
+    video_path: str, buckets: int = 200, max_seconds: float | None = None
+) -> list[float]:
     """Extract audio waveform peaks via ffmpeg PCM decode.
 
     Decodes audio to mono 8 kHz s16le PCM, splits into `buckets` equal
     time-bins, and returns the normalised peak (max abs / 32768) for each.
     Returns [] when the video has no audio track or ffmpeg fails.
+
+    When `max_seconds` is given, only the first `max_seconds` of audio are
+    decoded, so buckets span exactly [0, max_seconds] instead of the full
+    (possibly longer) audio stream. Callers should pass the VIDEO-stream
+    duration here — some shot files have an audio tail longer than the
+    video (stale generation artifacts), and without this the buckets get
+    stretched across the audio length, shifting every waveform feature left
+    relative to the video's frame timeline.
     """
     import subprocess
     import array
 
-    proc = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", video_path,
-         "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
-        capture_output=True,
-    )
+    cmd = ["ffmpeg", "-v", "error", "-i", video_path]
+    if max_seconds is not None:
+        cmd += ["-t", str(max_seconds)]
+    cmd += ["-ac", "1", "-ar", "8000", "-f", "s16le", "-"]
+
+    proc = subprocess.run(cmd, capture_output=True)
     raw = proc.stdout
     if not raw:
         return []

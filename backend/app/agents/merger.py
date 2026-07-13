@@ -47,7 +47,7 @@ def merge_shots_with_crossfade(
 
     if len(valid_paths) == 1:
         from ffmpeg import FFmpeg as _FF
-        (_FF().option("y").input(valid_paths[0]).output(output_path, c="copy")).execute()
+        (_FF().option("y").input(valid_paths[0]).output(output_path, c="copy", movflags="+faststart")).execute()
         logger.info("Copied single shot to %s", output_path)
         return
 
@@ -120,6 +120,9 @@ def merge_shots_with_crossfade(
         # browsers / HTML5 <video> and most hardware decoders cannot decode.
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
+        # moov atom at the front → browsers can start playback before the full
+        # file downloads (non-faststart mp4 stalls / won't start streaming).
+        "-movflags", "+faststart",
         output_path,
     ]
 
@@ -160,7 +163,7 @@ def merge_shots(shot_paths: list[str], output_path: str) -> None:
             FFmpeg()
             .option("y")
             .input(valid_paths[0])
-            .output(output_path, c="copy")
+            .output(output_path, c="copy", movflags="+faststart")
         ).execute()
         logger.info(f"Copied single shot to {output_path}")
         return
@@ -179,7 +182,7 @@ def merge_shots(shot_paths: list[str], output_path: str) -> None:
             FFmpeg()
             .option("y")
             .input(str(filelist_path), f="concat", safe=0)
-            .output(output_path, c="copy")
+            .output(output_path, c="copy", movflags="+faststart")
         ).execute()
         logger.info(f"Merged {len(valid_paths)} shots to {output_path}")
     finally:
@@ -236,6 +239,7 @@ def merge_shots_with_reencoding(
                 crf=crf,
                 pix_fmt="yuv420p",
                 acodec="aac",
+                movflags="+faststart",
             )
         ).execute()
         logger.info(f"Merged {len(valid_paths)} shots with re-encoding to {output_path}")

@@ -27,8 +27,10 @@ treat them as authoring rules, not suggestions.
 ## 2. Motion (`motion_prompt` / 动作)
 
 - Write the motion prompt in **ENGLISH**, even when the dialogue is another language.
-- Describe **camera movement + talking-head physiological cues** (gaze, gestures,
-  blinking, lip movement); preserve visual fidelity to the reference / first frame.
+- Describe **camera framing + character motion** (gaze, gestures, head/torso
+  movement). Do NOT add breathing / blinking / "lips in sync" / "matching the
+  reference image exactly" boilerplate — the quoted dialogue already drives
+  lip-sync, and repeated fidelity boilerplate causes instruction drift.
 - **Dialogue placement:** weave the dialogue INTO the action beats — each sentence
   inlined at its moment (e.g. `saying "..." as she flips the card`). This is the only
   way to align speech with actions; a bare trailing dialogue line has no timing
@@ -59,7 +61,7 @@ treat them as authoring rules, not suggestions.
   line's start with transition words ("and there it is.") to push key words later.
 - **Keep prompts SIMPLE.** Long fidelity boilerplate + many-step sequences cause
   instruction drift (steps get skipped or merged). State the camera, the beats
-  with inlined dialogue, and lip-sync — nothing else.
+  with inlined dialogue — nothing else.
 - **Complex action sequence and target last frame: pick ONE.** Frame
   interpolation rushes to the pinned end frame and compresses/skips intermediate
   steps. With a tail frame, keep the action to 1–2 steps; move extra steps to a

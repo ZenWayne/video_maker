@@ -362,6 +362,17 @@ async def run_shot_pipeline(
             # (None = multi-image reference mode.)
             first_frame = await pick_first_frame(project_id, shot, session)
 
+            # 自愈悬空的自动传播首帧指针：指向的文件已被清理（如上一镜裁剪时删除旧末帧）
+            # 时，把指针改到本次实际解析出的首帧；用户上传/提取的 custom_frames/ 覆盖永不改动。
+            stale_auto_ptr = (
+                shot.custom_first_frame_path
+                and "custom_frames" not in shot.custom_first_frame_path
+                and not Path(shot.custom_first_frame_path).exists()
+            )
+            if stale_auto_ptr:
+                shot.custom_first_frame_path = str(first_frame) if first_frame else None
+                session.add(shot)
+
             # Resolve reference image paths for multi-image mode
             ref_paths: Optional[list[str]] = None
             if first_frame is None and shot.custom_reference_paths:

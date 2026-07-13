@@ -8,6 +8,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { api } from '@/lib/api'
+import { PreviewableImage } from '@/components/ImagePreview'
 import type { ImageCandidate, ProjectDetail, Shot } from '@/lib/types'
 
 interface Props {
@@ -166,7 +167,7 @@ export function GenerateImageDialog({ project, shot, slot: initialSlot, open, on
             ))}
             {tempFiles.map((file, i) => (
               <div key={`${file.name}-${i}`} className="relative h-[72px] w-[72px] overflow-hidden rounded-md border-2 border-blue-600">
-                <img src={tempPreviewUrls[i]} alt="临时参考图" className="h-full w-full object-cover" />
+                <PreviewableImage src={tempPreviewUrls[i]} alt="临时参考图" className="h-full w-full object-cover" />
                 <button
                   type="button"
                   aria-label="移除临时参考图"
@@ -227,7 +228,7 @@ export function GenerateImageDialog({ project, shot, slot: initialSlot, open, on
                   <div className={`relative h-40 w-24 overflow-hidden rounded-md border-2 ${
                     c.adopted_at ? 'border-blue-600' : 'border-zinc-300'
                   }`}>
-                    <img src={c.file_path ?? ''} alt="候选图" className="h-full w-full object-cover" />
+                    <PreviewableImage src={c.file_path ?? ''} alt="候选图" className="h-full w-full object-cover" />
                     {c.adopted_at && (
                       <span className="absolute left-1 top-1 flex items-center gap-0.5 rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
                         <Check className="h-2.5 w-2.5" /> 已采纳

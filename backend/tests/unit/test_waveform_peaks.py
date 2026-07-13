@@ -130,3 +130,47 @@ def test_sine_then_silence_trailing_buckets_near_zero(tmp_path):
 def test_bad_path_returns_empty():
     """坏路径 → ffmpeg 非零退出、无 stdout → 降级为 [](不抛异常)。"""
     assert extract_waveform_peaks("/nonexistent/does-not-exist.mp4") == []
+
+
+def _make_video_short_audio_long(path: Path, video_secs: float = 2.0, audio_total: float = 4.0) -> None:
+    """视频 video_secs 秒；音频前 video_secs 秒有声，之后补静音到 audio_total 秒。
+
+    刻意不传 -shortest：容器/音频时长会比视频长（复现老生成产物：音频尾巴超出视频）。
+    """
+    (
+        FFmpeg()
+        .option("y")
+        .input(f"color=blue:size=64x64:rate=24:duration={video_secs}", f="lavfi")
+        .input(f"sine=frequency=440:duration={video_secs}", f="lavfi")
+        .output(
+            str(path),
+            af=f"apad=whole_dur={audio_total}",
+            pix_fmt="yuv420p",
+            vcodec="libx264",
+            acodec="aac",
+        )
+    ).execute()
+
+
+def test_max_seconds_truncates_buckets_to_video_duration(tmp_path):
+    """视频 2s / 音频 4s（后 2s 静音尾巴）。传入 max_seconds=视频时长后，
+    桶应只覆盖有声的前 2 秒，几乎全部有声——而不是被拉伸横跨整条 4s 音频。
+    """
+    video = tmp_path / "short_video_long_audio.mp4"
+    _make_video_short_audio_long(video, video_secs=2.0, audio_total=4.0)
+    peaks = extract_waveform_peaks(str(video), max_seconds=2.0)
+    assert len(peaks) == 200
+    quiet = sum(1 for v in peaks if v < 0.05)
+    assert quiet < len(peaks) * 0.1, f"Expected mostly loud buckets, got {quiet} quiet/{len(peaks)}"
+
+
+def test_without_max_seconds_old_behavior_has_silent_tail(tmp_path):
+    """记录导致 bug 的旧行为：不传 max_seconds 时，200 桶被均分到整条 4s 音频
+    （包含 2s 静音尾巴），尾部桶（对应超出视频范围的静音）应大量 < 0.05。
+    """
+    video = tmp_path / "short_video_long_audio_old.mp4"
+    _make_video_short_audio_long(video, video_secs=2.0, audio_total=4.0)
+    peaks = extract_waveform_peaks(str(video))
+    assert len(peaks) == 200
+    tail_quiet = sum(1 for v in peaks[120:] if v < 0.05)
+    assert tail_quiet > 60, f"Expected mostly silent tail (old behavior), got {tail_quiet}/80"

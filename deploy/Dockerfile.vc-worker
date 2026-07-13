@@ -14,11 +14,13 @@ RUN uv pip install --system \
     --index-url https://mirrors.nju.edu.cn/pytorch/whl/cpu \
     torch torchaudio
 
-# Install vc2 package (onnxruntime + fastapi etc.) from NJU PyPI mirror
+# Install vc2 package (onnxruntime + fastapi etc.) from NJU PyPI mirror.
+# soundfile: torchaudio >= 2.8 routes load/save through torchcodec (not installed);
+# cosyvoice_client patches torchaudio I/O onto soundfile (libsndfile1 already present).
 COPY CosyVoice/vc2_pkg /vc2_pkg
 RUN uv pip install --system \
     --index-url https://mirrors.nju.edu.cn/pypi/web/simple/ \
-    /vc2_pkg
+    /vc2_pkg soundfile
 
 # Bake exported ONNX models (~2.6 GB)
 COPY CosyVoice/exported_vc2 /workspace/exported_vc2
