@@ -264,9 +264,6 @@ class Settings(BaseSettings):
         "- Photorealistic, 8K detail"
     )
 
-    # Merge / export settings
-    crossfade_duration: float = 0.1  # seconds; 0 = hard cut (no crossfade)
-
     # CORS (from config.yml / config.env)
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 

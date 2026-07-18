@@ -9,6 +9,8 @@ import pytest
 from app.agents.effective_clip import build_effective_clip
 from app.agents.frame_porter import extract_frame_at
 from app.agents.video_trimmer import get_video_info
+from app.agents.merger import CANONICAL_CHANNELS, CANONICAL_SAMPLE_RATE
+from tests.ffprobe_helpers import audio_params, make_vc_wav
 
 
 def _md5(p: Path) -> str:
@@ -198,3 +200,44 @@ def test_trim_cuts_audio_to_video_duration(tmp_path):
     # video ≈ 60/30 = 2.0s; audio must be cut to ~the same, not the full ~4.0s
     assert abs(adur - vdur) < 0.2, f"audio {adur}s not aligned to video {vdur}s"
     assert adur < 2.6, f"audio not cut — {adur}s (full source was ~4s)"
+
+
+@pytest.fixture
+def lossy_src(tmp_path):
+    """A Veo-shaped source: h264 + aac."""
+    out = tmp_path / "output.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=440",
+            "-frames:v", "60",
+            "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac",
+            "-shortest", str(out),
+        ],
+        check=True, capture_output=True,
+    )
+    return out
+
+
+def test_vc_clip_is_normalized_to_canonical_audio(lossy_src, tmp_path):
+    """A VC clip must be baked at the canonical format, not at whatever
+    rate/layout the CosyVoice wav happens to carry — a 24 kHz mono clip
+    cannot be concatenated with a 48 kHz stereo one."""
+    wav = tmp_path / "audio_vc.wav"
+    out = tmp_path / "eff.mp4"
+    make_vc_wav(str(wav), seconds=3.0)
+
+    build_effective_clip(str(lossy_src), trim_frames=None,
+                         vc_audio_path=str(wav), out_path=str(out))
+
+    assert audio_params(out) == (CANONICAL_SAMPLE_RATE, CANONICAL_CHANNELS)
+
+
+def test_trimmed_clip_is_normalized_to_canonical_audio(lossy_src, tmp_path):
+    out = tmp_path / "eff.mp4"
+
+    build_effective_clip(str(lossy_src), trim_frames=30, vc_audio_path=None,
+                         out_path=str(out))
+
+    assert audio_params(out) == (CANONICAL_SAMPLE_RATE, CANONICAL_CHANNELS)

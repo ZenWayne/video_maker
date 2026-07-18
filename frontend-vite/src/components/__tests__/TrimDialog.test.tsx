@@ -17,6 +17,7 @@ vi.mock('@/lib/api', () => ({
       source_video_url: '/api/media/projects/p/shots/shot_1/output_1_a.mp4',
     }),
     getWaveform: vi.fn().mockResolvedValue({ peaks: [0.2, 0.6, 0.4, 0.8, 0.3] }),
+    getFilmstrip: vi.fn().mockResolvedValue({ url: '/strip.png', count: 12, cell_aspect: 16 / 9 }),
     trimShot: vi.fn(),
     detectSpeechStart: vi.fn(),
     setAudioHeadMute: vi.fn().mockResolvedValue({
@@ -94,10 +95,15 @@ beforeEach(() => {
     Object.defineProperty(this, 'paused', { value: true, writable: true, configurable: true })
   })
 
-  // canvas 2d context stub (WaveformTrack draws to canvas)
+  // canvas 2d context stub (AudioWaveformTrack draws to canvas)
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
     clearRect: vi.fn(), fillRect: vi.fn(), fillStyle: '',
   } as unknown as CanvasRenderingContext2D)
+
+  // 容器测宽 240px，从 x=0 开始 —— totalFrames 恒为 240（见 getVideoInfo mock），故 clientX 与帧号一一对应
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    left: 0, width: 240, right: 240, top: 0, bottom: 0, height: 0, x: 0, y: 0, toJSON: () => ({}),
+  } as DOMRect)
 })
 
 afterEach(() => {
@@ -107,6 +113,11 @@ afterEach(() => {
 
 function getVideo(): HTMLVideoElement {
   return document.querySelector('video')!
+}
+
+/** 拖裁剪线到指定帧 —— 容器测宽 240px、totalFrames 恒为 240，故 clientX 与帧号一一对应 */
+function trimTo(frame: number) {
+  fireEvent.pointerDown(screen.getByTestId('cut-line'), { clientX: frame })
 }
 
 /** Render dialog and wait for video info to load */
@@ -155,7 +166,7 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     const video = getVideo()
 
     // Trim to frame 120 → endTime = 120/24 = 5.0s
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '120' } })
+    trimTo(120)
 
     fireEvent.click(screen.getByText('预览').closest('button')!)
 
@@ -168,7 +179,7 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     const video = getVideo()
 
     // Trim to frame 120 → endTime = 5.0s
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '120' } })
+    trimTo(120)
     fireEvent.click(screen.getByText('预览').closest('button')!)
 
     // Simulate playback: currentTime hasn't reached boundary yet
@@ -200,7 +211,7 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     const video = getVideo()
 
     // Trim to frame 72 → endTime = 3.0s
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '72' } })
+    trimTo(72)
     fireEvent.click(screen.getByText('预览').closest('button')!)
 
     Object.defineProperty(video, 'currentTime', {
@@ -217,11 +228,10 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     await renderReady()
     const video = getVideo()
 
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '120' } })
+    trimTo(120)
     fireEvent.click(screen.getByText('预览').closest('button')!)
 
-    // Controls should be locked during preview
-    expect(screen.getByRole('slider')).toBeDisabled()
+    // Controls should be locked during preview (step buttons; DualTrackTimeline has no disabled concept)
     expect(screen.getByText('-1').closest('button')).toBeDisabled()
 
     // Click stop
@@ -232,7 +242,6 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     await waitFor(() => {
       expect(screen.getByText('预览')).toBeInTheDocument()
     })
-    expect(screen.getByRole('slider')).not.toBeDisabled()
     expect(screen.getByText('-1').closest('button')).not.toBeDisabled()
   })
 
@@ -241,7 +250,7 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     const video = getVideo()
 
     // 裁剪到 120 帧 → endSec = 5.0s
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '120' } })
+    trimTo(120)
 
     // 开始预览(从头 → 归零)
     fireEvent.click(screen.getByText('预览').closest('button')!)
@@ -269,7 +278,7 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     const video = getVideo()
 
     // Trim slider to frame 120
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '120' } })
+    trimTo(120)
 
     // Preview the trim
     fireEvent.click(screen.getByText('预览').closest('button')!)
@@ -321,11 +330,11 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
 
     // Move slider to trim → button stays enabled
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '200' } })
+    trimTo(200)
     expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
 
     // Move back to max (full length) → button still enabled
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '240' } })
+    trimTo(240)
     expect(screen.getByText('确认裁剪').closest('button')).not.toBeDisabled()
   })
 
@@ -352,7 +361,7 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
         onTrimmed={() => {}}
       />,
     )
-    expect(await screen.findByText('声纹波形')).toBeInTheDocument()
+    expect(await screen.findByTestId('audio-track')).toBeTruthy()
     // 确认波形数据确实经 api.getWaveform 拉取(而非仅渲染 loading 标签)
     await waitFor(() =>
       expect(api.getWaveform).toHaveBeenCalledWith('proj-1', 1),
@@ -375,8 +384,9 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     renderDialog({ ...mockShot, trim_frames: 200 })
     expect(await screen.findByText(/帧:\s*200\s*\/\s*240/)).toBeInTheDocument()
     expect(screen.getByText('裁掉 40 帧')).toBeInTheDocument()
-    const slider = document.querySelector('input[type="range"]') as HTMLInputElement
-    expect(slider.max).toBe('240')
+    // 时间轴仍展示全段(而非只展示到 trim_frames 为止):裁剪线停在 200/240 处，而非轨道末端
+    const cutLine = screen.getByTestId('cut-line')
+    expect(parseFloat(cutLine.style.left)).toBeCloseTo((200 / 240) * 100, 1)
   })
 
   it('点击"检测开头静音"命中前段静音后帧信息显示"前段静音"', async () => {
@@ -613,5 +623,35 @@ describe('TrimDialog — preview trimmed result before confirming', () => {
     })
     expect(api.trimShot).not.toHaveBeenCalled()
     expect(api.setAudioHeadMute).not.toHaveBeenCalled()
+  })
+
+  it('渲染双轨（视频轨 + 音频轨），不再有旧冗余裁剪 slider', async () => {
+    renderReady()
+    expect(await screen.findByTestId('video-track')).toBeTruthy()
+    expect(screen.getByTestId('audio-track')).toBeTruthy()
+    expect(screen.getByTestId('cut-line')).toBeTruthy()
+    // 旧的 range slider 不再存在
+    expect(document.querySelector('input[type="range"]')).toBeNull()
+  })
+
+  it('hover 视频轨把预览 video seek 到该帧', async () => {
+    await renderReady()
+    const vt = await screen.findByTestId('video-track')
+    const video = document.querySelector('video') as HTMLVideoElement
+    // fps=24；hover 到 60 帧应 seek 到 2.5s（容器测宽 240px，见 beforeEach 桩）
+    fireEvent.pointerMove(vt, { clientX: 60 })
+    expect(video.currentTime).toBeCloseTo(60 / 24, 1)
+  })
+
+  it('渲染视频/音频轨道标签、图例和 hover 提示（消解"裁视频还是动音频"的歧义）', async () => {
+    await renderReady()
+    // 轨道左侧标签
+    expect(screen.getByTestId('track-label-video')).toHaveTextContent('视频')
+    expect(screen.getByTestId('track-label-audio')).toHaveTextContent('音频')
+    // 图例（至少覆盖裁剪线 + 开头静音手柄两项，颜色由 CSS token 解码）
+    expect(screen.getByText(/裁剪\(视频\+音频一起裁\)/)).toBeInTheDocument()
+    expect(screen.getByText(/开头静音手柄/)).toBeInTheDocument()
+    // 视频预览器旁的 hover 提示
+    expect(screen.getByText('指针在视频轨上移动 → 预览器跳到该帧')).toBeInTheDocument()
   })
 })

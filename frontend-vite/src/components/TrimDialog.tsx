@@ -9,7 +9,7 @@ import {
 } from '@/components/ui/dialog'
 import { api } from '@/lib/api'
 import type { AspectRatio, Shot } from '@/lib/types'
-import WaveformTrack from '@/components/WaveformTrack'
+import { DualTrackTimeline } from './trim/DualTrackTimeline'
 
 interface TrimDialogProps {
   shot: Shot
@@ -53,6 +53,7 @@ export function TrimDialog({
   const [isDetectingSpeechStart, setIsDetectingSpeechStart] = useState(false)
   const [headMuteFrame, setHeadMuteFrame] = useState(0)
   const [peaks, setPeaks] = useState<number[] | null>(null)
+  const [spriteUrl, setSpriteUrl] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
   const [isPreviewing, setIsPreviewing] = useState(false)
   const [playheadFrame, setPlayheadFrame] = useState<number | null>(null)
@@ -159,6 +160,7 @@ export function TrimDialog({
       setIsLoading(false)
     })
     api.getWaveform(projectId, shot.shot_id).then((r) => setPeaks(r.peaks)).catch(() => setPeaks([]))
+    api.getFilmstrip(projectId, shot.shot_id).then((r) => setSpriteUrl(r.url)).catch(() => setSpriteUrl(null))
   }, [open, projectId, shot.shot_id])
 
   const seekToFrame = (frame: number) => {
@@ -313,7 +315,6 @@ export function TrimDialog({
   }
 
   const currentTime = fps > 0 ? (endFrame / fps).toFixed(2) : '0'
-  const trimmedPercent = totalFrames > 0 ? (endFrame / totalFrames) * 100 : 100
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -340,41 +341,57 @@ export function TrimDialog({
               />
             </div>
 
-            {/* Waveform track — 与下方滑块共享时间轴 */}
+            {/* Hover hint — 常驻提示,解释视频轨 hover 的擦洗预览行为 */}
+            <p className="shrink-0 text-[11px] text-zinc-400">
+              指针在视频轨上移动 → 预览器跳到该帧
+            </p>
+
+            {/* Dual-track timeline — 视频胶片轨 + 音频波形轨,共享同一裁剪线 */}
             <div className="shrink-0">
-              <WaveformTrack
+              <DualTrackTimeline
+                spriteUrl={spriteUrl}
                 peaks={peaks}
                 totalFrames={totalFrames}
                 endFrame={endFrame}
+                headMuteFrame={headMuteFrame}
                 speechEndFrame={speechEndFrame}
                 playheadFrame={playheadFrame}
-                headMuteFrame={headMuteFrame}
-                onScrub={handleSliderChange}
-                onHeadMuteScrub={(f) => setHeadMuteFrame(Math.max(0, Math.min(f, totalFrames)))}
+                onTrimChange={handleSliderChange}
+                onHeadMuteChange={(f) => setHeadMuteFrame(Math.max(0, Math.min(f, totalFrames)))}
+                onHoverFrame={(f) => { if (f != null && !isPreviewing) seekToFrame(f) }}
               />
             </div>
 
-            {/* Slider with trim indicator */}
-            <div className="shrink-0 space-y-1">
-              <div className="relative h-3 bg-zinc-200 rounded-full overflow-hidden">
-                <div
-                  className="absolute inset-y-0 left-0 bg-blue-500 rounded-full"
-                  style={{ width: `${trimmedPercent}%` }}
-                />
-                <div
-                  className="absolute inset-y-0 bg-zinc-300 rounded-r-full"
-                  style={{ left: `${trimmedPercent}%`, right: 0 }}
-                />
+            {/* Legend — 解码双轨的每种颜色/线条,消解"在裁视频还是动音频"的歧义 */}
+            <div className="shrink-0 flex flex-col gap-0.5 text-[11px] text-zinc-500">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-3 h-3 rounded-sm" style={{ background: '#3B82F6' }} />
+                  人声
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-3 h-3 rounded-sm bg-zinc-300" />
+                  静音/已裁剪
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-0.5 h-3" style={{ background: '#EF4444' }} />
+                  裁剪(视频+音频一起裁)
+                </span>
               </div>
-              <input
-                type="range"
-                min={minFrames}
-                max={totalFrames}
-                value={endFrame}
-                onChange={(e) => handleSliderChange(Number(e.target.value))}
-                disabled={isPreviewing}
-                className="w-full"
-              />
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-0.5 h-3" style={{ background: '#2563EB' }} />
+                  开头静音手柄(只静音音频,不裁帧)
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-0.5 h-3" style={{ background: '#F59E0B' }} />
+                  说话结束
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-0.5 h-3" style={{ background: '#15803D' }} />
+                  播放头(预览时)
+                </span>
+              </div>
             </div>
 
             {/* Frame info */}

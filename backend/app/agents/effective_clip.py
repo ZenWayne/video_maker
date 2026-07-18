@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ffmpeg import FFmpeg
 
+from app.agents.merger import CANONICAL_CHANNELS, CANONICAL_SAMPLE_RATE
 from app.services.storage import shot_source_path, ts_uuid_name
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ def build_effective_clip(
     - audio_head_mute_frames: mute the first N/fps seconds of audio (orthogonal to
       trim/vc — composes with either) via a volume filter; the timeline is
       untouched (A/V stays in sync).
+    - Re-encoded output is always CANONICAL_SAMPLE_RATE / CANONICAL_CHANNELS audio.
     - No edits → straight copy of the source bytes.
     """
     if not trim_frames and not vc_audio_path and not audio_head_mute_frames:
@@ -50,7 +52,14 @@ def build_effective_clip(
         ff = ff.input(vc_audio_path)
         audio_map = "1:a"
 
-    opts: dict = {"map": ["0:v", audio_map], "vcodec": vcodec, "acodec": acodec}
+    opts: dict = {
+        "map": ["0:v", audio_map],
+        "vcodec": vcodec,
+        "acodec": acodec,
+        # Without this a VC clip inherits the CosyVoice wav's 24 kHz mono layout.
+        "ar": CANONICAL_SAMPLE_RATE,
+        "ac": CANONICAL_CHANNELS,
+    }
     if vcodec == "libx264":
         opts["preset"] = "fast"
         opts["crf"] = crf

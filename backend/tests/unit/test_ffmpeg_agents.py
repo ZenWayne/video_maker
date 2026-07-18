@@ -11,6 +11,7 @@ import pytest
 from pathlib import Path
 
 from ffmpeg import FFmpeg
+from tests.ffprobe_helpers import decode_errors, stream_duration
 
 # ---------------------------------------------------------------------------
 # Skip guard
@@ -58,6 +59,20 @@ def _pix_fmt(path: Path) -> str:
         capture_output=True, text=True, check=True,
     )
     return out.stdout.strip()
+
+
+def _make_clip_with_audio_format(path: Path, *, duration: int, rate: int, channels: int) -> None:
+    """A clip whose audio is deliberately at a given rate/layout."""
+    subprocess.run(
+        ["ffmpeg", "-y",
+         "-f", "lavfi", "-i", f"testsrc2=size=64x64:rate=25:duration={duration}",
+         "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate={rate}",
+         "-t", str(duration),
+         "-c:v", "libx264", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-ar", str(rate), "-ac", str(channels),
+         "-shortest", str(path)],
+        check=True, capture_output=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +171,8 @@ class TestMergeShots:
         v1 = tmp_path / "shot1.mp4"
         v2 = tmp_path / "shot2.mp4"
         output = tmp_path / "merged.mp4"
-        _make_test_video(v1)
-        _make_test_video(v2)
+        _make_test_video_with_audio(v1)
+        _make_test_video_with_audio(v2)
 
         merge_shots([str(v1), str(v2)], str(output))
 
@@ -171,8 +186,8 @@ class TestMergeShots:
         v1 = tmp_path / "shot1.mp4"
         v2 = tmp_path / "shot2.mp4"
         output = tmp_path / "merged.mp4"
-        _make_test_video(v1)
-        _make_test_video(v2)
+        _make_test_video_with_audio(v1)
+        _make_test_video_with_audio(v2)
 
         merge_shots([str(v1), str(v2)], str(output))
 
@@ -213,54 +228,9 @@ class TestMergeShots:
         with pytest.raises(ValueError, match="No valid shot paths provided"):
             merge_shots([None, ""], str(tmp_path / "out.mp4"))
 
-
-class TestMergeShotsWithReencoding:
-    def test_single_shot(self, tmp_path):
-        from app.agents.merger import merge_shots_with_reencoding
-
-        video = tmp_path / "shot1.mp4"
-        output = tmp_path / "merged.mp4"
-        _make_test_video(video)
-
-        merge_shots_with_reencoding([str(video)], str(output))
-
-        assert output.exists()
-        assert output.stat().st_size > 0
-
-    def test_multiple_shots(self, tmp_path):
-        from app.agents.merger import merge_shots_with_reencoding
-
-        v1 = tmp_path / "shot1.mp4"
-        v2 = tmp_path / "shot2.mp4"
-        output = tmp_path / "merged.mp4"
-        _make_test_video(v1)
-        _make_test_video(v2)
-
-        merge_shots_with_reencoding([str(v1), str(v2)], str(output))
-
-        assert output.exists()
-        assert output.stat().st_size > 0
-
-    def test_custom_codec_options(self, tmp_path):
-        from app.agents.merger import merge_shots_with_reencoding
-
-        video = tmp_path / "shot1.mp4"
-        output = tmp_path / "merged.mp4"
-        _make_test_video(video)
-
-        merge_shots_with_reencoding([str(video)], str(output), codec="libx264", preset="fast", crf=28)
-
-        assert output.exists()
-
-    def test_raises_on_empty_list(self, tmp_path):
-        from app.agents.merger import merge_shots_with_reencoding
-
-        with pytest.raises(ValueError, match="No shot paths provided"):
-            merge_shots_with_reencoding([], str(tmp_path / "out.mp4"))
-
-    def test_reencoded_output_is_yuv420p(self, tmp_path):
-        """Re-encoded concat must stay yuv420p (browser/hardware decodable)."""
-        from app.agents.merger import merge_shots_with_reencoding
+    def test_merged_output_is_yuv420p(self, tmp_path):
+        """Browsers cannot decode High 4:4:4 Predictive."""
+        from app.agents.merger import merge_shots
 
         v1 = tmp_path / "shot1.mp4"
         v2 = tmp_path / "shot2.mp4"
@@ -268,24 +238,76 @@ class TestMergeShotsWithReencoding:
         _make_test_video_with_audio(v1)
         _make_test_video_with_audio(v2)
 
-        merge_shots_with_reencoding([str(v1), str(v2)], str(output))
+        merge_shots([str(v1), str(v2)], str(output))
 
         assert _pix_fmt(output) == "yuv420p"
 
+    def test_mismatched_audio_formats_stay_in_sync(self, tmp_path):
+        """THE regression: a 48 kHz stereo clip + a 24 kHz mono clip (what a
+        voice-cloned shot bakes to) must concat into a playable video whose
+        audio spans the whole timeline.  The concat demuxer + -c copy wrote one
+        decoder config for both segments, so segment 2's audio decoded as
+        garbage and the <video> element's audio clock stalled -- freezing the
+        picture on segment 1's last frame."""
+        from app.agents.merger import merge_shots
 
-class TestMergeShotsWithCrossfade:
-    def test_crossfade_output_is_yuv420p(self, tmp_path):
-        """xfade negotiates yuv444p internally; the encoded output must be
-        forced back to yuv420p or browsers cannot decode the merged video."""
-        from app.agents.merger import merge_shots_with_crossfade
+        v1 = tmp_path / "stereo48k.mp4"
+        v2 = tmp_path / "mono24k.mp4"
+        output = tmp_path / "merged.mp4"
+        _make_clip_with_audio_format(v1, duration=2, rate=48000, channels=2)
+        _make_clip_with_audio_format(v2, duration=2, rate=24000, channels=1)
+
+        merge_shots([str(v1), str(v2)], str(output))
+
+        assert decode_errors(output) == 0
+        v_dur = stream_duration(output, "v")
+        a_dur = stream_duration(output, "a")
+        assert v_dur == pytest.approx(4.0, abs=0.15), f"video {v_dur}"
+        assert a_dur == pytest.approx(v_dur, abs=0.15), (
+            f"audio {a_dur} does not span the video {v_dur}"
+        )
+
+    def test_segment_audio_bounded_to_its_video_no_overhang(self, tmp_path):
+        """A passthrough source whose audio runs LONGER than its video (a Veo
+        generation artifact) must not leak the extra audio past the picture.
+        The concat filter concatenates each segment's audio and video streams
+        independently, so an unbounded overhang makes the merged audio outlast
+        the video — and across 3+ shots the drift makes an earlier shot's audio
+        bleed over a later shot's video.  Each segment's audio must be bounded
+        to its own video duration before concat."""
+        from app.agents.merger import merge_shots
+
+        a_gt_v = tmp_path / "audio_longer.mp4"   # video 1.0s, audio 2.0s
+        normal = tmp_path / "normal.mp4"         # video 1.0s, audio 1.0s
+        output = tmp_path / "merged.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y",
+             "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=1",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+             str(a_gt_v)],
+            check=True, capture_output=True,
+        )
+        _make_test_video_with_audio(normal, duration=1)
+
+        merge_shots([str(a_gt_v), str(normal)], str(output))
+
+        v = stream_duration(output, "v")
+        a = stream_duration(output, "a")
+        # video: 1.0 + 1.0 = 2.0s.  Unbounded audio would be 2.0 + 1.0 = 3.0s.
+        assert v == pytest.approx(2.0, abs=0.2), f"video {v}"
+        assert a == pytest.approx(v, abs=0.2), f"audio {a} overhangs video {v}"
+
+    def test_raises_when_input_has_no_audio(self, tmp_path):
+        """The concat filter's a=1 needs an audio stream on every input;
+        fail with a clear message rather than a cryptic filtergraph error."""
+        from app.agents.merger import merge_shots
 
         v1 = tmp_path / "shot1.mp4"
-        v2 = tmp_path / "shot2.mp4"
+        v2 = tmp_path / "silent.mp4"
         output = tmp_path / "merged.mp4"
-        _make_test_video_with_audio(v1, duration=2)
-        _make_test_video_with_audio(v2, duration=2)
+        _make_test_video_with_audio(v1)
+        _make_test_video(v2)   # no audio track
 
-        merge_shots_with_crossfade([str(v1), str(v2)], str(output), crossfade_duration=0.3)
-
-        assert output.exists()
-        assert _pix_fmt(output) == "yuv420p"
+        with pytest.raises(ValueError, match="no audio stream"):
+            merge_shots([str(v1), str(v2)], str(output))

@@ -1,5 +1,6 @@
 """Pipeline API routes for video generation workflow."""
 
+import hashlib
 import json
 import logging
 import shutil
@@ -22,7 +23,7 @@ from app.models.project import Project, Shot, ReferenceImage
 from app.models.schemas import (
     ProjectResponse, StoryboardUpdate, StoryboardReplace, ShotUpdate, ShotAiEditRequest,
     ShotTrimRequest, RegenerateShotsRequest, PipelineActionResponse,
-    ExportRequest, JoinPreviewRequest,
+    JoinPreviewRequest,
 )
 from app.services.first_frame import pick_first_frame
 from app.services.state_machine import (
@@ -711,7 +712,6 @@ async def rewrite_motion_prompt(
 @router.post("/projects/{project_id}/export", status_code=202)
 async def export_project(
     project_id: str,
-    body: ExportRequest = ExportRequest(),
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
@@ -740,7 +740,7 @@ async def export_project(
 
     # Enqueue merger task
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_merger", project_id, f"user:{user}", body.crossfade_duration)
+    await arq.enqueue_job("run_merger", project_id, f"user:{user}")
 
     return {"status": "queued", "message": "Export queued"}
 
@@ -1547,6 +1547,65 @@ async def get_shot_waveform(
     except Exception:
         peaks = []
     return {"peaks": peaks}
+
+
+@router.get("/projects/{project_id}/shots/{shot_id}/filmstrip")
+async def get_shot_filmstrip(
+    project_id: str,
+    shot_id: int,
+    count: int = 12,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return a horizontal thumbnail sprite URL for the shot's source video.
+
+    Filename is deterministic (hash of the resolved source path + requested
+    count), so re-opening the trim dialog on the same source reuses the
+    cached sprite and skips the ffmpeg tile pass entirely — otherwise every
+    dialog-open would run ffmpeg again and leave a fresh PNG behind (accumulating
+    one orphan per open, forever). Any other stale filmstrip_*.png in the shot
+    dir (e.g. left over from before a re-trim/VC changed the source) is cleaned
+    up on each call, mirroring join_preview's glob+unlink cleanup pattern.
+    """
+    from app.agents.video_trimmer import extract_filmstrip_sprite, get_video_info
+    from app.services.storage import shot_dir
+
+    await _get_project_or_404(project_id, session)
+    result = await session.execute(
+        select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+    )
+    shot = result.scalar_one_or_none()
+    if not shot or not shot.video_path:
+        raise HTTPException(status_code=404, detail="Shot or video not found")
+    source = _dialog_source(project_id, shot_id, shot.video_path)
+    n = max(4, min(count, 24))
+
+    digest = hashlib.md5(str(Path(source).resolve()).encode()).hexdigest()[:12]
+    d = shot_dir(project_id, shot_id)
+    fname = f"filmstrip_{digest}_{n}.png"
+    out = d / fname
+
+    # Clean up sprites for a DIFFERENT source/count so a re-trim/VC that
+    # changes the underlying video doesn't leave orphaned PNGs behind.
+    if d.is_dir():
+        for stale in d.glob("filmstrip_*.png"):
+            if stale.name != fname:
+                stale.unlink(missing_ok=True)
+
+    if out.exists():
+        # Cache hit: same source already sprited — skip the ffmpeg tile pass.
+        # A cheap ffprobe (not the expensive tile ffmpeg call) recomputes the
+        # actual cell count in case the source is shorter than `count` frames.
+        try:
+            info = get_video_info(source)
+            actual = max(1, min(n, max(1, int(info["total_frames"]))))
+        except Exception:
+            actual = n
+    else:
+        try:
+            actual = extract_filmstrip_sprite(source, str(out), count=n)
+        except Exception:
+            raise HTTPException(status_code=500, detail="filmstrip 生成失败")
+    return {"url": to_media_url(str(out)), "count": actual, "cell_aspect": 16 / 9}
 
 
 async def _repoint_next_first_frame(

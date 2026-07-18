@@ -399,3 +399,38 @@ def extract_waveform_peaks(
         peak = max((abs(x) for x in samples[s:e]), default=0)
         out.append(round(peak / 32768.0, 4))
     return out
+
+
+def extract_filmstrip_sprite(
+    video_path: str,
+    out_path: str,
+    *,
+    count: int = 12,
+    cell_width: int = 96,
+) -> int:
+    """Render a horizontal count×1 thumbnail sprite in ONE ffmpeg call.
+
+    Picks `count` evenly-spaced frames across the clip, scales each to
+    cell_width (16:9 height), and tiles them left-to-right into a single PNG.
+    Returns count. Used by the trim dialog's video filmstrip track.
+    """
+    info = get_video_info(video_path)
+    total = max(1, int(info["total_frames"]))
+    n = max(1, min(count, total))
+    cell_h = round(cell_width * 9 / 16)
+    # select n evenly-spaced frames: n=total/step → pick every step-th, then cap n via tile
+    step = max(1, total // n)
+    vf = (
+        f"select='not(mod(n\\,{step}))',"
+        f"scale={cell_width}:{cell_h}:force_original_aspect_ratio=increase,"
+        f"crop={cell_width}:{cell_h},"
+        f"tile={n}x1"
+    )
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(Path(video_path).resolve()),
+         "-vf", vf, "-frames:v", "1", "-fps_mode", "vfr", str(out_path)],
+        check=True, capture_output=True,
+    )
+    if not Path(out_path).exists():
+        raise RuntimeError(f"extract_filmstrip_sprite produced no output: {out_path}")
+    return n

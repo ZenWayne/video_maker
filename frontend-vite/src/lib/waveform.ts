@@ -21,3 +21,9 @@ export function pixelForFrame(
   if (totalFrames <= 0) return 0
   return (frame / totalFrames) * trackWidth
 }
+
+/** clientX + 轨道元素 → 帧号（clamp 到 0..totalFrames）。容器指针处理复用。 */
+export function frameAtClientX(clientX: number, el: HTMLElement, totalFrames: number): number {
+  const rect = el.getBoundingClientRect()
+  return frameFromOffsetX(clientX - rect.left, rect.width, totalFrames)
+}

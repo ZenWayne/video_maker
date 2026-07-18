@@ -1,6 +1,6 @@
 // frontend-vite/src/components/__tests__/ShotPlayer.test.tsx
 import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { ShotPlayer } from '../ShotPlayer'
 
 describe('ShotPlayer', () => {
@@ -45,6 +45,28 @@ describe('ShotPlayer', () => {
     // Error message should appear
     expect(screen.getByTestId('audio-error-msg')).toBeTruthy()
     expect(screen.getByTestId('audio-error-msg').textContent).toContain('配音音轨加载失败')
+  })
+
+  it('toggling back to 配音 mid-playback resumes the vc audio, not just unmutes it', () => {
+    // The regression: the A/B toggle only flipped `muted`, while the <audio>'s
+    // play/pause state was driven solely by the video's play event.  Switching
+    // to 原音, playing, then back to 配音 left the vc audio paused → muted video
+    // + paused audio = silence.  Confirmed in a real browser: after the switch
+    // v.muted=true, a.muted=false, but a.paused stayed true.
+    const { container } = render(<ShotPlayer videoUrl="/v.mp4" trimEndSec={2} audioUrl="/a.wav" />)
+    const video = container.querySelector('video') as HTMLVideoElement
+    const audio = container.querySelector('audio') as HTMLAudioElement
+    vi.spyOn(video, 'play').mockResolvedValue(undefined as unknown as void)
+    vi.spyOn(video, 'pause').mockImplementation(() => {})
+    const audioPlay = vi.spyOn(audio, 'play').mockResolvedValue(undefined as unknown as void)
+    vi.spyOn(audio, 'pause').mockImplementation(() => {})
+
+    fireEvent.click(screen.getByTestId('ab-toggle'))   // → 原音 (audioEnabled false)
+    fireEvent.play(video)                              // start playback; vc audio stays paused
+    audioPlay.mockClear()
+
+    fireEvent.click(screen.getByTestId('ab-toggle'))   // → 配音 while the video is playing
+    expect(audioPlay).toHaveBeenCalled()               // vc audio must resume, not just unmute
   })
 
   it('timeline shows the TRIMMED duration, not the full source', () => {
