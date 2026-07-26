@@ -76,3 +76,27 @@ def test_is_valid_key_rejects_traversal_and_absolute():
 def test_to_media_url_passes_none_through():
     assert storage.to_media_url(None) is None
     assert storage.to_media_url("") is None
+
+
+def test_to_media_url_rejects_invalid_key_without_raising(caplog):
+    """本 task (12) 新增的核心分支：非空但非法的 key（迁移前遗留的绝对路径、
+    路径穿越）必须优雅降级——记警告日志 + 返回 None，绝不抛异常。这条分支在
+    约 50 处同步序列化器里被调用，抛出会把一行陈旧数据放大成整个项目详情接口
+    500（见 to_media_url 的文档字符串）。不需要 COS 凭证——is_valid_key() 拦在
+    signed_url() 之前，从不触达需要凭证的那一步。"""
+    stale_absolute_path = "/app/storage/projects/p1/shots/shot_1/output.mp4"
+    traversal_key = "projects/p1/../../etc/passwd"
+
+    with caplog.at_level("WARNING", logger="app.services.storage"):
+        result_absolute = storage.to_media_url(stale_absolute_path)
+        result_traversal = storage.to_media_url(traversal_key)
+
+    assert result_absolute is None
+    assert result_traversal is None
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2, (
+        f"expected exactly 2 warnings (one per invalid key), got {len(warnings)}: "
+        f"{[r.message for r in warnings]}"
+    )
+    assert all(r.message == "to_media_url_invalid_key" for r in warnings)

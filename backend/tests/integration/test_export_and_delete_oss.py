@@ -61,7 +61,7 @@ async def test_merge_bakes_trim_and_skips_incomplete_shots(db_session_factory, c
     assert 28 <= total <= 32, f"expected ~30 trimmed frames, got {total}"
 
 
-async def test_delete_project_clears_cos_prefix(client, db_session_factory):
+async def test_delete_project_clears_cos_prefix(client, db_session_factory, cos_prefix):
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1)
     await seed_shot_with_source(db_session_factory, pid, 1, frames=30)

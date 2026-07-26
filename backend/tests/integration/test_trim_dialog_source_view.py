@@ -13,9 +13,13 @@ import pytest
 from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import HEADERS, _make_project, _add_shot, seed_shot_with_source
 
-pytestmark = requires_cos
+# 注：不用文件级 pytestmark——只有真正 seed 真实 COS 视频的用例才需要
+# @requires_cos + cos_prefix。test_video_info_shot_or_video_not_found 只是一个
+# 404 路径检查，不碰 COS，文件级标记会让它在无凭证环境里被误 skip（审查发现的
+# 过度 gate 问题，本项目已因此丢过三次无凭证回归覆盖）。
 
 
+@requires_cos
 async def test_video_info_probes_source_and_returns_source_url(
     client, db_session_factory, cos_prefix
 ):
@@ -38,6 +42,7 @@ async def test_video_info_probes_source_and_returns_source_url(
     assert body["has_backup"] is False
 
 
+@requires_cos
 async def test_video_info_has_backup_true_after_trim(
     client, db_session_factory, cos_prefix
 ):
@@ -58,13 +63,15 @@ async def test_video_info_has_backup_true_after_trim(
     assert r.json()["has_backup"] is True
 
 
-async def test_video_info_shot_or_video_not_found(client, db_session_factory, cos_prefix):
+async def test_video_info_shot_or_video_not_found(client, db_session_factory):
+    """404 前就返回，从不碰 COS——不需要凭证。"""
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1, status="pending")  # no video_path yet
     r = await client.get(f"/api/projects/{pid}/shots/1/video-info")
     assert r.status_code == 404
 
 
+@requires_cos
 async def test_waveform_extracts_from_source(client, db_session_factory, cos_prefix):
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1, status="completed")
@@ -77,6 +84,7 @@ async def test_waveform_extracts_from_source(client, db_session_factory, cos_pre
     assert len(peaks) > 0
 
 
+@requires_cos
 async def test_detect_silence_probes_source(client, db_session_factory, cos_prefix):
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1, status="completed")

@@ -5,9 +5,14 @@ from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import _make_project, _add_shot, HEADERS
 from tests.integration.conftest_cos_seed import seed_shot_source_to_oss
 
-pytestmark = requires_cos
+# 注：不用文件级 pytestmark——test_media_static_mount_is_gone 和
+# test_null_media_fields_stay_null 都不碰 COS，只有真正 seed 真实视频的用例才
+# 需要 @requires_cos + cos_prefix。test_media_static_mount_is_gone 尤其重要：
+# 它是「/api/media 绕过签名的后门已关闭」这个安全交付物的唯一回归测试，绝不能
+# 被误 gate 到无凭证环境里默默 skip 掉（审查发现的过度 gate 问题）。
 
 
+@requires_cos
 async def test_project_response_video_url_is_fetchable(client, db_session_factory, cos_prefix):
     # NOTE: cos_prefix is required (not just cosmetic) — it's what warms COS
     # credentials for this test process; without it, seed_shot_source_to_oss's
