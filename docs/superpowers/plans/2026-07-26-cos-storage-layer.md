@@ -366,13 +366,30 @@ requires_cos = pytest.mark.skipif(
 
 @pytest.fixture
 async def cos_prefix():
-    """本次测试专属 key 前缀，退出时递归删除。"""
-    from app.services import object_store
+    """本次测试专属 key 前缀，退出时递归删除。
 
+    必须先 warm_credentials()：object_store 的每个调用都经 get_client()，
+    而后者读凭证缓存，缓存为空会抛 RuntimeError。
+    """
+    from app.services import cos_client, object_store
+
+    await cos_client.warm_credentials()
     prefix = f"test/{uuid.uuid4().hex}/"
     yield prefix
     await object_store.delete_prefix(prefix)
 ```
+
+> **注册说明（易漏）**：`conftest_cos.py` 是普通模块，**pytest 不会自动发现其中的
+> fixture**。`requires_cos` 这个 marker 靠测试文件里直接 `from tests.integration.conftest_cos
+> import requires_cos` 就能用，但 `cos_prefix` 作为 fixture 必须在
+> `backend/tests/integration/conftest.py` 中重新导出才会被注入：
+>
+> ```python
+> from tests.integration.conftest_cos import cos_prefix  # noqa: F401  fixture 注册
+> ```
+>
+> 漏掉这一步的表现是所有用到 `cos_prefix` 的测试报 `fixture 'cos_prefix' not found`。
+> Task 2 的冒烟测试没用到该 fixture，所以这个洞直到 Task 3 才会暴露。
 
 创建 `backend/tests/integration/test_cos_client_smoke.py`：
 
@@ -818,10 +835,16 @@ async def put(key: str, local_path: Path, content_type: Optional[str] = None) ->
 
     def _do():
         if n >= MULTIPART_THRESHOLD:
-            # 高级接口按大小自动选简单/分块上传，分块自带断点续传
+            # 高级接口按大小自动选简单/分块上传，分块自带断点续传。
+            # ContentType 必须一并传：本项目的读路径是浏览器用 <video> 播签名
+            # URL，Content-Type 缺失会让浏览器改为下载而非内联播放，而合并后的
+            # 成片很可能正好越过这个阈值走到这一支。
+            mp_kwargs = {}
+            if ct:
+                mp_kwargs["ContentType"] = ct
             return client.upload_file(
                 Bucket=bucket(), Key=key, LocalFilePath=str(local_path),
-                PartSize=10, MAXThread=10, EnableMD5=False,
+                PartSize=10, MAXThread=10, EnableMD5=False, **mp_kwargs,
             )
         kwargs = {"Bucket": bucket(), "Key": key, "EnableMD5": False}
         if ct:
@@ -925,9 +948,20 @@ async def list_prefix(prefix: str) -> list[str]:
             r = client.list_objects(Bucket=bucket(), Prefix=prefix, Marker=marker)
             for obj in r.get("Contents", []):
                 keys.append(obj["Key"])
+            # IsTruncated 是字符串 'true'/'false'，不是布尔 —— 改成布尔判断会让
+            # 超过 1000 个对象的前缀只取第一页并静默丢数据。
             if r.get("IsTruncated") != "true":
                 break
-            marker = r["NextMarker"]
+            # 截断时 NextMarker 通常存在，但腾讯云文档说明它可能缺失，
+            # 此时应回退用本页最后一个 Key 作为下一页起点。
+            # 直接 r["NextMarker"] 会 KeyError，把静默丢数据升级成崩溃。
+            marker = r.get("NextMarker") or (keys[-1] if keys else "")
+            if not marker:
+                # 声称截断却既无 NextMarker 也无内容：无法确定下一页起点，
+                # 继续循环会死循环，就此停下并让调用方看到不完整结果。
+                logger.warning("cos_list_truncated_without_marker",
+                               extra={"prefix": prefix, "got": len(keys)})
+                break
         return keys
 
     try:
@@ -944,20 +978,35 @@ async def delete_prefix(prefix: str) -> int:
         return 0
     client = get_client()
 
-    def _do(chunk: list[str]):
-        return client.delete_objects(
+    def _do(chunk: list[str]) -> list[str]:
+        """删除一批，返回本批中删除失败的 key。
+
+        Quiet='true' 只是不回报成功项；**失败项仍会出现在 Error 里，
+        且整个请求依然是 HTTP 200**。不看 Error 就会把部分失败当成完全成功。
+        """
+        r = client.delete_objects(
             Bucket=bucket(),
             Delete={"Object": [{"Key": k} for k in chunk], "Quiet": "true"},
         )
+        return [e.get("Key") for e in (r.get("Error") or [])]
 
+    failed: list[str] = []
     for i in range(0, len(keys), 1000):
         try:
-            await asyncio.to_thread(_do, keys[i:i + 1000])
+            failed.extend(await asyncio.to_thread(_do, keys[i:i + 1000]))
         except Exception as e:
             _log_cos_error("delete_prefix", prefix, e)
             raise
-    logger.info("cos_delete_prefix", extra={"prefix": prefix, "count": len(keys)})
-    return len(keys)
+
+    deleted = len(keys) - len(failed)
+    if failed:
+        # 删不掉只留下孤儿对象，按一致性规则是可接受的（宁可留孤儿，
+        # 绝不留悬空引用），所以不抛异常；但绝不能谎报成功。
+        logger.error("cos_delete_prefix_partial_failure",
+                     extra={"prefix": prefix, "deleted": deleted,
+                            "failed": len(failed), "failed_keys": failed[:20]})
+    logger.info("cos_delete_prefix", extra={"prefix": prefix, "count": deleted})
+    return deleted
 
 
 def signed_url(
