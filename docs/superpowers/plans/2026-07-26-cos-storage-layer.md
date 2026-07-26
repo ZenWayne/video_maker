@@ -25,6 +25,7 @@
 - **COS SDK 是纯同步的**：`cos-python-sdk-v5` 没有异步客户端。**每一个 SDK 调用都必须经 `await asyncio.to_thread(...)`**，唯一例外是预签名（纯本地 HMAC，不发网络请求）。遗漏一处不会报错，只会在传大文件时让整个服务卡死——这是本计划最隐蔽的一类缺陷。
 - **`CosS3Client` 必须单例**：SDK 明确要求一个 region 只建一个实例并复用，否则进程占用过多连接和线程。
 - **测试不 mock 基础设施**：除会计费的 AI 模型调用外一律不 mock。COS 用**真实 dev bucket**，测试对象一律写在 `test/<uuid>/` 唯一前缀下并在 teardown 删除前缀。**禁止**实现 fake object store。
+- **凭证卫生**：需要真实凭证的集成测试，与断言配置字段的单元测试（如 `test_cos_config.py`）**必须分开跑**。后者断言的就是 `settings.cos_*` 的值，一旦在导出了真实凭证的 shell 里失败，pytest 的断言差异输出会把凭证打进日志。Task 2 实施时已真实发生过一次（泄露了 SecretId）。任何情况下都不要把凭证 `echo` 出来或写进报告。
 - **绝不自行触发生成**：测试与验证中禁止调用真实视频/图像生成（计费）。需要真实视频素材时用 `tests/integration/conftest.py:160` 的 `seed_shot_with_source()`（ffmpeg 合成 testsrc2）。
 - **签名 URL TTL**：`cos_signed_url_ttl_sec` 默认 `7200`（2 小时）。
 - **key 命名**：`projects/<project_id>/...`，与原 `storage_root` 相对路径**逐字符一致**。DB 存**裸 key**，不带 scheme 前缀、不带前导 `/`。
@@ -330,7 +331,7 @@ for m in ['get_presigned_url','upload_file','copy_object','object_exists']:
 | `list_objects` | `list_objects(Bucket=, Prefix=)` → `r['Contents']`；**`r['IsTruncated']` 是字符串 `'false'`/`'true'`，不是布尔** —— Task 3 的分页循环正是按字符串比较写的，改成布尔判断会导致只取第一页 |
 | `delete_objects` | `delete_objects(Bucket=, Delete={'Object':[{'Key':k},...], 'Quiet':'true'})` |
 
-**唯一未验证项**：`get_presigned_url` 的 `Params={'response-content-disposition': ...}`（用于成片下载的附件头）。Step 1 的核对命令里请一并确认该参数是否被接受；若不支持，改为在 URL 上手工附加该 query 参数，并以 DONE_WITH_CONCERNS 报告。
+`get_presigned_url` 的 `Params={'response-content-disposition': ...}`（用于成片下载的附件头）**已在 Task 2 实施时用真实请求验证可用**，Task 3 与 Task 13 可直接采用，无需再自行验证。
 
 - [ ] **Step 2: 写失败的冒烟测试**
 
@@ -384,7 +385,12 @@ from app.services import cos_client
 
 @requires_cos
 async def test_client_is_singleton():
-    """SDK 要求一个 region 只建一个实例并复用，否则占用过多连接和线程。"""
+    """SDK 要求一个 region 只建一个实例并复用，否则占用过多连接和线程。
+
+    注意先 warm_credentials()：get_client() 内部读凭证缓存，缓存为空会抛
+    RuntimeError（这是刻意设计——同步签名路径绝不能阻塞去取凭证）。
+    """
+    await cos_client.warm_credentials()
     a = cos_client.get_client()
     b = cos_client.get_client()
     assert a is b
@@ -532,7 +538,12 @@ async def _refresh_loop() -> None:
     """按凭证剩余有效期的 50% 周期刷新，保证同步签名路径永远读到有效凭证。"""
     while True:
         try:
-            remaining = credentials_remaining_sec() or 3600
+            # 不能写 `credentials_remaining_sec() or 3600`：凭证已完全过期时
+            # 该函数正确返回 0，而 0 是 falsy，会被误当成「还没算出来」而按
+            # 默认 TTL 睡 1800 秒——把一次瞬时刷新失败放大成最长 30 分钟的
+            # 凭证失效窗口。0 必须原样保留，好让下面 sleep 取到下限 60 秒。
+            remaining = credentials_remaining_sec()
+            remaining = 3600 if remaining is None else remaining
             await asyncio.sleep(max(60, remaining // 2))
             await warm_credentials()
         except asyncio.CancelledError:
