@@ -1,108 +1,102 @@
-"""filmstrip 端点缓存：确定性文件名复用 + 清理过期 sprite。
+"""filmstrip 端点缓存：确定性 key 复用 + 清理过期 sprite（COS 版）。
 
 背景：旧实现每次打开裁剪弹窗都用 ts_uuid_name() 生成一个新文件名并重新跑
-ffmpeg tile —— 每次 dialog-open 都在 shot 目录堆一张 PNG，且重复付出 ffmpeg
-成本。修复后文件名按源片路径确定性哈希，同源重复请求应直接复用缓存文件、
-不再调用 extract_filmstrip_sprite；且旧 source 遗留的过期 sprite 应被清理，
-不随时间无限堆积。
+ffmpeg tile —— 每次 dialog-open 都在 shot 目录堆一个文件，且重复付出 ffmpeg
+成本。修复后 key 按源片 key + count 确定性哈希，同源同 count 的重复请求应
+直接复用缓存对象、不再调用 extract_filmstrip_sprite；且不同 count 遗留的
+过期 sprite 应在下次请求时被清理，不随时间无限堆积。
+
+只 mock 昂贵的 ffmpeg tile 调用本身（无关计费，只是省去真实拼图开销）；
+真实 COS + 真实 ffprobe（seed_shot_with_source 用 ffmpeg 合成的视频）。
 """
+import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
-from sqlalchemy import select
 
 import app.agents.video_trimmer as vt
-from tests.integration.conftest import _make_project
-from app.models.project import Shot
+from tests.integration.conftest_cos import requires_cos
+from tests.integration.conftest import _make_project, _add_shot, seed_shot_with_source
+from app.services import object_store
+from app.services.storage import shot_key, shot_prefix
 
-
-async def _seed_shot(sf, tmp_path, pid, video_name="output_1700000000_deadbeef.mp4"):
-    sdir = tmp_path / "projects" / pid / "shots" / "shot_1"
-    sdir.mkdir(parents=True, exist_ok=True)
-    source = sdir / video_name
-    source.write_bytes(b"src")
-    async with sf() as s:
-        s.add(Shot(
-            project_id=pid, shot_id=1, text="t", shot_type="Medium Shot",
-            visual_description="v", shot_duration=6, status="completed",
-            align_with_previous=False, video_path=str(source),
-        ))
-        await s.commit()
-    return str(source), sdir
+pytestmark = requires_cos
 
 
 @pytest.fixture
 def sprite_calls(monkeypatch):
-    """Mock the (expensive) ffmpeg tile call + the (cheap) ffprobe call it wraps."""
+    """Mock only the expensive ffmpeg tile call; ffprobe (get_video_info) runs for real."""
     calls = {"extract": 0}
 
     def _fake_extract(video_path, out_path, *, count=12, cell_width=96):
         calls["extract"] += 1
-        Path(out_path).write_bytes(b"png")
+        Path(out_path).write_bytes(b"\x89PNG\r\n\x1a\n fake-sprite")
         return count
 
     monkeypatch.setattr(vt, "extract_filmstrip_sprite", _fake_extract)
-    monkeypatch.setattr(
-        vt, "get_video_info",
-        lambda path: {"fps": 24.0, "total_frames": 240, "duration": 10.0},
-    )
     return calls
 
 
 async def test_repeat_open_reuses_cached_sprite_without_rerunning_ffmpeg(
-    client, db_session_factory, tmp_path, sprite_calls
+    client, db_session_factory, cos_prefix, sprite_calls
 ):
     pid = await _make_project(db_session_factory, status="shot_review")
-    await _seed_shot(db_session_factory, tmp_path, pid)
+    await _add_shot(db_session_factory, pid, 1, status="completed")
+    await seed_shot_with_source(db_session_factory, pid, 1, frames=48)
 
     r1 = await client.get(f"/api/projects/{pid}/shots/1/filmstrip")
     r2 = await client.get(f"/api/projects/{pid}/shots/1/filmstrip")
 
     assert r1.status_code == 200 and r2.status_code == 200
-    assert r1.json()["url"] == r2.json()["url"], "同源重复请求必须复用同一 sprite 文件"
+    # Signed URLs embed a fresh timestamp/signature per call even for the SAME
+    # underlying key — compare the URL *path* (which encodes the COS key),
+    # not the full signed URL string.
+    assert urlparse(r1.json()["url"]).path == urlparse(r2.json()["url"]).path, \
+        "同源重复请求必须复用同一 sprite key"
     assert sprite_calls["extract"] == 1, "第二次打开不应重新跑 ffmpeg tile"
 
 
-async def test_stale_sprite_from_previous_source_is_cleaned_up(
-    client, db_session_factory, tmp_path, sprite_calls
+async def test_stale_sprite_for_different_count_is_cleaned_up(
+    client, db_session_factory, cos_prefix, sprite_calls
 ):
     pid = await _make_project(db_session_factory, status="shot_review")
-    _source, sdir = await _seed_shot(db_session_factory, tmp_path, pid)
+    await _add_shot(db_session_factory, pid, 1, status="completed")
+    await seed_shot_with_source(db_session_factory, pid, 1, frames=48)
 
-    # Simulate an orphan left by a previous source (e.g. before a re-trim/VC
-    # swapped the underlying video) — a filmstrip_*.png that does NOT match
-    # the current source's deterministic hash.
-    stale = sdir / "filmstrip_0000deadbeef_12.png"
-    stale.write_bytes(b"old")
+    # Simulate an orphan left by a previously requested `count`.
+    stale_key = shot_key(pid, 1, "filmstrip_0000deadbeef_12.png")
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "x.png"
+        f.write_bytes(b"old")
+        await object_store.put(stale_key, f)
 
-    r = await client.get(f"/api/projects/{pid}/shots/1/filmstrip")
+    r = await client.get(f"/api/projects/{pid}/shots/1/filmstrip", params={"count": 8})
 
     assert r.status_code == 200
-    assert not stale.exists(), "过期 sprite 必须被清理，不能无限堆积"
-    # The freshly (re)generated sprite for the current source must still exist.
-    assert len(list(sdir.glob("filmstrip_*.png"))) == 1
+    assert not await object_store.exists(stale_key), "过期 sprite 必须被清理，不能无限堆积"
+    remaining = [
+        k for k in await object_store.list_prefix(shot_prefix(pid, 1))
+        if k.rsplit("/", 1)[-1].startswith("filmstrip_")
+    ]
+    assert len(remaining) == 1, "清理后只应剩下当前请求对应的那一个 sprite"
 
 
 async def test_different_source_gets_its_own_sprite_and_regenerates(
-    client, db_session_factory, tmp_path, sprite_calls
+    client, db_session_factory, cos_prefix, sprite_calls
 ):
-    """不同源片（不同哈希）不能复用缓存——必须重新生成。"""
+    """缓存 key 与源片 key 绑定——换源（即便理论上 Task 8 起 shot.video_path
+    不再被物理替换）也不能误命中旧缓存,必须重新生成。"""
     pid = await _make_project(db_session_factory, status="shot_review")
-    await _seed_shot(db_session_factory, tmp_path, pid, video_name="output_a.mp4")
+    await _add_shot(db_session_factory, pid, 1, status="completed")
+    await seed_shot_with_source(db_session_factory, pid, 1, frames=48)
+
     r1 = await client.get(f"/api/projects/{pid}/shots/1/filmstrip")
     assert sprite_calls["extract"] == 1
 
-    # Point shot at a different physical file (as a re-trim/VC would).
-    sdir = tmp_path / "projects" / pid / "shots" / "shot_1"
-    new_source = sdir / "output_b.mp4"
-    new_source.write_bytes(b"new-src")
-    async with db_session_factory() as s:
-        shot = (await s.execute(
-            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
-        )).scalar_one()
-        shot.video_path = str(new_source)
-        await s.commit()
+    # Re-point shot.video_path at a different physical source key.
+    await seed_shot_with_source(db_session_factory, pid, 1, frames=90)
 
     r2 = await client.get(f"/api/projects/{pid}/shots/1/filmstrip")
     assert sprite_calls["extract"] == 2, "换源后必须重新生成，不能误命中旧缓存"
-    assert r1.json()["url"] != r2.json()["url"]
+    assert urlparse(r1.json()["url"]).path != urlparse(r2.json()["url"]).path

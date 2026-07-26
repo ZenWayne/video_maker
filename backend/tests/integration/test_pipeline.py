@@ -431,17 +431,18 @@ async def test_stream_project_not_found(client):
     assert r.status_code == 404
 
 
-async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis):
-    """state_snapshot must return /api/media/... URLs, not raw filesystem paths."""
+async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis, monkeypatch):
+    """state_snapshot must return signed COS URLs, never /api/media/... or a raw key."""
     import json
-    from app.config import settings
     from app.models.project import Shot
     from app.api.stream import event_generator
+    from tests.integration.conftest import install_fake_cos_credentials
+
+    install_fake_cos_credentials(monkeypatch)
 
     pid = await _make_project(db_session_factory, status="shot_review")
 
-    # Insert a shot with absolute filesystem paths (as the worker would)
-    storage = settings.storage_root
+    # Insert a shot with real COS keys (as worker.tasks.run_shot_pipeline would)
     async with db_session_factory() as s:
         s.add(Shot(
             project_id=pid,
@@ -451,8 +452,8 @@ async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis
             visual_description="visual",
             shot_duration=6,
             status="completed",
-            video_path=f"{storage}/projects/{pid}/shots/shot_1/output.mp4",
-            last_frame_path=f"{storage}/projects/{pid}/shots/shot_1/last_frame.png",
+            video_path=f"projects/{pid}/shots/shot_1/output.mp4",
+            last_frame_path=f"projects/{pid}/shots/shot_1/last_frame.png",
         ))
         await s.commit()
 
@@ -464,10 +465,12 @@ async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis
     event = json.loads(first_event_json)
     assert event["type"] == "state_snapshot"
     shot = event["data"]["shots"][0]
-    assert shot["video_path"].startswith("/api/media/"), \
-        f"video_path should be a media URL, got: {shot['video_path']}"
-    assert shot["last_frame_path"].startswith("/api/media/"), \
-        f"last_frame_path should be a media URL, got: {shot['last_frame_path']}"
+    assert shot["video_path"].startswith("http"), \
+        f"video_path should be a signed URL, got: {shot['video_path']}"
+    assert "/api/media/" not in shot["video_path"]
+    assert shot["last_frame_path"].startswith("http"), \
+        f"last_frame_path should be a signed URL, got: {shot['last_frame_path']}"
+    assert "/api/media/" not in shot["last_frame_path"]
 
 
 # ── GET /projects/{id}/final.mp4 ─────────────────────────────────────────────
@@ -496,14 +499,19 @@ async def test_download_final_success(client, db_session_factory, tmp_path):
 # ── POST /projects/{id}/shots/{shot_id}/delete-tail-frame ──────────────────────
 
 async def _give_tail_frame(sf, pid, shot_id, *, tf_status="done", tf_confirmed=True):
-    """Give a shot a generated tail frame backed by a real file on disk."""
+    """Give a shot a generated tail frame backed by a real COS object."""
+    import tempfile
+    from pathlib import Path
     from sqlalchemy import select
     from app.models.project import Shot
-    from app.services.storage import shot_target_last_frame_path
+    from app.services.storage import shot_target_last_frame_key
+    from app.services import object_store
 
-    path = shot_target_last_frame_path(pid, shot_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"fake-png")
+    key = shot_target_last_frame_key(pid, shot_id)
+    with tempfile.TemporaryDirectory() as td:
+        local = Path(td) / "target.png"
+        local.write_bytes(b"\x89PNG\r\n\x1a\n fake-png")
+        await object_store.put(key, local)
     async with sf() as s:
         result = await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == shot_id)
@@ -511,16 +519,19 @@ async def _give_tail_frame(sf, pid, shot_id, *, tf_status="done", tf_confirmed=T
         shot = result.scalar_one()
         shot.tf_status = tf_status
         shot.tf_confirmed = tf_confirmed
-        shot.target_last_frame_path = str(path)
+        shot.target_last_frame_path = key
         await s.commit()
-    return path
+    return key
 
 
+@requires_cos
 async def test_delete_tail_frame_clears_state_without_generating_video(
-    client, db_session_factory, project_in_shot_review
+    client, db_session_factory, project_in_shot_review, cos_prefix
 ):
+    from app.services import object_store
+
     pid = project_in_shot_review
-    path = await _give_tail_frame(db_session_factory, pid, 1)
+    key = await _give_tail_frame(db_session_factory, pid, 1)
     client.arq.enqueue_job.reset_mock()
 
     r = await client.post(
@@ -545,12 +556,13 @@ async def test_delete_tail_frame_clears_state_without_generating_video(
     assert shot["tf_confirmed"] is False
     assert shot["target_last_frame_path"] is None
 
-    # Physical tail-frame file removed
-    assert not path.exists()
+    # COS object removed
+    assert not await object_store.exists(key)
 
 
+@requires_cos
 async def test_delete_tail_frame_rejected_while_generating(
-    client, db_session_factory, project_in_shot_review
+    client, db_session_factory, project_in_shot_review, cos_prefix
 ):
     pid = project_in_shot_review
     await _give_tail_frame(

@@ -103,7 +103,7 @@ async def test_confirm_tail_frame_success(client, db_session_factory, tmp_path):
 
     # Verify video generation was enqueued
     client.arq.enqueue_job.assert_called_with(
-        "run_shot_pipeline", pid, f"user:{USER}"
+        "run_shot_pipeline", pid, f"user:{USER}", 1
     )
 
 

@@ -15,7 +15,6 @@ Prints the candidate_id on the last line.
 """
 import asyncio
 import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -28,11 +27,13 @@ from sqlalchemy import select
 
 from app.db import AsyncSession, init_db
 from app.models.project import ImageCandidate, ReferenceImage, Shot
-from app.services.storage import shot_candidates_dir, ts_uuid_name
+from app.services import cos_client, object_store
+from app.services.storage import shot_candidates_prefix, ts_uuid_name
 
 
 async def main(args: dict) -> str:
     await init_db()
+    await cos_client.warm_credentials()
     project_id = args["project_id"]
     shot_seq = int(args["shot_id"])
     slot = args["slot"]
@@ -53,14 +54,13 @@ async def main(args: dict) -> str:
             raise RuntimeError(
                 f"No reference image found for project {project_id}; upload one first via the real API"
             )
-        src = Path(ref.storage_path)
-        if not src.exists():
-            raise RuntimeError(f"Reference image file missing on disk: {src}")
+        src_key = ref.storage_path
+        if not await object_store.exists(src_key):
+            raise RuntimeError(f"Reference image object missing in COS: {src_key}")
 
-        dest_dir = shot_candidates_dir(project_id, shot_seq)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / ts_uuid_name(src.suffix or ".jpg")
-        shutil.copy2(src, dest)
+        suffix = Path(src_key).suffix or ".jpg"
+        dest_key = f"{shot_candidates_prefix(project_id, shot_seq)}{ts_uuid_name(suffix)}"
+        await object_store.copy(src_key, dest_key)
 
         cand = ImageCandidate(
             project_id=project_id,
@@ -68,7 +68,7 @@ async def main(args: dict) -> str:
             shot_id=shot_seq,
             slot=slot,
             status="done",
-            file_path=str(dest),
+            file_path=dest_key,
             prompt_source="auto",
         )
         session.add(cand)

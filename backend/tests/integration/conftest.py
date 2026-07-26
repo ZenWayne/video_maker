@@ -22,6 +22,37 @@ USER = "test-user"
 HEADERS = {"X-User-Name": USER}
 
 
+def install_fake_cos_credentials(monkeypatch):
+    """Fake COS credentials so ``to_media_url()``/``object_store.signed_url()``
+    can actually sign (rather than short-circuit on an absent/invalid key)
+    without needing real COS credentials or network access.
+
+    ``get_presigned_url`` is pure local HMAC computation — no network call —
+    so a fake SecretId/SecretKey/Bucket produces a syntactically valid,
+    deterministic URL. Use this for tests that assert on the *shape* of a
+    signed URL (e.g. "starts with http, not /api/media/") without caring
+    whether it is actually fetchable. Tests that need a REAL, fetchable URL
+    must use the real ``cos_prefix`` fixture (+ ``@requires_cos``) instead —
+    never this.
+
+    Mirrors ``tests/unit/test_object_store_signed_url.py``'s
+    ``_fake_static_client`` helper.
+    """
+    from app.config import settings
+    from app.services import cos_client
+
+    monkeypatch.setattr(settings, "cos_bucket", "fake-bucket-1250000000")
+    monkeypatch.setattr(settings, "cos_region", "ap-guangzhou")
+    monkeypatch.setattr(settings, "cos_scheme", "https")
+    monkeypatch.setattr(settings, "cos_domain", None)
+    monkeypatch.setattr(cos_client, "_client", None)
+    monkeypatch.setattr(
+        cos_client, "_cached_cred",
+        {"secret_id": "fake-id", "secret_key": "fake-key", "token": None},
+    )
+    monkeypatch.setattr(cos_client, "_cred_expires_at", None)
+
+
 @pytest.fixture
 async def db_engine():
     engine = create_async_engine(

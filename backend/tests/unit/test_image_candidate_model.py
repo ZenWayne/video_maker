@@ -87,6 +87,8 @@ async def test_shot_to_dict_includes_candidates(sf):
         assert "id" in c and "created_at" in c and "adopted_at" in c
 
 
-def test_shot_candidates_dir():
-    from app.services.storage import shot_candidates_dir, shot_dir
-    assert shot_candidates_dir("pid", 3) == shot_dir("pid", 3) / "candidates"
+# 注：test_shot_candidates_dir（曾断言 shot_candidates_dir(...) == shot_dir(...) /
+# "candidates"）测的是本地路径时代的 helper。COS 下候选图目录是
+# app.services.storage.shot_candidates_prefix（key 前缀，不是本地 Path），
+# 已单独在 tests/unit/test_storage_keys.py 等处覆盖；此处的本地路径概念随
+# Task 5 一起被删除，不存在等价物可测，Task 12 一并移除这个过期用例。

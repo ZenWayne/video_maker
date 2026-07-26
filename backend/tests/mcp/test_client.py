@@ -1,5 +1,6 @@
 import pytest
 from tests.mcp.conftest import seed_project, seed_reference_image
+from tests.integration.conftest_cos import requires_cos
 
 
 async def test_list_and_get_project(backend, db_session_factory):
@@ -19,7 +20,8 @@ async def test_patch_shot(backend, db_session_factory):
     assert out["motion_prompt"] == "zoom in"
 
 
-async def test_replace_storyboard(backend, db_session_factory):
+@requires_cos
+async def test_replace_storyboard(backend, db_session_factory, cos_prefix):
     pid = await seed_project(db_session_factory)
     out = await backend.replace_storyboard(pid, "ov", [
         {"shot_id": 1, "text": "a", "shot_type": "Close-up",

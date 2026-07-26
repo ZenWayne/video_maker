@@ -7,6 +7,13 @@ from sqlalchemy.pool import StaticPool
 
 from app.models.project import Base, Project, Shot
 
+# conftest_cos.py (under tests/integration/) defines the cos_prefix fixture used
+# by COS-backed MCP tests. Re-export it here for the same reason
+# tests/integration/conftest.py does — pytest doesn't auto-discover a
+# non-conftest.py module, and a non-top-level conftest can't use pytest_plugins.
+from tests.integration.conftest_cos import cos_prefix  # noqa: F401
+from tests.integration.conftest import install_fake_cos_credentials  # noqa: F401
+
 USER = "mcp-agent"
 
 

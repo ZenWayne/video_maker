@@ -3,6 +3,7 @@ import pytest
 from sqlalchemy import select
 from app.models.project import Project, Shot
 from tests.integration.conftest import HEADERS
+from tests.integration.conftest_cos import requires_cos
 
 
 def _wav_bytes(tmp_path):
@@ -31,7 +32,8 @@ async def _seed_completed_shot(db_session_factory, project_id: str, shot_id: int
         await s.commit()
 
 
-async def test_upload_sets_file_clears_shot(client, make_project, db_session_factory, tmp_path):
+@requires_cos
+async def test_upload_sets_file_clears_shot(client, make_project, db_session_factory, tmp_path, cos_prefix):
     proj = await make_project()
     pid = proj["id"]
 
@@ -73,7 +75,8 @@ async def test_auto_toggle_requires_base_voice(client, make_project):
     assert r.status_code == 409
 
 
-async def test_auto_toggle_ok_after_upload(client, make_project, tmp_path):
+@requires_cos
+async def test_auto_toggle_ok_after_upload(client, make_project, tmp_path, cos_prefix):
     proj = await make_project()
     pid = proj["id"]
     files = {"file": ("base.wav", _wav_bytes(tmp_path), "audio/wav")}
@@ -85,7 +88,8 @@ async def test_auto_toggle_ok_after_upload(client, make_project, tmp_path):
     assert r.json()["auto_voice_calibrate"] is True
 
 
-async def test_clear_resets_everything(client, make_project, tmp_path):
+@requires_cos
+async def test_clear_resets_everything(client, make_project, tmp_path, cos_prefix):
     proj = await make_project()
     pid = proj["id"]
     files = {"file": ("base.wav", _wav_bytes(tmp_path), "audio/wav")}
@@ -104,7 +108,8 @@ async def test_clear_resets_everything(client, make_project, tmp_path):
 # ── File base voice: manual VC endpoints ───────────────────────────────────────
 
 
-async def test_voice_convert_shot_with_file_source(client, make_project, db_session_factory, tmp_path):
+@requires_cos
+async def test_voice_convert_shot_with_file_source(client, make_project, db_session_factory, tmp_path, cos_prefix):
     """voice-convert endpoint must succeed when base voice is a file (not a shot)."""
     proj = await make_project()
     pid = proj["id"]
@@ -130,7 +135,8 @@ async def test_voice_convert_shot_with_file_source(client, make_project, db_sess
     client.arq.enqueue_job.assert_called()
 
 
-async def test_voice_convert_all_with_file_source(client, make_project, db_session_factory, tmp_path):
+@requires_cos
+async def test_voice_convert_all_with_file_source(client, make_project, db_session_factory, tmp_path, cos_prefix):
     """voice-convert-all endpoint must succeed when base voice is a file (not a shot)."""
     proj = await make_project()
     pid = proj["id"]

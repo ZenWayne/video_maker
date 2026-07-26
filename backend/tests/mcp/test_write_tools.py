@@ -4,6 +4,7 @@ from fastmcp import Client
 from sqlalchemy import select
 from app.models.project import Shot
 from tests.mcp.conftest import seed_project
+from tests.integration.conftest_cos import requires_cos
 
 
 def _payload(result):
@@ -56,7 +57,8 @@ async def test_create_project_rejects_bad_aspect_ratio(server, db_session_factor
                               {"title": "x", "theme_text": "t", "aspect_ratio": "4:3"})
 
 
-async def test_upload_reference_images_by_path(server, db_session_factory, tmp_path):
+@requires_cos
+async def test_upload_reference_images_by_path(server, db_session_factory, tmp_path, cos_prefix):
     pid = await seed_project(db_session_factory)
     img = tmp_path / "stella.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n fake png bytes")
@@ -213,7 +215,8 @@ async def test_batch_update_shots_missing_shot_id(server, db_session_factory):
     assert failed["ok"] is False
 
 
-async def test_replace_storyboard_tool(server, db_session_factory):
+@requires_cos
+async def test_replace_storyboard_tool(server, db_session_factory, cos_prefix):
     pid = await seed_project(db_session_factory)
     async with Client(server) as c:
         res = await c.call_tool("replace_storyboard", {

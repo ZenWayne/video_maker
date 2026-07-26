@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import redis.asyncio as aioredis
 
 from app.config import settings
+from app.services import cos_client
 from worker.tasks import (
     run_screenwriter,
     run_shot_pipeline,
@@ -27,6 +28,15 @@ for _name in ("worker", "app"):
 
 async def startup(ctx: dict) -> None:
     """Startup hook - create Redis and DB connections."""
+    # COS credentials must be warmed before any job runs: to_media_url() (used
+    # by observability spans / event payloads) is a sync function that only
+    # reads the cache — see app.services.cos_client for why. Import from
+    # cos_client directly (zero app.api dependency) — never from app.main,
+    # which would drag the whole FastAPI app (and its routers) into a
+    # standalone worker process.
+    await cos_client.warm_credentials()
+    await cos_client.start_credential_refresh()
+
     # Redis connection
     ctx["redis"] = await aioredis.from_url(
         settings.redis_url,
@@ -57,6 +67,8 @@ async def shutdown(ctx: dict) -> None:
     # Dispose database engine
     if "engine" in ctx:
         await ctx["engine"].dispose()
+
+    await cos_client.close_client()
 
 
 class WorkerSettings:

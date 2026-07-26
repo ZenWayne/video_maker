@@ -45,13 +45,17 @@ from app.services.state_machine import (
 # 改写）改用 app.services.storyboard 的 write_storyboard/archive_storyboard/
 # read_storyboard；join_preview_path 改用 workspace()+join_preview_key；
 # put_storyboard 里残留的 shot_dir 清理改用
-# object_store.delete_prefix(shot_prefix(...))。仍以裸名引用、留给其他 task 处理
-# 的名字（调用时会 NameError，而非让整个模块无法加载）：
-#   shot_source_path（_dialog_source 用）/ pristine_video_path /
-#     pristine_last_frame_path — 只读展示端点 video-info/waveform/filmstrip
-#     与 CC 还原（读路径 / CC task）
-#   shot_pre_vc_video_path/shot_audio_original_path/shot_audio_vc_path — 死
-#     import，正文从未使用
+# object_store.delete_prefix(shot_prefix(...))。Task 12（读路径）已修复最后一批
+# 只读展示端点（video-info/waveform/filmstrip/detect-silence/detect-speech-start）：
+# 这些端点以前靠 shot_source_path()/pristine_video_path() 在本地磁盘上区分「源片
+# vs 派生文件」，但 Task 8 起 trim/restore-trim/align-tail-frame 已经是纯 metadata
+# 操作（shot.video_path 指向的源对象永不改写，VC 只写 vc_audio_path）——也就是说
+# shot.video_path 本身恒为源片，不再需要任何解析函数；改为 workspace().fetch()
+# 直接下载 shot.video_path 到本地跑 ffprobe/ffmpeg（见 _fetch_dialog_source）。
+# filmstrip 的确定性缓存也从本地 shot_dir 迁到了 COS（fname 相同即复用，count
+# 变化时清理旧对象）。CC 还原读的是 pristine_last_frame_key 这一 DB 列，不是
+# 函数，不受影响。shot_pre_vc_video_path/shot_audio_original_path/
+# shot_audio_vc_path 是死 import，正文从未使用，也已随上面的 import 块清理。
 from app.services.storage import (
     to_media_url, ts_uuid_name, shot_key, shot_prefix, join_preview_key,
 )
@@ -1517,15 +1521,18 @@ async def reorder_shot_references(
     return _ref_images_response(shot)
 
 
-def _dialog_source(project_id: str, shot_id: int, video_path: str) -> str:
-    """裁剪弹窗只读端点的统一「源片视角」。
+async def _fetch_dialog_source(ws, shot: Shot) -> Path:
+    """Fetch the shot's source video into a workspace for ffprobe/ffmpeg.
 
-    trim 端点按源片帧号裁剪（shot_source_path），弹窗展示的时间轴/波形/静音
-    检测必须基于同一文件，否则 VC 后（video_path 指向物理剪过的派生文件）
-    时间轴只剩剪后长度。找不到源片时回退 video_path。
+    shot.video_path is the immutable source key — /trim, /restore-trim and
+    /align-tail-frame only ever write trim_frames metadata, never overwrite
+    it (see their docstrings: "source in COS is never touched"), and VC only
+    ever sets vc_audio_path. So unlike the pre-Task-8 local-storage model
+    (where trimming/VC physically rewrote the file), there is no separate
+    "pristine vs derived" file to resolve here — the source is always just
+    shot.video_path.
     """
-    src = shot_source_path(project_id, shot_id)
-    return str(src) if src is not None else video_path
+    return await ws.fetch(shot.video_path, name="source.mp4")
 
 
 @router.get("/projects/{project_id}/shots/{shot_id}/video-info")
@@ -1545,23 +1552,25 @@ async def get_shot_video_info(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    source = _dialog_source(project_id, shot_id, shot.video_path)
-    info = get_video_info(source)
-    # 容器时长可能含超出视频的音频尾巴（老生成产物）——时间轴统一按视频流计
-    if info.get("fps"):
-        info["duration"] = round(info["total_frames"] / info["fps"], 3)
-    # Restore is possible when a pristine output_ exists and the current clip is a
-    # derived (trimmed_/vc_) file, i.e. not the pristine itself.
-    from app.services.storage import pristine_video_path
-    pristine = pristine_video_path(project_id, shot_id)
-    info["has_backup"] = pristine is not None and Path(shot.video_path) != pristine
-    try:
-        sec, frame = speech_end_info(source, info["fps"])
-    except Exception:  # 静音检测失败不应阻塞裁剪元数据返回
-        sec, frame = None, None
+    async with workspace() as ws:
+        local_source = await _fetch_dialog_source(ws, shot)
+        source = str(local_source)
+        info = get_video_info(source)
+        # 容器时长可能含超出视频的音频尾巴（老生成产物）——时间轴统一按视频流计
+        if info.get("fps"):
+            info["duration"] = round(info["total_frames"] / info["fps"], 3)
+        try:
+            sec, frame = speech_end_info(source, info["fps"])
+        except Exception:  # 静音检测失败不应阻塞裁剪元数据返回
+            sec, frame = None, None
+    # Restore is possible whenever a trim is currently applied — trim is
+    # metadata-only (the source object is never overwritten, see
+    # _fetch_dialog_source's docstring), so "has a backup" reduces to
+    # "trim_frames is set" (path-as-truth, mirrors tf/vc/cc conventions).
+    info["has_backup"] = shot.trim_frames is not None
     info["speech_end_sec"] = sec
     info["speech_end_frame"] = frame
-    info["source_video_url"] = to_media_url(source)
+    info["source_video_url"] = to_media_url(shot.video_path)
     return info
 
 
@@ -1582,10 +1591,12 @@ async def get_shot_waveform(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
     try:
-        source = _dialog_source(project_id, shot_id, shot.video_path)
-        info = get_video_info(source)
-        video_seconds = info["total_frames"] / info["fps"] if info.get("fps") else None
-        peaks = extract_waveform_peaks(source, max_seconds=video_seconds)
+        async with workspace() as ws:
+            local_source = await _fetch_dialog_source(ws, shot)
+            source = str(local_source)
+            info = get_video_info(source)
+            video_seconds = info["total_frames"] / info["fps"] if info.get("fps") else None
+            peaks = extract_waveform_peaks(source, max_seconds=video_seconds)
     except Exception:
         peaks = []
     return {"peaks": peaks}
@@ -1600,16 +1611,15 @@ async def get_shot_filmstrip(
 ):
     """Return a horizontal thumbnail sprite URL for the shot's source video.
 
-    Filename is deterministic (hash of the resolved source path + requested
-    count), so re-opening the trim dialog on the same source reuses the
-    cached sprite and skips the ffmpeg tile pass entirely — otherwise every
-    dialog-open would run ffmpeg again and leave a fresh PNG behind (accumulating
-    one orphan per open, forever). Any other stale filmstrip_*.png in the shot
-    dir (e.g. left over from before a re-trim/VC changed the source) is cleaned
-    up on each call, mirroring join_preview's glob+unlink cleanup pattern.
+    Cache key is deterministic (hash of the source key + requested count) and
+    lives in COS under the shot's own prefix, so re-opening the trim dialog on
+    the same shot reuses the cached sprite and skips the ffmpeg tile pass
+    entirely — otherwise every dialog-open would run ffmpeg again and leave a
+    fresh object behind (accumulating one orphan per open, forever). Any other
+    stale filmstrip_*.png under the shot prefix (e.g. from a previously
+    requested `count`) is cleaned up on each call.
     """
     from app.agents.video_trimmer import extract_filmstrip_sprite, get_video_info
-    from app.services.storage import shot_dir
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1618,36 +1628,42 @@ async def get_shot_filmstrip(
     shot = result.scalar_one_or_none()
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
-    source = _dialog_source(project_id, shot_id, shot.video_path)
     n = max(4, min(count, 24))
 
-    digest = hashlib.md5(str(Path(source).resolve()).encode()).hexdigest()[:12]
-    d = shot_dir(project_id, shot_id)
+    digest = hashlib.md5(shot.video_path.encode()).hexdigest()[:12]
     fname = f"filmstrip_{digest}_{n}.png"
-    out = d / fname
+    out_key = shot_key(project_id, shot_id, fname)
 
-    # Clean up sprites for a DIFFERENT source/count so a re-trim/VC that
-    # changes the underlying video doesn't leave orphaned PNGs behind.
-    if d.is_dir():
-        for stale in d.glob("filmstrip_*.png"):
-            if stale.name != fname:
-                stale.unlink(missing_ok=True)
+    async with workspace() as ws:
+        local_source = await _fetch_dialog_source(ws, shot)
 
-    if out.exists():
-        # Cache hit: same source already sprited — skip the ffmpeg tile pass.
-        # A cheap ffprobe (not the expensive tile ffmpeg call) recomputes the
-        # actual cell count in case the source is shorter than `count` frames.
-        try:
-            info = get_video_info(source)
-            actual = max(1, min(n, max(1, int(info["total_frames"]))))
-        except Exception:
-            actual = n
-    else:
-        try:
-            actual = extract_filmstrip_sprite(source, str(out), count=n)
-        except Exception:
-            raise HTTPException(status_code=500, detail="filmstrip 生成失败")
-    return {"url": to_media_url(str(out)), "count": actual, "cell_aspect": 16 / 9}
+        if await object_store.exists(out_key):
+            # Cache hit: same source+count already sprited — skip the ffmpeg
+            # tile pass. A cheap ffprobe recomputes the actual cell count in
+            # case the source is shorter than `count` frames.
+            try:
+                info = get_video_info(str(local_source))
+                actual = max(1, min(n, max(1, int(info["total_frames"]))))
+            except Exception:
+                actual = n
+        else:
+            local_out = ws.path(fname)
+            try:
+                actual = extract_filmstrip_sprite(str(local_source), str(local_out), count=n)
+            except Exception:
+                raise HTTPException(status_code=500, detail="filmstrip 生成失败")
+            await ws.publish(local_out, out_key)
+
+    # Clean up sprites for a DIFFERENT count so a re-request with a changed
+    # count doesn't leave orphaned objects behind under the shot prefix.
+    stale_keys = [
+        k for k in await object_store.list_prefix(shot_prefix(project_id, shot_id))
+        if k.rsplit("/", 1)[-1].startswith("filmstrip_") and k != out_key
+    ]
+    for k in stale_keys:
+        await object_store.delete(k)
+
+    return {"url": to_media_url(out_key), "count": actual, "cell_aspect": 16 / 9}
 
 
 async def _repoint_next_first_frame(
@@ -1680,34 +1696,6 @@ async def _repoint_next_first_frame(
         session.add(nxt)
         return (nxt.shot_id, last_frame_path)
     return None
-
-
-async def _commit_new_current_video(
-    project_id: str, shot: Shot, new_video: Path, session: AsyncSession
-) -> None:
-    """Point shot at a video (a freshly-written trimmed_/vc_ file, or the pristine
-    output_ on restore), refresh its unique last frame, and re-point the next shot.
-
-    Deletes the previous current ONLY if it is a derived file (trimmed_/vc_); the
-    pristine output_<ts>_<uuid>.mp4 is never deleted here so restore-trim can recover
-    it. Stale last_frame files are cleared (keeps the last_frame_pre_cc.png backup).
-    """
-    from app.agents.frame_porter import extract_last_frame
-
-    s_dir = new_video.parent
-    old = Path(shot.video_path) if shot.video_path else None
-    if old and old != new_video and old.name.startswith(("trimmed_", "vc_")):
-        old.unlink(missing_ok=True)
-    shot.video_path = str(new_video)
-
-    for _old in s_dir.glob("last_frame*.png"):
-        if _old.name != "last_frame_pre_cc.png":
-            _old.unlink(missing_ok=True)
-    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
-    extract_last_frame(str(new_video), str(new_lf))
-    shot.last_frame_path = str(new_lf)
-
-    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
 
 
 async def _reset_cc_and_clear_pre_cc_backup(shot: Shot) -> None:
@@ -1956,14 +1944,17 @@ async def detect_silence(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    source = _dialog_source(project_id, shot_id, shot.video_path)
-    suggestion = suggest_silence_trim(source)
+    async with workspace() as ws:
+        local_source = await _fetch_dialog_source(ws, shot)
+        source = str(local_source)
+        suggestion = suggest_silence_trim(source)
+        no_silence_info = None if suggestion is not None else get_video_info(source)
     if suggestion is None:
         return {
             "has_silence": False,
             "suggested_end_frame": None,
             "silence_start_time": None,
-            **get_video_info(source),
+            **no_silence_info,
         }
     return {"has_silence": True, **suggestion}
 
@@ -1986,16 +1977,18 @@ async def detect_speech_start_ep(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    source = _dialog_source(project_id, shot_id, shot.video_path)
-    info = get_video_info(source)
-    start_sec = detect_speech_start(source)
+    async with workspace() as ws:
+        local_source = await _fetch_dialog_source(ws, shot)
+        source = str(local_source)
+        info = get_video_info(source)
+        start_sec = detect_speech_start(source)
     if start_sec is None:
         return {"has_lead_silence": False, "suggested_start_frame": None, **info,
-                "source_video_url": to_media_url(source)}
+                "source_video_url": to_media_url(shot.video_path)}
     return {"has_lead_silence": True,
             "suggested_start_frame": int(round(start_sec * info["fps"])),
             "speech_start_sec": start_sec, **info,
-            "source_video_url": to_media_url(source)}
+            "source_video_url": to_media_url(shot.video_path)}
 
 
 @router.put("/projects/{project_id}/shots/{shot_id}/audio-head-mute")

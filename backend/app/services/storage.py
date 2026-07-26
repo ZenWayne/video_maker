@@ -7,11 +7,14 @@ key 布局与迁移前的 storage_root 相对路径逐字符一致，因此存�
 「本地相对路径 = key」的直接映射。
 """
 
+import logging
 import time
 import uuid
 from typing import Optional
 
 from app.services import object_store
+
+logger = logging.getLogger(__name__)
 
 
 def ts_uuid_name(ext: str = ".png") -> str:
@@ -122,5 +125,12 @@ def to_media_url(key: Optional[str]) -> Optional[str]:
     签名是纯本地 HMAC 计算，不发网络请求，同步调用不阻塞事件循环。
     """
     if not key:
+        return None
+    if not is_valid_key(key):
+        # 到了 Task 12,所有写路径都已产出 key;此时还拿到非 key 的值就是真
+        # bug。但不能抛异常:本函数在约 50 处同步序列化器里被调用,抛出会把
+        # 一行陈旧数据放大成整个项目详情接口 500——在 Spec B 的回填窗口期
+        # 尤其糟。优雅降级 + 可观测才是对的取舍。
+        logger.warning("to_media_url_invalid_key", extra={"value": key[:200]})
         return None
     return object_store.signed_url(key)

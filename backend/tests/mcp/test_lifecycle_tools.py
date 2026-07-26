@@ -106,17 +106,22 @@ async def test_cancel_generation_wrong_status_409(server, db_session_factory):
     assert data["status_code"] == 409
 
 
-async def test_get_generation_status(server, db_session_factory, tmp_path):
+async def test_get_generation_status(server, db_session_factory, monkeypatch):
     from sqlalchemy import select
     from app.models.project import Shot
+    from tests.integration.conftest import install_fake_cos_credentials
+
+    install_fake_cos_credentials(monkeypatch)
+
     pid = await seed_project(db_session_factory, status="shot_review")
     async with db_session_factory() as s:
         shot = (await s.execute(select(Shot).where(
             Shot.project_id == pid, Shot.shot_id == 1))).scalar_one()
         shot.status = "completed"
-        # must live under storage_root (tmp_path) — the API serializes
-        # video_path through to_media_url, and foreign paths become None
-        shot.video_path = str(tmp_path / f"projects/{pid}/1/output.mp4")
+        # the API serializes video_path through to_media_url() into a signed
+        # COS URL — must be a real key (projects/...), not a filesystem path,
+        # or to_media_url() rejects it and has_video/video_path go null.
+        shot.video_path = f"projects/{pid}/shots/shot_1/output.mp4"
         await s.commit()
     async with Client(server) as c:
         res = await c.call_tool("get_generation_status", {"project_id": pid})
@@ -126,6 +131,7 @@ async def test_get_generation_status(server, db_session_factory, tmp_path):
     first = data["shots"][0]
     assert first["shot_id"] == 1
     assert first["has_video"] is True
-    assert first["video_path"] == f"/api/media/projects/{pid}/1/output.mp4"
+    assert first["video_path"].startswith("http")
+    assert "/api/media/" not in first["video_path"]
     assert set(first) == {"shot_id", "status", "has_video", "video_path",
                           "error_message", "vc_status", "tf_status"}
