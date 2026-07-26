@@ -31,7 +31,8 @@ from app.services.storage import (
     shot_key,
 )
 from app.services import object_store
-from app.services.workspace import workspace
+from app.services.workspace import workspace, ensure_free_space
+from app.services.storyboard import write_storyboard
 from app.services.events import publish_event
 from app.agents.llm import GeminiProvider
 from app.agents.screenwriter import run_screenwriter as run_screenwriter_agent
@@ -39,16 +40,17 @@ from app.agents.director import run_director as run_director_agent
 from app.agents.video_generator import generate_video
 from app.agents.frame_porter import extract_last_frame
 from app.agents.merger import merge_shots
+from app.agents.effective_clip import ClipSpec, effective_clip_paths
 
 # 注：以下名称曾从 app.services.storage 导入，Task 5 删除本地路径函数后不再
-# 存在：storyboard_path / shot_dir / reference_images_dir / final_video_path /
-# ensure_shot_dir / shot_audio_original_path / shot_audio_vc_path /
-# shot_pre_vc_video_path / shot_pre_cc_last_frame_path /
-# get_original_video_for_audio / pristine_last_frame_path / shot_candidates_dir。
-# 本 task（7：视频生成链路）只负责 run_shot_pipeline 用到的部分（已改为
-# workspace/COS）。run_merger 的 final_video_path 属于导出/删除 task 的范围，
-# 故意留作 NameError——调用时显式报错，而不是让整个模块因缺失 import 而无法
-# 加载，掩盖了本任务的生成链路。
+# 存在：shot_audio_original_path / shot_audio_vc_path / shot_pre_vc_video_path /
+# shot_pre_cc_last_frame_path / get_original_video_for_audio /
+# pristine_last_frame_path / shot_candidates_dir — 全部死 import，正文从未
+# 使用，或已被后续 task 迁移掉。storyboard_path/shot_dir/reference_images_dir/
+# final_video_path/ensure_shot_dir 曾同样是 NameError 陷阱，Task 11（导出/
+# 删除/storyboard）已修复：run_screenwriter 的 storyboard 写入改为
+# storyboard.write_storyboard；run_merger 改为调用下面的
+# merge_project_shots（workspace + effective_clip + COS）。
 #
 # Task 9（VC 与 CC 链路）已修复：resolve_tail_frame/_resolve_ff_context/
 # _get_character_ref_paths 的 Path(key).exists() 本地磁盘判断（对 COS key 恒
@@ -240,22 +242,15 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
             return
 
         # Write storyboard.json
-        sb_path = storyboard_path(project_id)
-        sb_path.parent.mkdir(parents=True, exist_ok=True)
-        sb_path.write_text(
-            json.dumps(
-                {
-                    "scene_overview": storyboard_result["storyboard"]["scene_overview"],
-                    "shots": storyboard_result["storyboard"]["shots"],
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+        sb_key = await write_storyboard(
+            project_id,
+            storyboard_result["storyboard"]["scene_overview"],
+            storyboard_result["storyboard"]["shots"],
         )
 
         # Update project
         project.scene_overview = storyboard_result["storyboard"]["scene_overview"]
-        project.storyboard_path = str(sb_path)
+        project.storyboard_path = sb_key
         session.add(project)
 
         # Create shots
@@ -888,6 +883,66 @@ async def run_image_candidate(
                 )
 
 
+async def merge_project_shots(session_factory, project_id: str) -> str:
+    """Bake every completed shot's effective clip (trim/VC/head-mute applied)
+    into a workspace, concat them, and publish the result. Returns the final key.
+
+    Merging pulls the whole project's videos to disk — a 20-shot project can
+    reach several GB. Precheck with the REAL object sizes (object_store.size,
+    not an estimate) before fetching: skip it and a shortfall shows up as an
+    opaque ffmpeg failure deep inside the fetch/bake loop, very hard to
+    diagnose after the fact.
+    """
+    from app.services.storage import final_video_key
+
+    async with session_factory() as s:
+        shots = (await s.execute(
+            select(Shot)
+            .where(Shot.project_id == project_id, Shot.status == ShotStatus.COMPLETED.value)
+            .order_by(Shot.shot_id)
+        )).scalars().all()
+
+    shots = [sh for sh in shots if sh.video_path]
+    if not shots:
+        raise ValueError("No completed shots to merge")
+
+    keys = [sh.video_path for sh in shots]
+    keys += [sh.vc_audio_path for sh in shots if sh.vc_audio_path]
+    total = sum([await object_store.size(k) for k in keys])
+    await ensure_free_space(int(total * 2.2))  # inputs + baked output + margin
+
+    async with workspace() as ws:
+        specs: list[ClipSpec] = []
+        for i, sh in enumerate(shots):
+            # Fetching N shots into ONE workspace requires an explicit distinct
+            # name per key — ws.fetch's same-local-name guard raises if two
+            # different keys would default to the same last path segment
+            # (every shot's video is "output_<ts>_<uuid>.mp4"-shaped).
+            local_video = await ws.fetch(sh.video_path, name=f"part_{i:04d}.mp4")
+            local_vc = None
+            if sh.vc_audio_path:
+                local_vc = str(await ws.fetch(sh.vc_audio_path, name=f"vc_{i:04d}.wav"))
+            specs.append(ClipSpec(
+                local_video_path=str(local_video),
+                trim_frames=sh.trim_frames,
+                local_vc_audio_path=local_vc,
+                audio_head_mute_frames=sh.audio_head_mute_frames,
+            ))
+
+        clip_paths = effective_clip_paths(specs, str(ws.root))
+        out = ws.path("merged.mp4")
+        merge_shots(clip_paths, str(out))
+        key = await ws.publish(out, final_video_key(project_id))
+
+    async with session_factory() as s:
+        proj = (await s.execute(
+            select(Project).where(Project.id == project_id)
+        )).scalar_one()
+        proj.final_video_path = key
+        await s.commit()
+    return key
+
+
 async def run_merger(
     ctx: Dict[str, Any],
     project_id: str,
@@ -914,33 +969,12 @@ async def run_merger(
             logger.error(f"Project {project_id} not found")
             return
 
-        # Get completed shots
-        shots_result = await session.execute(
-            select(Shot)
-            .where(
-                Shot.project_id == project_id, Shot.status == ShotStatus.COMPLETED.value
-            )
-            .order_by(Shot.shot_id)
-        )
-        shots = shots_result.scalars().all()
-
-        if not shots:
-            raise ValueError("No completed shots to merge")
-
-        final_path = final_video_path(project_id)
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-
-        import tempfile, shutil as _shutil
-        from app.agents.effective_clip import effective_clip_paths
-        tmp_dir = tempfile.mkdtemp(prefix=f"export_{project_id}_")
         try:
-            shot_paths = effective_clip_paths(list(shots), tmp_dir)
-            if not shot_paths:
-                raise ValueError("No completed shots to merge")
-            merge_shots(shot_paths, str(final_path))
+            await merge_project_shots(session_factory, project_id)
+            # merge_project_shots committed project.final_video_path on a
+            # separate session; refresh this one before the status transition.
+            await session.refresh(project)
 
-            project.final_video_path = str(final_path)
-            session.add(project)
             await transition_project_status(
                 project, ProjectStatus.EXPORTED, "system:worker", session, redis
             )
@@ -961,8 +995,6 @@ async def run_merger(
                 redis, project_id,
                 {"type": "pipeline_failed", "data": {"error_message": str(e)}},
             )
-        finally:
-            _shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 async def _do_voice_convert_one(

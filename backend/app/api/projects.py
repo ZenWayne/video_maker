@@ -1,7 +1,6 @@
 """Projects API routes."""
 
 import json
-import shutil
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Query
@@ -15,13 +14,16 @@ from app.models.schemas import (
     ProjectCreate, ProjectResponse, ProjectList, ProjectListResponse,
     Storyboard, ErrorResponse
 )
-# 注：project_dir 是死 import（正文从未使用），delete_project_storage 已被
-# Task 5 删除（本地目录级删除，COS 下不成立）——只在 delete-project 端点用到，
-# 属于导出/删除 task 的范围，故意留作裸名引用（调用时 NameError），不阻塞本
-# 模块加载。app.main 通过 `from app.api import projects, pipeline, ...` 一次性
-# 导入全部路由模块，projects.py 若在此处 ImportError 会连带整个 app 无法加载，
-# 挡住 Task 8（trim/restore-trim/align-tail-frame）需要的真实 HTTP 端到端测试。
-from app.services.storage import to_media_url
+# 注：project_dir 是死 import（正文从未使用）。delete_project_storage（本地
+# 目录级删除，COS 下不成立）曾是本文件唯一的裸名 NameError 陷阱——Task 11
+# （导出/删除/storyboard）已修复：delete_project 改为「先删 DB 行再
+# object_store.delete_prefix(project_prefix(...))」；create_project/
+# get_project 的 storyboard 读取改用 app.services.storyboard.read_storyboard
+# （project.storyboard_path 现在存的是 COS key，不再是本地路径，
+# Path(...).read_text() 对 key 恒抛 FileNotFoundError）。
+from app.services import object_store
+from app.services.storage import to_media_url, project_prefix
+from app.services.storyboard import read_storyboard
 from app.services.state_machine import ProjectStatus, InvalidTransitionError
 
 router = APIRouter()
@@ -202,12 +204,10 @@ async def create_project(
     project = result.scalar_one()
 
     # Load storyboard if exists
+    sb_data = await read_storyboard(project.storyboard_path)
     storyboard = None
-    if project.storyboard_path:
-        import json
-        from pathlib import Path
+    if sb_data:
         try:
-            sb_data = json.loads(Path(project.storyboard_path).read_text())
             storyboard = Storyboard(**sb_data)
         except Exception:
             pass
@@ -261,12 +261,10 @@ async def get_project(
         raise HTTPException(status_code=404, detail="Project not found")
 
     # Load storyboard if exists
+    sb_data = await read_storyboard(project.storyboard_path)
     storyboard = None
-    if project.storyboard_path:
-        import json
-        from pathlib import Path
+    if sb_data:
         try:
-            sb_data = json.loads(Path(project.storyboard_path).read_text())
             storyboard = Storyboard(**sb_data)
         except Exception:
             pass
@@ -360,11 +358,16 @@ async def delete_project(
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Delete from database (cascade will handle related records)
+    # Delete from database first (cascade handles shots/reference_images/events)
+    # so nothing can reference the COS objects before we clear them.
     await session.delete(project)
     await session.commit()
 
-    # Delete storage
-    delete_project_storage(project_id)
+    # Clear the whole project prefix in COS (shots, storyboard(s), previews,
+    # final video, reference images/voice). delete_prefix returns the count it
+    # actually removed — a partial failure logs an error but doesn't raise
+    # (consistency rule: an orphaned object is acceptable, a DB row pointing at
+    # a deleted object is not — and the DB row is already gone by this point).
+    await object_store.delete_prefix(project_prefix(project_id))
 
     return None

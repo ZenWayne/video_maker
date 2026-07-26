@@ -6,6 +6,7 @@ from tests.integration.conftest import (
     HEADERS, USER,
     _make_project, _add_shots, _add_shot, _add_character_image,
 )
+from tests.integration.conftest_cos import requires_cos
 
 
 # ── POST /projects/{id}/start ──────────────────────────────────────────────────
@@ -119,7 +120,8 @@ async def test_approve_script_invalid_transition(client, db_session_factory):
 
 # ── POST /projects/{id}/regenerate-script ─────────────────────────────────────
 
-async def test_regenerate_script_success(client, project_in_script_review):
+@requires_cos
+async def test_regenerate_script_success(client, project_in_script_review, cos_prefix):
     pid = project_in_script_review
     r = await client.post(f"/api/projects/{pid}/regenerate-script", headers=HEADERS)
     assert r.status_code == 202
@@ -132,7 +134,8 @@ async def test_regenerate_script_success(client, project_in_script_review):
     )
 
 
-async def test_regenerate_script_invalid_transition(client, db_session_factory):
+@requires_cos
+async def test_regenerate_script_invalid_transition(client, db_session_factory, cos_prefix):
     # SHOT_GENERATING cannot transition to SCRIPTING
     pid = await _make_project(db_session_factory, status="shot_generating")
     r = await client.post(f"/api/projects/{pid}/regenerate-script", headers=HEADERS)
@@ -400,7 +403,8 @@ async def test_reset_to_script_invalid_transition(client, db_session_factory):
 
 # ── POST /projects/{id}/reset ─────────────────────────────────────────────────
 
-async def test_reset_project_success(client, db_session_factory):
+@requires_cos
+async def test_reset_project_success(client, db_session_factory, cos_prefix):
     # Only FAILED can transition to DRAFT
     pid = await _make_project(db_session_factory, status="failed")
     await _add_shots(db_session_factory, pid, count=2, status="pending")
@@ -412,7 +416,8 @@ async def test_reset_project_success(client, db_session_factory):
     assert p["shots"] == []
 
 
-async def test_reset_project_invalid_transition(client, db_session_factory):
+@requires_cos
+async def test_reset_project_invalid_transition(client, db_session_factory, cos_prefix):
     # SCRIPTING cannot transition to DRAFT
     pid = await _make_project(db_session_factory, status="scripting")
     r = await client.post(f"/api/projects/{pid}/reset", headers=HEADERS)
@@ -567,7 +572,8 @@ async def test_delete_tail_frame_shot_not_found(client, project_in_shot_review):
 
 # ── PUT /projects/{id}/storyboard (full replace) ──────────────────────────────
 
-async def test_put_storyboard_upsert_and_add(client, db_session_factory, project_in_script_review):
+@requires_cos
+async def test_put_storyboard_upsert_and_add(client, db_session_factory, project_in_script_review, cos_prefix):
     pid = project_in_script_review  # has shots 1,2,3
     r = await client.put(
         f"/api/projects/{pid}/storyboard",
@@ -595,7 +601,10 @@ async def test_put_storyboard_upsert_and_add(client, db_session_factory, project
     assert by_id[4].text == "brand new"
 
 
-async def test_put_storyboard_rewrites_json(client, db_session_factory, project_in_script_review, tmp_path):
+@requires_cos
+async def test_put_storyboard_rewrites_json(
+    client, db_session_factory, project_in_script_review, cos_prefix, tmp_path
+):
     pid = project_in_script_review
     r = await client.put(
         f"/api/projects/{pid}/storyboard",
@@ -607,8 +616,11 @@ async def test_put_storyboard_rewrites_json(client, db_session_factory, project_
     )
     assert r.status_code == 200, r.text
     import json
-    from app.services.storage import storyboard_path
-    data = json.loads(storyboard_path(pid).read_text(encoding="utf-8"))
+    from app.services import object_store
+    from app.services.storage import storyboard_key
+    local = tmp_path / "storyboard.json"
+    await object_store.get(storyboard_key(pid), local)
+    data = json.loads(local.read_text(encoding="utf-8"))
     assert data["scene_overview"] == "ov"
     assert [s["shot_id"] for s in data["shots"]] == [1]
     assert data["shots"][0]["text"] == "only"
@@ -661,13 +673,18 @@ async def test_put_storyboard_empty_shots(client, project_in_script_review):
     assert r.status_code == 422
 
 
-async def test_put_storyboard_deletes_shot_output_dir(client, db_session_factory, project_in_script_review):
+@requires_cos
+async def test_put_storyboard_deletes_shot_output_dir(
+    client, db_session_factory, project_in_script_review, cos_prefix, tmp_path
+):
     pid = project_in_script_review  # shots 1,2,3
-    from app.services.storage import shot_dir
-    leftover = shot_dir(pid, 3)
-    leftover.mkdir(parents=True, exist_ok=True)
-    (leftover / "output.mp4").write_bytes(b"stale")
-    assert leftover.exists()
+    from app.services import object_store
+    from app.services.storage import shot_prefix, shot_key
+    leftover_key = shot_key(pid, 3, "output.mp4")
+    local = tmp_path / "stale.mp4"
+    local.write_bytes(b"stale")
+    await object_store.put(leftover_key, local)
+    assert await object_store.exists(leftover_key)
 
     r = await client.put(
         f"/api/projects/{pid}/storyboard",
@@ -677,4 +694,5 @@ async def test_put_storyboard_deletes_shot_output_dir(client, db_session_factory
         headers=HEADERS,
     )
     assert r.status_code == 200, r.text
-    assert not leftover.exists()  # shot 3 dir removed
+    # DB row deleted + COS prefix cleared: shot 3's whole object prefix is gone.
+    assert await object_store.list_prefix(shot_prefix(pid, 3)) == []

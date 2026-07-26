@@ -121,19 +121,19 @@ def test_vc_only_audio_bounded_by_video_duration(tmp_path):
     assert info["total_frames"] == 60
 
 
-# ── effective_clip_paths: missing vc_audio_path falls back gracefully ──────────
+# ── effective_clip_paths: batches specs, passthrough vs. bake ──────────────────
 
 
-def test_effective_clip_paths_missing_vc_audio_falls_back(tmp_path, monkeypatch):
-    """If vc_audio_path is set but the file does not exist, effective_clip_paths must
-    fall back to source audio (pass vc_audio_path=None) without raising an error."""
+def test_effective_clip_paths_passthrough_when_no_edits(tmp_path):
+    """A spec with no trim/vc/head-mute is returned as-is (no ffmpeg call, no
+    baked clip created) — effective_clip_paths does no COS I/O and expects
+    every spec's paths to already be local (the caller fetches via workspace
+    first; see the module docstring)."""
     import subprocess
-    from app.agents.effective_clip import effective_clip_paths
+    from app.agents.effective_clip import ClipSpec, effective_clip_paths
     from app.agents.video_trimmer import get_video_info
-    from app import agents  # noqa: F401 — ensure module loaded
 
-    # Build a tiny real source video
-    src = tmp_path / f"output_test.mp4"
+    src = tmp_path / "output_test.mp4"
     subprocess.run(
         [
             "ffmpeg", "-y",
@@ -146,28 +146,56 @@ def test_effective_clip_paths_missing_vc_audio_falls_back(tmp_path, monkeypatch)
         check=True, capture_output=True,
     )
 
-    # Monkeypatch shot_source_path so effective_clip_paths finds our fake source
-    import app.agents.effective_clip as ec_mod
-    monkeypatch.setattr(ec_mod, "shot_source_path", lambda pid, sid: src)
+    out_dir = str(tmp_path / "out")
+    import os; os.makedirs(out_dir, exist_ok=True)
 
-    class FakeShot:
-        project_id = "proj1"
-        shot_id = 1
-        video_path = str(src)  # DB source-of-truth path (the immutable source)
-        trim_frames = None
-        vc_audio_path = str(tmp_path / "nonexistent_vc.wav")  # does NOT exist
+    spec = ClipSpec(
+        local_video_path=str(src),
+        trim_frames=None,
+        local_vc_audio_path=None,
+        audio_head_mute_frames=None,
+    )
+    result = effective_clip_paths([spec], out_dir)
+    assert len(result) == 1
+    assert result[0] == str(src)  # passthrough, not a freshly-baked clip
+    info = get_video_info(result[0])
+    assert info["total_frames"] == 60
+
+
+def test_effective_clip_paths_bakes_when_trimmed(tmp_path):
+    """A spec with trim_frames set gets baked into a new clip under tmp_dir,
+    distinct from the source, with the trimmed frame count."""
+    import subprocess
+    from app.agents.effective_clip import ClipSpec, effective_clip_paths
+    from app.agents.video_trimmer import get_video_info
+
+    src = tmp_path / "output_test.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=30",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+            "-frames:v", "60", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-c:a", "aac", "-shortest",
+            str(src),
+        ],
+        check=True, capture_output=True,
+    )
 
     out_dir = str(tmp_path / "out")
     import os; os.makedirs(out_dir, exist_ok=True)
 
-    # Must not raise; must return exactly one path (passthrough to source)
-    result = effective_clip_paths([FakeShot()], out_dir)
+    spec = ClipSpec(
+        local_video_path=str(src),
+        trim_frames=30,
+        local_vc_audio_path=None,
+        audio_head_mute_frames=None,
+    )
+    result = effective_clip_paths([spec], out_dir)
     assert len(result) == 1
-    # No baked clip created — falls back to passthrough (no trim, no vc)
-    assert result[0] == str(src)
-    # Verify output is a valid video
+    assert result[0] != str(src)  # a freshly-baked clip, not the source
     info = get_video_info(result[0])
-    assert info["total_frames"] == 60
+    assert info["total_frames"] == 30
 
 
 def test_trim_cuts_audio_to_video_duration(tmp_path):

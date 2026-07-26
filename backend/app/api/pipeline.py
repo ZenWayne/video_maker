@@ -3,7 +3,6 @@
 import hashlib
 import json
 import logging
-import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -40,18 +39,25 @@ from app.services.state_machine import (
 # shot_custom_frames_dir/shot_dir 的上传/拷贝/删除端点调用点（upload-first-frame/
 # upload-tail-frame/reference-images/extract-first-frame/extract-last-frame/
 # extract-tail-frame/use-prev-last-frame/delete-tail-frame/first-frame）——全部
-# 改为 workspace()+COS key 或 object_store.copy/delete(_prefix)。其余仍以裸名
-# 引用的名字留给对应 task 处理，调用时会 NameError（而非让整个模块无法加载）：
-#   storyboard_path/archived_storyboard_path — storyboard 相关端点
-#   join_preview_path — 连贯性预览端点
+# 改为 workspace()+COS key 或 object_store.copy/delete(_prefix)。Task 11（导出
+# 合并/连贯性预览/项目删除/storyboard）已修复：storyboard_path/
+# archived_storyboard_path（regenerate-script/put-storyboard/reset 三处归档+
+# 改写）改用 app.services.storyboard 的 write_storyboard/archive_storyboard/
+# read_storyboard；join_preview_path 改用 workspace()+join_preview_key；
+# put_storyboard 里残留的 shot_dir 清理改用
+# object_store.delete_prefix(shot_prefix(...))。仍以裸名引用、留给其他 task 处理
+# 的名字（调用时会 NameError，而非让整个模块无法加载）：
 #   shot_source_path（_dialog_source 用）/ pristine_video_path /
 #     pristine_last_frame_path — 只读展示端点 video-info/waveform/filmstrip
 #     与 CC 还原（读路径 / CC task）
 #   shot_pre_vc_video_path/shot_audio_original_path/shot_audio_vc_path — 死
 #     import，正文从未使用
-from app.services.storage import to_media_url, ts_uuid_name, shot_key
+from app.services.storage import (
+    to_media_url, ts_uuid_name, shot_key, shot_prefix, join_preview_key,
+)
 from app.services import object_store
-from app.services.workspace import workspace
+from app.services.workspace import workspace, ensure_free_space
+from app.services.storyboard import write_storyboard, archive_storyboard, read_storyboard
 from app.services.events import publish_event
 
 router = APIRouter()
@@ -170,10 +176,8 @@ async def regenerate_script(
     project = await _get_project_or_404(project_id, session)
 
     # Archive current storyboard
-    sb_path = storyboard_path(project_id)
-    if sb_path.exists():
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-        sb_path.rename(archived_storyboard_path(project_id, ts))
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    await archive_storyboard(project_id, ts)
 
     # Clear shots
     result = await session.execute(
@@ -240,10 +244,10 @@ async def patch_storyboard(
 
     # Reload storyboard
     from app.models.schemas import Storyboard
+    sb_data = await read_storyboard(project.storyboard_path)
     storyboard = None
-    if project.storyboard_path:
+    if sb_data:
         try:
-            sb_data = json.loads(Path(project.storyboard_path).read_text())
             storyboard = Storyboard(**sb_data)
         except Exception:
             pass
@@ -289,13 +293,18 @@ async def put_storyboard(
     existing = {s.shot_id: s for s in result.scalars().all()}
     payload_ids = {item.shot_id for item in body.shots}
 
-    # Delete shots absent from the payload + remove any leftover output dir (CLAUDE.md audit).
-    for shot_id, shot in existing.items():
-        if shot_id not in payload_ids:
-            await session.delete(shot)
-            s_dir = shot_dir(project_id, shot_id)
-            if s_dir.exists():
-                shutil.rmtree(s_dir, ignore_errors=True)
+    # Delete shots absent from the payload + remove any leftover output objects
+    # (CLAUDE.md audit). Commit the DB deletion FIRST and only then clear COS —
+    # deleting the COS objects before the DB row is durably gone would leave a
+    # window where a crash/rollback resurrects a Shot row pointing at objects
+    # that no longer exist (the DB row must never outlive what it references).
+    removed_shot_ids = [sid for sid in existing if sid not in payload_ids]
+    for shot_id in removed_shot_ids:
+        await session.delete(existing[shot_id])
+    if removed_shot_ids:
+        await session.commit()
+        for shot_id in removed_shot_ids:
+            await object_store.delete_prefix(shot_prefix(project_id, shot_id))
 
     # Upsert shots present in the payload.
     for item in body.shots:
@@ -313,29 +322,20 @@ async def put_storyboard(
     project.scene_overview = body.scene_overview
 
     # Rewrite storyboard.json to match (DB is source of truth).
-    sb_path = storyboard_path(project_id)
-    sb_path.parent.mkdir(parents=True, exist_ok=True)
-    sb_path.write_text(
-        json.dumps(
-            {
-                "scene_overview": body.scene_overview,
-                "shots": [item.model_dump() for item in body.shots],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    sb_key = await write_storyboard(
+        project_id, body.scene_overview, [item.model_dump() for item in body.shots]
     )
-    project.storyboard_path = str(sb_path)
+    project.storyboard_path = sb_key
     project.updated_at = datetime.utcnow()
     session.add(project)
     await session.commit()
     await session.refresh(project)
 
     from app.models.schemas import Storyboard
+    sb_data = await read_storyboard(project.storyboard_path)
     storyboard = None
-    if project.storyboard_path:
+    if sb_data:
         try:
-            sb_data = json.loads(Path(project.storyboard_path).read_text())
             storyboard = Storyboard(**sb_data)
         except Exception:
             pass
@@ -770,6 +770,7 @@ async def join_preview(
 ):
     """临时把选中的 shot 纯拼接成一条预览视频，用于检测连贯性。同步执行。"""
     from app.agents.merger import merge_shots
+    from app.agents.effective_clip import ClipSpec, effective_clip_paths
 
     await _get_project_or_404(project_id, session)
 
@@ -795,7 +796,7 @@ async def join_preview(
             raise HTTPException(
                 status_code=400, detail=f"镜头 {sid} 尚未完成，无法预览"
             )
-        if not shot.video_path or not Path(shot.video_path).exists():
+        if not shot.video_path or not await object_store.exists(shot.video_path):
             raise HTTPException(
                 status_code=400, detail=f"镜头 {sid} 缺少视频文件"
             )
@@ -803,30 +804,46 @@ async def join_preview(
 
     # Apply the non-destructive EDL (trim + VC) before stitching, so the
     # continuity preview reflects the trimmed clips — not the full source.
-    import tempfile
-    import shutil as _shutil
-    from app.agents.effective_clip import effective_clip_paths
+    # Precheck real object sizes before fetching (same rationale as export
+    # merge): a handful of shots is usually small, but skipping the precheck
+    # still risks an opaque ffmpeg failure on a disk-constrained host.
+    keys = [s.video_path for s in ordered_shots]
+    keys += [s.vc_audio_path for s in ordered_shots if s.vc_audio_path]
+    total = sum([await object_store.size(k) for k in keys])
+    await ensure_free_space(int(total * 2.2))
 
-    # Unique filename per preview (+ clean old) so the browser never serves a
-    # stale cached preview from a fixed path.
-    previews_dir = join_preview_path(project_id).parent
-    for _old in list(previews_dir.glob("join_preview*.mp4")) + list(previews_dir.glob("join_preview*.txt")):
-        _old.unlink(missing_ok=True)
-    output_path = str(previews_dir / f"join_preview_{ts_uuid_name('.mp4')}")
-    tmp_dir = tempfile.mkdtemp(prefix=f"joinpreview_{project_id}_")
     try:
-        ordered_paths = effective_clip_paths(ordered_shots, tmp_dir)
-        merge_shots(ordered_paths, output_path)
+        async with workspace() as ws:
+            specs: list[ClipSpec] = []
+            for i, shot in enumerate(ordered_shots):
+                # Distinct name per shot: fetching several shots into ONE
+                # workspace needs it (ws.fetch raises on two different keys
+                # sharing a default local name — every shot's video is
+                # "output_<ts>_<uuid>.mp4"-shaped).
+                local_video = await ws.fetch(shot.video_path, name=f"part_{i:04d}.mp4")
+                local_vc = None
+                if shot.vc_audio_path:
+                    local_vc = str(await ws.fetch(shot.vc_audio_path, name=f"vc_{i:04d}.wav"))
+                specs.append(ClipSpec(
+                    local_video_path=str(local_video),
+                    trim_frames=shot.trim_frames,
+                    local_vc_audio_path=local_vc,
+                    audio_head_mute_frames=shot.audio_head_mute_frames,
+                ))
+
+            clip_paths = effective_clip_paths(specs, str(ws.root))
+            out = ws.path("join_preview.mp4")
+            merge_shots(clip_paths, str(out))
+            # cache-busting：用输出文件修改时间(纳秒)，避免浏览器/video 缓存旧预览。
+            # 必须在 workspace 退出（自动删除临时文件）前读取。
+            bust = out.stat().st_mtime_ns
+            key = await ws.publish(out, join_preview_key(project_id))
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"拼接失败: {e}")
-    finally:
-        _shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    media_url = to_media_url(output_path)
-    # cache-busting：用输出文件修改时间(纳秒)，避免浏览器/video 缓存旧预览
-    bust = Path(output_path).stat().st_mtime_ns
+    media_url = to_media_url(key)
     return {"preview_url": f"{media_url}?t={bust}"}
 
 
@@ -892,10 +909,8 @@ async def reset_project(
     project = await _get_project_or_404(project_id, session)
 
     # Archive storyboard
-    sb_path = storyboard_path(project_id)
-    if sb_path.exists():
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-        sb_path.rename(archived_storyboard_path(project_id, ts))
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    await archive_storyboard(project_id, ts)
 
     # Clear shots
     result = await session.execute(

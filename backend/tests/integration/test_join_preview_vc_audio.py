@@ -7,26 +7,53 @@ wav's 24 kHz mono, shot 1's at 48 kHz stereo, and the concat demuxer + -c copy
 wrote a single audio decoder config for both -- so shot 2's audio decoded as
 garbage and the <video> element's audio-driven clock stalled.
 
-Drives the real /join-preview endpoint against the real DB and real ffmpeg.
+Drives the real /join-preview endpoint against the real DB, real COS, and real
+ffmpeg.
 
 Two scenarios: both shots edited (reproduces the incident), and only shot 2
 edited (isolates the merge-side concat-filter fix, since shot 1 then reaches
 merge_shots as a raw 44.1 kHz mono passthrough).
+
+Rewritten for Task 11 (join-preview moved from local-storage-root paths to
+workspace()+COS; vc_audio_path is now a COS key, published for real instead of
+written to a local shot_dir). Gated on requires_cos/cos_prefix.
 """
+import tempfile
+from pathlib import Path
+
 import pytest
 from sqlalchemy import select
 
 from app.models.project import Shot
-from app.services.storage import join_preview_path, shot_dir
+from app.services import object_store
+from app.services.storage import join_preview_key, shot_audio_vc_key
 from tests.ffprobe_helpers import decode_errors, make_vc_wav, stream_duration
+from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import (
     HEADERS, _make_project, _add_shot, seed_shot_with_source,
 )
 
+pytestmark = requires_cos
+
+
+async def _publish_vc_wav(tmp_path_factory, pid: str, shot_id: int, seconds: float) -> str:
+    """Synthesize a CosyVoice-shaped wav and publish it to the shot's VC key."""
+    local = tmp_path_factory / f"vc_{shot_id}.wav"
+    make_vc_wav(local, seconds=seconds)
+    key = shot_audio_vc_key(pid, shot_id)
+    return await object_store.put(key, local)
+
+
+async def _download_join_preview(pid: str, td: Path) -> str:
+    key = join_preview_key(pid)
+    out = td / "preview.mp4"
+    await object_store.get(key, out)
+    return str(out)
+
 
 @pytest.mark.asyncio
 async def test_join_preview_stays_in_sync_with_voice_cloned_shot(
-    client, db_session_factory
+    client, db_session_factory, cos_prefix, tmp_path
 ):
     """Reproduces the reported incident: shot 1 trimmed, shot 2 voice-cloned.
 
@@ -45,8 +72,7 @@ async def test_join_preview_stays_in_sync_with_voice_cloned_shot(
 
     # shot 1: trimmed to 60 frames (2.0s).  shot 2: voice-cloned, untrimmed.
     # The wav is 5.0s -- longer than the 4.0s video, so -shortest bounds it.
-    vc_wav = shot_dir(pid, 2) / "audio_vc.wav"
-    make_vc_wav(vc_wav, seconds=5.0)
+    vc_key = await _publish_vc_wav(tmp_path, pid, 2, seconds=5.0)
     async with db_session_factory() as s:
         shot1 = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
@@ -55,7 +81,7 @@ async def test_join_preview_stays_in_sync_with_voice_cloned_shot(
         shot2 = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 2)
         )).scalar_one()
-        shot2.vc_audio_path = str(vc_wav)
+        shot2.vc_audio_path = vc_key
         await s.commit()
 
     r = await client.post(
@@ -65,26 +91,25 @@ async def test_join_preview_stays_in_sync_with_voice_cloned_shot(
     )
     assert r.status_code == 200, r.text
 
-    previews = sorted(join_preview_path(pid).parent.glob("join_preview*.mp4"))
-    assert previews, "no join preview produced"
-    out = str(previews[-1])
+    with tempfile.TemporaryDirectory() as td:
+        out = await _download_join_preview(pid, Path(td))
 
-    # The preview must decode cleanly end to end...
-    assert decode_errors(out) == 0, "preview has audio decode errors"
+        # The preview must decode cleanly end to end...
+        assert decode_errors(out) == 0, "preview has audio decode errors"
 
-    # ...and its audio must span the whole 2.0s + 4.0s timeline, not stop at
-    # the segment boundary.
-    v_dur = stream_duration(out, "v")
-    a_dur = stream_duration(out, "a")
-    assert v_dur == pytest.approx(6.0, abs=0.2), f"video {v_dur}"
-    assert a_dur == pytest.approx(v_dur, abs=0.2), (
-        f"audio {a_dur} does not span the video {v_dur}"
-    )
+        # ...and its audio must span the whole 2.0s + 4.0s timeline, not stop at
+        # the segment boundary.
+        v_dur = stream_duration(out, "v")
+        a_dur = stream_duration(out, "a")
+        assert v_dur == pytest.approx(6.0, abs=0.2), f"video {v_dur}"
+        assert a_dur == pytest.approx(v_dur, abs=0.2), (
+            f"audio {a_dur} does not span the video {v_dur}"
+        )
 
 
 @pytest.mark.asyncio
 async def test_join_preview_stays_in_sync_when_only_one_shot_is_baked(
-    client, db_session_factory
+    client, db_session_factory, cos_prefix, tmp_path
 ):
     """Isolates the concat-filter fix from the audio-normalization fix.
 
@@ -106,13 +131,12 @@ async def test_join_preview_stays_in_sync_when_only_one_shot_is_baked(
 
     # shot 1: no edits at all -> passthrough, keeps the source's 44.1 kHz mono.
     # shot 2: voice-cloned -> baked to canonical 48 kHz stereo.
-    vc_wav = shot_dir(pid, 2) / "audio_vc.wav"
-    make_vc_wav(vc_wav, seconds=5.0)
+    vc_key = await _publish_vc_wav(tmp_path, pid, 2, seconds=5.0)
     async with db_session_factory() as s:
         shot2 = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 2)
         )).scalar_one()
-        shot2.vc_audio_path = str(vc_wav)
+        shot2.vc_audio_path = vc_key
         await s.commit()
 
     r = await client.post(
@@ -122,17 +146,16 @@ async def test_join_preview_stays_in_sync_when_only_one_shot_is_baked(
     )
     assert r.status_code == 200, r.text
 
-    previews = sorted(join_preview_path(pid).parent.glob("join_preview*.mp4"))
-    assert previews, "no join preview produced"
-    out = str(previews[-1])
+    with tempfile.TemporaryDirectory() as td:
+        out = await _download_join_preview(pid, Path(td))
 
-    assert decode_errors(out) == 0, "preview has audio decode errors"
+        assert decode_errors(out) == 0, "preview has audio decode errors"
 
-    # The demuxer regression shows up here, not in decode_errors: mismatched
-    # inputs made the audio run ~0.7s past the video.
-    v_dur = stream_duration(out, "v")
-    a_dur = stream_duration(out, "a")
-    assert v_dur == pytest.approx(8.0, abs=0.2), f"video {v_dur}"
-    assert a_dur == pytest.approx(v_dur, abs=0.2), (
-        f"audio {a_dur} does not span the video {v_dur}"
-    )
+        # The demuxer regression shows up here, not in decode_errors: mismatched
+        # inputs made the audio run ~0.7s past the video.
+        v_dur = stream_duration(out, "v")
+        a_dur = stream_duration(out, "a")
+        assert v_dur == pytest.approx(8.0, abs=0.2), f"video {v_dur}"
+        assert a_dur == pytest.approx(v_dur, abs=0.2), (
+            f"audio {a_dur} does not span the video {v_dur}"
+        )
