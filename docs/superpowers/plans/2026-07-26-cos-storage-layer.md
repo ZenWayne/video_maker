@@ -1081,10 +1081,22 @@ signed_url 例外——纯 HMAC 无网络 IO，进线程池徒增开销。
 
 - [ ] **Step 1: 写失败测试**
 
+> **测试放置规则（易犯）**：`tests/integration/test_workspace.py` 顶部有模块级
+> `pytestmark = requires_cos`，**该模块内的一切测试在无凭证环境下都会被 SKIP**。
+> 因此**只有真正调用 `object_store` 的测试才放这里**；纯逻辑测试（磁盘空间预检、
+> `path()` 的路径校验等）一律放 `backend/tests/unit/` 下的独立文件，不带任何 COS
+> gate，好让它们在无凭证的 CI/开发环境里照常运行。
+>
+> 把纯逻辑的守卫测试放进 gate 后面，等于那条守卫在日常环境里没有任何测试覆盖——
+> 将来误改回去也不会有人发现。
+
 创建 `backend/tests/integration/test_workspace.py`：
 
 ```python
-"""workspace 上下文管理器——打真实 dev bucket。"""
+"""workspace 上下文管理器——打真实 dev bucket。
+
+只放真正需要 COS 的测试；纯逻辑测试见 tests/unit/。
+"""
 import pytest
 
 from tests.integration.conftest_cos import requires_cos

@@ -40,15 +40,6 @@ async def test_tmpdir_removed_on_exit(cos_prefix, tmp_path):
     assert not root.exists()
 
 
-async def test_tmpdir_removed_even_on_exception(cos_prefix):
-    captured = {}
-    with pytest.raises(ValueError):
-        async with workspace() as ws:
-            captured["root"] = ws.root
-            raise ValueError("boom")
-    assert not captured["root"].exists()
-
-
 async def test_fetch_accepts_custom_local_name(cos_prefix, tmp_path):
     src = tmp_path / "y.mp4"
     src.write_bytes(b"video bytes")
@@ -58,25 +49,6 @@ async def test_fetch_accepts_custom_local_name(cos_prefix, tmp_path):
         local = await ws.fetch(key, name="source.mp4")
         assert local.name == "source.mp4"
         assert local.read_bytes() == b"video bytes"
-
-
-async def test_path_rejects_absolute_name(cos_prefix):
-    async with workspace() as ws:
-        with pytest.raises(ValueError):
-            ws.path("/etc/passwd")
-
-
-async def test_path_rejects_dotdot_name(cos_prefix):
-    async with workspace() as ws:
-        with pytest.raises(ValueError):
-            ws.path("../escape.txt")
-
-
-async def test_path_accepts_nested_relative_name(cos_prefix):
-    async with workspace() as ws:
-        p = ws.path("sub/dir/out.png")
-        assert p == ws.root / "sub" / "dir" / "out.png"
-        assert p.parent.is_dir()
 
 
 async def test_fetch_same_local_name_different_key_raises(cos_prefix, tmp_path):
