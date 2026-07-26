@@ -26,9 +26,15 @@ requires_cos = pytest.mark.skipif(
 
 @pytest.fixture
 async def cos_prefix():
-    """本次测试专属 key 前缀，退出时递归删除。"""
-    from app.services import object_store
+    """本次测试专属 key 前缀，退出时递归删除。
 
+    需要缓存凭证才能拿到 client（object_store 不负责 warm——那是应用
+    lifespan/worker 启动时的职责，见 cos_client.warm_credentials 的文档），
+    这里显式预热一次，反映真实调用序并让本 fixture 的 teardown 也能工作。
+    """
+    from app.services import cos_client, object_store
+
+    await cos_client.warm_credentials()
     prefix = f"test/{uuid.uuid4().hex}/"
     yield prefix
     await object_store.delete_prefix(prefix)

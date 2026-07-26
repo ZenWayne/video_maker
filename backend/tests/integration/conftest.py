@@ -10,6 +10,13 @@ from sqlalchemy.pool import StaticPool
 
 from app.models.project import Base, Project, Shot, ReferenceImage
 
+# conftest_cos.py defines the cos_prefix fixture used by COS integration tests;
+# it isn't named conftest.py so pytest won't auto-discover it on its own.
+# Re-exporting the fixture into this (real) conftest's namespace registers it
+# for the whole integration/ tree without the `pytest_plugins` mechanism,
+# which pytest disallows in non-top-level conftest files.
+from tests.integration.conftest_cos import cos_prefix  # noqa: F401
+
 USER = "test-user"
 HEADERS = {"X-User-Name": USER}
 
