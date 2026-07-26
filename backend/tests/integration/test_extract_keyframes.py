@@ -219,17 +219,10 @@ async def test_extract_last_frame_400_when_field_none(client, db_session_factory
     assert r.status_code == 400, r.text
 
 
-async def test_extract_last_frame_400_when_file_absent(client, db_session_factory, tmp_path):
-    """400 when last_frame_path is set but the file doesn't exist on disk."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    ghost_path = tmp_path / "ghost_last_frame.png"  # NOT created on disk
-    await _seed_shot(db_session_factory, pid, last_frame_path=str(ghost_path))
-
-    r = await client.post(
-        f"/api/projects/{pid}/shots/1/extract-last-frame",
-        headers=HEADERS,
-    )
-    assert r.status_code == 400, r.text
+# test_extract_last_frame_400_when_file_absent moved to the real-COS test
+# tests/integration/test_uploads_oss.py::test_extract_last_frame_400_when_key_absent
+# — last_frame_path now holds a COS key (Task 10), and "absent" must be checked
+# via object_store.exists(), not a local Path().exists() on a fabricated path.
 
 
 async def test_extract_last_frame_404_shot_missing(client, db_session_factory):

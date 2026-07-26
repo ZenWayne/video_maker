@@ -34,12 +34,15 @@ from app.services.state_machine import (
 # （storyboard_path/archived_storyboard_path/shot_custom_frames_dir/
 # shot_pre_vc_video_path/shot_audio_original_path/shot_audio_vc_path/
 # shot_pre_cc_last_frame_path/join_preview_path/shot_dir/shot_source_path），
-# 导致整个模块 ImportError。Task 8 只负责 trim/restore-trim/align-tail-frame
-# （下方已重写为 workspace()+COS key，不再需要 shot_dir/shot_source_path/
-# shot_pre_cc_last_frame_path）。其余仍以裸名引用的名字留给对应 task 处理，
-# 调用时会 NameError（而非让整个模块无法加载）：
+# 导致整个模块 ImportError。Task 8 负责 trim/restore-trim/align-tail-frame
+# （已重写为 workspace()+COS key，不再需要 shot_dir/shot_source_path/
+# shot_pre_cc_last_frame_path）。Task 10（上传链路）已修复全部
+# shot_custom_frames_dir/shot_dir 的上传/拷贝/删除端点调用点（upload-first-frame/
+# upload-tail-frame/reference-images/extract-first-frame/extract-last-frame/
+# extract-tail-frame/use-prev-last-frame/delete-tail-frame/first-frame）——全部
+# 改为 workspace()+COS key 或 object_store.copy/delete(_prefix)。其余仍以裸名
+# 引用的名字留给对应 task 处理，调用时会 NameError（而非让整个模块无法加载）：
 #   storyboard_path/archived_storyboard_path — storyboard 相关端点
-#   shot_custom_frames_dir/shot_dir（部分残留调用）— 上传相关端点（uploads task）
 #   join_preview_path — 连贯性预览端点
 #   shot_source_path（_dialog_source 用）/ pristine_video_path /
 #     pristine_last_frame_path — 只读展示端点 video-info/waveform/filmstrip
@@ -1053,18 +1056,18 @@ async def delete_tail_frame(
             detail="Tail frame is currently being generated; wait for it to complete",
         )
 
-    # Capture the stored path BEFORE clearing — needed for unlink below
-    old_path = shot.target_last_frame_path
+    # Capture the stored key BEFORE clearing — needed for the COS delete below
+    old_key = shot.target_last_frame_path
 
     # Clear all tail-frame state (path-as-truth: empty path = no tail frame)
     _reset_tail_frame(shot)
     session.add(shot)
     await session.commit()
 
-    # Remove the physical file at the DB-stored path (covers both AI-generated
+    # Remove the COS object at the DB-stored key (covers both AI-generated
     # canonical names and ts_uuid filenames from uploaded/extracted frames)
-    if old_path:
-        Path(old_path).unlink(missing_ok=True)
+    if old_key:
+        await object_store.delete(old_key)
 
     return {
         "shot_id": shot_id,
@@ -1092,17 +1095,15 @@ async def extract_tail_frame(
     if not shot.last_frame_path:
         raise HTTPException(status_code=400, detail="Shot has no last frame")
 
-    src = Path(shot.last_frame_path)
-    if not src.exists():
+    src_key = shot.last_frame_path
+    if not await object_store.exists(src_key):
         raise HTTPException(status_code=400, detail="Last frame file not found")
 
-    # Copy last_frame.png → target_last_frame.png
-    from app.services.storage import shot_target_last_frame_path
-    dest = shot_target_last_frame_path(project_id, shot_id)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(src), str(dest))
+    # Copy last_frame → target_last_frame (server-side COS copy, unique name)
+    dest_key = shot_key(project_id, shot_id, ts_uuid_name(Path(src_key).suffix or ".png"))
+    await object_store.copy(src_key, dest_key)
 
-    shot.target_last_frame_path = str(dest)
+    shot.target_last_frame_path = dest_key
     shot.tf_status = "done"
     shot.tf_error_message = None
     shot.tf_confirmed = False
@@ -1111,7 +1112,7 @@ async def extract_tail_frame(
 
     return {
         "shot_id": shot_id,
-        "target_last_frame_path": to_media_url(str(dest)),
+        "target_last_frame_path": to_media_url(dest_key),
         "tf_status": "done",
     }
 
@@ -1142,23 +1143,24 @@ async def upload_shot_references(
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    # Create storage directory
-    dest_dir = shot_custom_frames_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    from app.services.storage import shot_custom_frames_prefix
 
-    # Collect existing paths
+    # Collect existing keys
     existing_paths: list[str] = []
     if shot.custom_reference_paths:
         existing_paths = json.loads(shot.custom_reference_paths)
 
-    # Save new files (append)
-    for upload in files:
-        content = await upload.read()
-        safe_name = Path(upload.filename).name if upload.filename else "image.png"
-        image_id = str(_uuid.uuid4())[:8]
-        dest_path = dest_dir / f"{image_id}_{safe_name}"
-        dest_path.write_bytes(content)
-        existing_paths.append(str(dest_path))
+    # Save new files (append) — stage locally then publish to COS.
+    prefix = shot_custom_frames_prefix(project_id, shot_id)
+    async with workspace() as ws:
+        for idx, upload in enumerate(files):
+            content = await upload.read()
+            safe_name = Path(upload.filename).name if upload.filename else "image.png"
+            image_id = str(_uuid.uuid4())[:8]
+            local = ws.path(f"ref_{idx}_{safe_name}")
+            local.write_bytes(content)
+            key = await ws.publish(local, f"{prefix}{image_id}_{safe_name}")
+            existing_paths.append(key)
 
     # Always store as reference_images so they are passed as object refs
     all_paths = existing_paths
@@ -1189,6 +1191,11 @@ async def delete_shot_references(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
+    from app.services.storage import shot_custom_frames_prefix
+
+    removed_key: Optional[str] = None
+    delete_all_prefix: Optional[str] = None
+
     if index is not None:
         # Delete single image by index
         all_paths: list[str] = []
@@ -1198,22 +1205,24 @@ async def delete_shot_references(
         if index < 0 or index >= len(all_paths):
             raise HTTPException(status_code=400, detail="Invalid index")
 
-        # Delete file
-        removed = Path(all_paths.pop(index))
-        removed.unlink(missing_ok=True)
+        # 素材审计（CLAUDE.md）：先改 DB 解除引用，再删 COS 对象。
+        removed_key = all_paths.pop(index)
 
         # Update DB
         shot.custom_first_frame_path = None
         shot.custom_reference_paths = json.dumps(all_paths) if all_paths else None
     else:
         # Delete all
-        dest_dir = shot_custom_frames_dir(project_id, shot_id)
-        if dest_dir.exists():
-            shutil.rmtree(dest_dir)
+        delete_all_prefix = shot_custom_frames_prefix(project_id, shot_id)
         shot.custom_first_frame_path = None
         shot.custom_reference_paths = None
 
     await session.commit()
+
+    if removed_key:
+        await object_store.delete(removed_key)
+    if delete_all_prefix:
+        await object_store.delete_prefix(delete_all_prefix)
 
     return _ref_images_response(shot)
 
@@ -1246,14 +1255,17 @@ async def upload_first_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
-    dest_dir = shot_custom_frames_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    from app.services.storage import shot_custom_frames_prefix
+
     ext = Path(file.filename or "x.png").suffix or ".png"
-    dest = dest_dir / ts_uuid_name(ext)
-    dest.write_bytes(await file.read())
-    shot.custom_first_frame_path = str(dest)
+    content = await file.read()
+    async with workspace() as ws:
+        local = ws.path(ts_uuid_name(ext))
+        local.write_bytes(content)
+        key = await ws.publish(local, f"{shot_custom_frames_prefix(project_id, shot_id)}{local.name}")
+    shot.custom_first_frame_path = key
     await session.commit()
-    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(key)}
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/upload-tail-frame")
@@ -1273,17 +1285,18 @@ async def upload_tail_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
-    dest_dir = shot_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
     ext = Path(file.filename or "x.png").suffix or ".png"
-    dest = dest_dir / ts_uuid_name(ext)
-    dest.write_bytes(await file.read())
-    shot.target_last_frame_path = str(dest)
+    content = await file.read()
+    async with workspace() as ws:
+        local = ws.path(ts_uuid_name(ext))
+        local.write_bytes(content)
+        key = await ws.publish(local, shot_key(project_id, shot_id, local.name))
+    shot.target_last_frame_path = key
     shot.tf_status = "done"
     await session.commit()
     return {
         "shot_id": shot_id,
-        "target_last_frame_path": to_media_url(str(dest)),
+        "target_last_frame_path": to_media_url(key),
         "tf_status": "done",
     }
 
@@ -1309,22 +1322,25 @@ async def extract_first_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
+    from app.services.storage import shot_custom_frames_prefix
+
     try:
         src = await pick_first_frame(project_id, shot, session)
     except ValueError:
         src = None
-    if src is None or not src.exists():
+    if src is None:
         raise HTTPException(status_code=400, detail="Shot has no first frame or file is missing")
-    src_str = str(src)
+    # pick_first_frame already validated object_store existence for every
+    # branch it can return — no extra local .exists() check needed (and it
+    # would be wrong: src is a Path wrapping a COS key, not a local file).
+    src_key = str(src)
 
-    dest_dir = shot_custom_frames_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
-    shutil.copy2(src_str, str(dest))
+    dest_key = f"{shot_custom_frames_prefix(project_id, shot_id)}{ts_uuid_name(Path(src_key).suffix or '.png')}"
+    await object_store.copy(src_key, dest_key)
 
-    shot.custom_first_frame_path = str(dest)
+    shot.custom_first_frame_path = dest_key
     await session.commit()
-    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(dest_key)}
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/use-prev-last-frame")
@@ -1351,22 +1367,22 @@ async def use_prev_last_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
+    from app.services.storage import shot_custom_frames_prefix
+
     prev_result = await session.execute(
         select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id - 1)
     )
     prev = prev_result.scalar_one_or_none()
-    src_str = prev.last_frame_path if prev else None
-    if not src_str or not Path(src_str).exists():
+    src_key = prev.last_frame_path if prev else None
+    if not src_key or not await object_store.exists(src_key):
         raise HTTPException(status_code=400, detail="Previous shot has no last frame")
 
-    dest_dir = shot_custom_frames_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
-    shutil.copy2(src_str, str(dest))
+    dest_key = f"{shot_custom_frames_prefix(project_id, shot_id)}{ts_uuid_name(Path(src_key).suffix or '.png')}"
+    await object_store.copy(src_key, dest_key)
 
-    shot.custom_first_frame_path = str(dest)
+    shot.custom_first_frame_path = dest_key
     await session.commit()
-    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(dest_key)}
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/extract-last-frame")
@@ -1385,21 +1401,19 @@ async def extract_last_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
-    src_str = shot.last_frame_path
-    if not src_str or not Path(src_str).exists():
+    src_key = shot.last_frame_path
+    if not src_key or not await object_store.exists(src_key):
         raise HTTPException(status_code=400, detail="Shot has no last frame or file is missing")
 
-    dest_dir = shot_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
-    shutil.copy2(src_str, str(dest))
+    dest_key = shot_key(project_id, shot_id, ts_uuid_name(Path(src_key).suffix or ".png"))
+    await object_store.copy(src_key, dest_key)
 
-    shot.target_last_frame_path = str(dest)
+    shot.target_last_frame_path = dest_key
     shot.tf_status = "done"
     await session.commit()
     return {
         "shot_id": shot_id,
-        "target_last_frame_path": to_media_url(str(dest)),
+        "target_last_frame_path": to_media_url(dest_key),
         "tf_status": "done",
     }
 
@@ -1435,7 +1449,7 @@ async def delete_first_frame(
         )
 
     # Capture the stored path BEFORE clearing — needed for unlink below
-    old_path = shot.custom_first_frame_path
+    old_key = shot.custom_first_frame_path
 
     # Clear the custom first frame path
     shot.custom_first_frame_path = None
@@ -1444,10 +1458,10 @@ async def delete_first_frame(
     session.add(shot)
     await session.commit()
 
-    # Remove the physical file at the DB-stored path (covers ts_uuid filenames
+    # Remove the COS object at the DB-stored key (covers ts_uuid filenames
     # from uploaded frames)
-    if old_path:
-        Path(old_path).unlink(missing_ok=True)
+    if old_key:
+        await object_store.delete(old_key)
 
     return {
         "shot_id": shot_id,

@@ -1,9 +1,18 @@
-"""Integration tests for reference image upload/delete endpoints."""
+"""Integration tests for reference image upload/delete endpoints.
+
+Uploads now publish to real COS (Task 10) — gated behind requires_cos.
+Tests that never reach the storage layer (validation/404 guards) don't need
+the gate, but pytestmark applies uniformly per file convention; they'd pass
+either way once credentials are present.
+"""
 import pytest
 from tests.integration.conftest import HEADERS
+from tests.integration.conftest_cos import requires_cos
+
+pytestmark = requires_cos
 
 
-async def test_upload_character_image(client, project_in_draft):
+async def test_upload_character_image(client, project_in_draft, cos_prefix):
     pid = project_in_draft["id"]
     r = await client.post(
         f"/api/projects/{pid}/reference-images",
@@ -18,7 +27,7 @@ async def test_upload_character_image(client, project_in_draft):
     assert "id" in data[0]
 
 
-async def test_upload_scene_image(client, project_in_draft):
+async def test_upload_scene_image(client, project_in_draft, cos_prefix):
     pid = project_in_draft["id"]
     r = await client.post(
         f"/api/projects/{pid}/reference-images",
@@ -48,7 +57,7 @@ async def test_upload_project_not_found(client):
     assert r.status_code == 404
 
 
-async def test_upload_multiple_images(client, project_in_draft):
+async def test_upload_multiple_images(client, project_in_draft, cos_prefix):
     pid = project_in_draft["id"]
     r = await client.post(
         f"/api/projects/{pid}/reference-images",
@@ -65,7 +74,7 @@ async def test_upload_multiple_images(client, project_in_draft):
     assert data[1]["order_index"] == 1
 
 
-async def test_delete_reference_image(client, project_in_draft):
+async def test_delete_reference_image(client, project_in_draft, cos_prefix):
     pid = project_in_draft["id"]
     # Upload first
     upload_r = await client.post(

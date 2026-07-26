@@ -1,6 +1,5 @@
 """Uploads API routes for reference images."""
 
-import shutil
 import uuid
 from pathlib import Path
 from typing import List
@@ -12,10 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.models.project import Project, ReferenceImage
 from app.models.schemas import ReferenceImageResponse
-# 注：reference_images_dir/reference_image_path 已被 Task 5 删除（本地目录/路径
-# 函数，COS 下不成立）。上传改为 COS key 属于 uploads task 的范围，此处只去掉
-# 顶层 import 让模块能被 app.main 加载——两个名字仍在 upload_reference_images()
-# 里以裸名引用，调用时会 NameError（而非让整个 app 无法启动）。
+from app.services import object_store
+from app.services.storage import reference_image_key
+from app.services.workspace import workspace
 
 router = APIRouter()
 
@@ -45,10 +43,6 @@ async def upload_reference_images(
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Create storage directory
-    dest_dir = reference_images_dir(project_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
     # Get current count for this kind
     existing = await session.execute(
         select(ReferenceImage).where(
@@ -59,28 +53,31 @@ async def upload_reference_images(
     current_count = len(existing.scalars().all())
 
     created = []
-    for idx, upload in enumerate(files):
-        # Read file content
-        content = await upload.read()
+    async with workspace() as ws:
+        for idx, upload in enumerate(files):
+            # Read file content
+            content = await upload.read()
 
-        # Generate safe filename
-        safe_name = Path(upload.filename).name if upload.filename else f"image_{idx}.bin"
-        image_id = str(uuid.uuid4())[:8]
-        dest_path = reference_image_path(project_id, image_id, safe_name)
+            # Generate safe filename
+            safe_name = Path(upload.filename).name if upload.filename else f"image_{idx}.bin"
+            image_id = str(uuid.uuid4())[:8]
 
-        # Write file
-        dest_path.write_bytes(content)
+            # Stage locally then publish to COS (put succeeds before the DB
+            # row is created — consistency invariant: new files put first).
+            local = ws.path(f"ref_{idx}_{safe_name}")
+            local.write_bytes(content)
+            key = await ws.publish(local, reference_image_key(project_id, image_id, safe_name))
 
-        # Create database record
-        img = ReferenceImage(
-            project_id=project_id,
-            kind=kind,
-            filename=safe_name,
-            storage_path=str(dest_path),
-            order_index=current_count + idx,
-        )
-        session.add(img)
-        created.append(img)
+            # Create database record
+            img = ReferenceImage(
+                project_id=project_id,
+                kind=kind,
+                filename=safe_name,
+                storage_path=key,
+                order_index=current_count + idx,
+            )
+            session.add(img)
+            created.append(img)
 
     await session.commit()
     for img in created:
@@ -118,13 +115,12 @@ async def delete_reference_image(
     if img is None:
         raise HTTPException(status_code=404, detail="Image not found")
 
-    # Delete file
-    storage = Path(img.storage_path)
-    if storage.exists():
-        storage.unlink(missing_ok=True)
-
-    # Delete from database
+    # 素材审计（CLAUDE.md）：先删行（解除引用）再删 COS 对象。
+    key = img.storage_path
     await session.delete(img)
     await session.commit()
+
+    if key:
+        await object_store.delete(key)
 
     return None
