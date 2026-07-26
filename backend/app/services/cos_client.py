@@ -111,12 +111,26 @@ async def warm_credentials() -> None:
     logger.info("cos_credentials_warmed", extra={"auth_mode": settings.cos_auth_mode})
 
 
+def _refresh_sleep_seconds(remaining: Optional[int]) -> int:
+    """由剩余有效秒数推导下次刷新前的休眠秒数，下限 60 秒。
+
+    `remaining` 为 `None`（static 模式或尚未知道过期时间）时按默认 TTL
+    处理。`remaining` 为 `0`（凭证已完全过期）必须原样保留、不能写成
+    `remaining or 3600`——0 在 Python 里是 falsy，会被 `or` 误判成
+    「还没算出来」而按默认 TTL 睡 1800 秒，把一次瞬时刷新失败（例如
+    warm_credentials() 网络抖动重试期间旧凭证到期）放大成最长 30 分钟的
+    凭证失效窗口。0 必须让下面的 `max(60, ...)` 取到下限，立即重试。
+    """
+    if remaining is None:
+        remaining = 3600
+    return max(60, remaining // 2)
+
+
 async def _refresh_loop() -> None:
     """按凭证剩余有效期的 50% 周期刷新，保证同步签名路径永远读到有效凭证。"""
     while True:
         try:
-            remaining = credentials_remaining_sec() or 3600
-            await asyncio.sleep(max(60, remaining // 2))
+            await asyncio.sleep(_refresh_sleep_seconds(credentials_remaining_sec()))
             await warm_credentials()
         except asyncio.CancelledError:
             raise
