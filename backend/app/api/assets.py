@@ -1,58 +1,62 @@
-"""Assets API routes for serving static files."""
+"""素材路由。媒体本体存在 COS，本模块只签发重定向，不中转流量。"""
 
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import RedirectResponse
 
-# 注：reference_images_dir/shot_dir/final_video_path 已被 Task 5 删除（本地路径
-# 函数，COS 下不成立）。资产改为签名 URL 属于读路径 task 的范围，此处只去掉顶层
-# import 让模块能被 app.main 加载——三个名字仍在 serve_asset() 里以裸名引用，
-# 调用时会 NameError（而非让整个 app 无法启动）。
+from app.services import object_store
+from app.services.storage import (
+    final_video_key,
+    is_valid_key,
+    reference_images_prefix,
+    shot_prefix,
+)
 
 router = APIRouter()
 
 
 @router.get("/projects/{project_id}/assets/{kind}/{file}")
 async def serve_asset(project_id: str, kind: str, file: str):
-    """Serve static assets (reference images, shot frames, etc.)."""
-    # Security: sanitize file name
-    file = Path(file).name
+    """302 重定向到素材的签名 URL。"""
+    file = Path(file).name  # 去掉任何路径成分
 
     if kind == "reference_images":
-        path = reference_images_dir(project_id) / file
+        key = f"{reference_images_prefix(project_id)}{file}"
     elif kind.startswith("shots/"):
-        # Format: shots/{shot_id}/{filename}
         parts = kind.split("/")
-        if len(parts) >= 2:
-            shot_id_str = parts[1].replace("shot_", "")
-            try:
-                shot_id = int(shot_id_str)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid shot ID")
-            path = shot_dir(project_id, shot_id) / file
-        else:
+        if len(parts) < 2:
             raise HTTPException(status_code=400, detail="Invalid shot path")
+        try:
+            shot_id = int(parts[1].replace("shot_", ""))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid shot ID")
+        key = f"{shot_prefix(project_id, shot_id)}{file}"
     elif kind == "final":
-        path = final_video_path(project_id).parent / file
+        key = f"{final_video_key(project_id).rsplit('/', 1)[0]}/{file}"
     else:
         raise HTTPException(status_code=400, detail="Unknown asset kind")
 
-    if not path.exists():
+    if not is_valid_key(key):
+        raise HTTPException(status_code=400, detail="Invalid key")
+    if not await object_store.exists(key):
         raise HTTPException(status_code=404, detail="Asset not found")
 
-    return FileResponse(str(path))
+    return RedirectResponse(url=object_store.signed_url(key), status_code=302)
 
 
 @router.get("/projects/{project_id}/final.mp4")
 async def download_final(project_id: str):
-    """Download the final merged video."""
-    path = final_video_path(project_id)
-    if not path.exists():
+    """302 重定向到成片下载 URL。
+
+    附件下载头由 COS 通过 response-content-disposition 直接返回，
+    后端完全不参与视频流量。
+    """
+    key = final_video_key(project_id)
+    if not await object_store.exists(key):
         raise HTTPException(status_code=404, detail="Final video not ready")
 
-    return FileResponse(
-        str(path),
-        media_type="video/mp4",
-        filename="merged.mp4",
+    return RedirectResponse(
+        url=object_store.signed_url(key, filename="merged.mp4"),
+        status_code=302,
     )

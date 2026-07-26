@@ -475,25 +475,45 @@ async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis
 
 # ── GET /projects/{id}/final.mp4 ─────────────────────────────────────────────
 
-async def test_download_final_not_ready(client, project_in_draft):
+async def test_download_final_not_ready(client, project_in_draft, monkeypatch):
+    """素材本体在 COS——不存在时 assets.py 必须直接 404，不发出 302 到一个会
+    404 的签名 URL。用 mock 而非真实 COS：object_store.exists() 本身会发真实
+    网络请求，这个用例只关心「不存在 -> 404」这条分支，不需要真凭证/真网络，
+    因此不带 cos_prefix、也不用 @requires_cos——按项目 gating 约定它必须留在
+    无凭证环境的常规回归里。
+    """
+    from app.api import assets as assets_module
+
+    monkeypatch.setattr(
+        assets_module.object_store, "exists", AsyncMock(return_value=False)
+    )
+
     pid = project_in_draft["id"]
     r = await client.get(f"/api/projects/{pid}/final.mp4")
     assert r.status_code == 404
 
 
-async def test_download_final_success(client, db_session_factory, tmp_path):
-    from app.services.storage import final_video_path
-    from app.config import settings
+async def test_download_final_success(client, db_session_factory, monkeypatch):
+    """存在时 302 重定向到签名 URL；签名本身是纯本地 HMAC 计算，用
+    install_fake_cos_credentials 伪造凭证即可，不需要真实网络/凭证。真实可
+    下载 + 附件头的验证在 tests/integration/test_assets_redirect.py（真实
+    COS，@requires_cos）里做。
+    """
+    from app.api import assets as assets_module
+    from tests.integration.conftest import install_fake_cos_credentials
+
+    install_fake_cos_credentials(monkeypatch)
+    monkeypatch.setattr(
+        assets_module.object_store, "exists", AsyncMock(return_value=True)
+    )
 
     pid = await _make_project(db_session_factory, status="exported")
-    # Create the merged.mp4 file in the patched storage location
-    video_path = final_video_path(pid)
-    video_path.parent.mkdir(parents=True, exist_ok=True)
-    video_path.write_bytes(b"fake-video-content")
 
-    r = await client.get(f"/api/projects/{pid}/final.mp4")
-    assert r.status_code == 200
-    assert r.headers["content-type"] == "video/mp4"
+    r = await client.get(f"/api/projects/{pid}/final.mp4", follow_redirects=False)
+    assert r.status_code == 302
+    loc = r.headers["location"]
+    assert loc.startswith("http")
+    assert "merged.mp4" in loc
 
 
 # ── POST /projects/{id}/shots/{shot_id}/delete-tail-frame ──────────────────────
