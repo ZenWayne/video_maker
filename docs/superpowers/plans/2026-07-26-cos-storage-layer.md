@@ -194,13 +194,13 @@ Expected: PASS（4 项）
 
 ```yaml
 cos_region: ap-guangzhou
-cos_bucket: video-maker-dev-1250000000
+cos_bucket: video-maker-dev-1414782845
 cos_scheme: https
 cos_auth_mode: static
 cos_signed_url_ttl_sec: 7200
 ```
 
-（region 与 bucket 是占位值，等用户提供真实值后再改。）
+**这是真实值，不是占位符**——bucket 已创建、凭证已验证可用，与用户 k8s 集群节点同在广州地域（同地域内网免流量费，这是选腾讯云的核心动机）。照抄即可，不要改动。
 
 `deploy/secrets.yml.example`：把 `oss_access_key_id` / `oss_access_key_secret` 两行替换为：
 
@@ -315,7 +315,22 @@ for m in ['get_presigned_url','upload_file','copy_object','object_exists']:
 "
 ```
 
-记录实际输出。**若某方法缺失或签名与后续步骤不符，以实际为准；拿不准就以 NEEDS_CONTEXT 上报，不要自行改设计。** 把输出粘进提交信息，供 Task 3 对照。
+记录实际输出。**若某方法缺失或签名与后续步骤不符，以实际为准；拿不准就以 NEEDS_CONTEXT 上报，不要自行改设计。**
+
+**以下形态已由 controller 在真实 bucket 上跑通验证（`video-maker-dev-1414782845` / `ap-guangzhou`），可直接采信：**
+
+| 调用 | 已验证的形态 |
+|---|---|
+| `put_object` | `put_object(Bucket=, Key=, Body=<file obj>, EnableMD5=False)` |
+| `object_exists` | `object_exists(bucket, key)` —— **位置参数，不是关键字** |
+| `head_object` | `head_object(Bucket=, Key=)`，返回 dict，大小取 `r['Content-Length']` |
+| `get_object` | `get_object(Bucket=, Key=)['Body'].get_stream_to_file(路径str)` |
+| `copy_object` | `copy_object(Bucket=, Key=, CopySource={'Bucket':,'Key':,'Region':})` |
+| `get_presigned_url` | `get_presigned_url(Method='GET', Bucket=, Key=, Expired=秒)`，返回的 URL 真实可 GET |
+| `list_objects` | `list_objects(Bucket=, Prefix=)` → `r['Contents']`；**`r['IsTruncated']` 是字符串 `'false'`/`'true'`，不是布尔** —— Task 3 的分页循环正是按字符串比较写的，改成布尔判断会导致只取第一页 |
+| `delete_objects` | `delete_objects(Bucket=, Delete={'Object':[{'Key':k},...], 'Quiet':'true'})` |
+
+**唯一未验证项**：`get_presigned_url` 的 `Params={'response-content-disposition': ...}`（用于成片下载的附件头）。Step 1 的核对命令里请一并确认该参数是否被接受；若不支持，改为在 URL 上手工附加该 query 参数，并以 DONE_WITH_CONCERNS 报告。
 
 - [ ] **Step 2: 写失败的冒烟测试**
 
