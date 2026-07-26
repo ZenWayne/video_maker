@@ -2491,6 +2491,13 @@ async def merge_project_shots(session_factory, project_id: str) -> str:
     from app.services.workspace import workspace, ensure_free_space
     from app.services import object_store
 
+    # ⚠️ 严重错误警告（实施时已修正，此处保留为反面教材）：
+    # 不要直接把 shot.video_path 逐个 concat。本项目是**非破坏式编辑**模型——
+    # trim_frames / vc_audio_path / audio_head_mute_frames 都只存在 DB 里，
+    # 需要在导出时应用到素材上。直接 concat 原视频会让用户的裁剪、变声、
+    # 片头静音**全部静默消失**，成片看起来正常但编辑成果荡然无存。
+    # 正确做法：复用既有的 effective_clip_paths / merge_shots 机制，
+    # 让它按 DB 中的编辑描述生成"有效片段"再合并。
     async with session_factory() as s:
         shots = (await s.execute(
             select(Shot).where(Shot.project_id == project_id)
