@@ -16,8 +16,6 @@ import asyncio
 import base64
 import json
 import logging
-import shutil
-import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
@@ -28,6 +26,7 @@ from google.genai import types
 
 from app.agents.frame_porter import center_crop_to_aspect
 from app.config import settings
+from app.services.workspace import workspace
 
 logger = logging.getLogger(__name__)
 
@@ -51,37 +50,43 @@ class VideoGenerationTimeout(Exception):
 # Shared helpers
 # --------------------------------------------------------------------------- #
 
-def _crop_inputs(
-    tmp_dir: str,
-    first_frame_path: Optional[str],
-    last_frame_path: Optional[str],
-    reference_image_paths: Optional[list[str]],
+async def _crop_inputs(
+    ws,
+    first_frame_key: Optional[str],
+    last_frame_key: Optional[str],
+    reference_image_keys: Optional[list[str]],
     aspect_ratio: str,
 ) -> tuple[Optional[str], Optional[str], Optional[list[str]]]:
-    """Center-crop all input images to the exact target aspect ratio.
+    """把 COS 上的首尾帧与参考图取到工作区，并按目标宽高比中心裁剪。
 
-    Returns the cropped (first_frame, last_frame, reference_images) paths,
-    all living under ``tmp_dir``.
+    ``ws`` 是一个 :class:`app.services.workspace.Workspace` 实例。入参是 COS
+    key（不是本地路径）——models.Image.from_file / kie 的 base64 上传都要求
+    真实本地文件，所以每个 key 都先 ``ws.fetch`` 到工作区再裁剪。
+
+    返回裁剪后的本地路径三元组，供调用方直接喂给 Veo SDK / kie 上传。
     """
-    if first_frame_path:
-        first_frame_path = center_crop_to_aspect(
-            first_frame_path, aspect_ratio,
-            output_path=str(Path(tmp_dir) / Path(first_frame_path).name),
+    first_local = last_local = None
+    ref_locals: list[str] = []
+
+    if first_frame_key:
+        first_local = str(await ws.fetch(first_frame_key, name="first_frame.png"))
+        first_local = center_crop_to_aspect(
+            first_local, aspect_ratio,
+            output_path=str(ws.path("first_frame_cropped.png")),
         )
-    if last_frame_path:
-        last_frame_path = center_crop_to_aspect(
-            last_frame_path, aspect_ratio,
-            output_path=str(Path(tmp_dir) / Path(last_frame_path).name),
+    if last_frame_key:
+        last_local = str(await ws.fetch(last_frame_key, name="last_frame.png"))
+        last_local = center_crop_to_aspect(
+            last_local, aspect_ratio,
+            output_path=str(ws.path("last_frame_cropped.png")),
         )
-    if reference_image_paths:
-        reference_image_paths = [
-            center_crop_to_aspect(
-                p, aspect_ratio,
-                output_path=str(Path(tmp_dir) / f"{i}_{Path(p).name}"),
-            )
-            for i, p in enumerate(reference_image_paths)
-        ]
-    return first_frame_path, last_frame_path, reference_image_paths
+    for i, key in enumerate(reference_image_keys or []):
+        local = str(await ws.fetch(key, name=f"ref_{i}.png"))
+        ref_locals.append(center_crop_to_aspect(
+            local, aspect_ratio, output_path=str(ws.path(f"ref_{i}_cropped.png"))
+        ))
+
+    return first_local, last_local, (ref_locals or None)
 
 
 # --------------------------------------------------------------------------- #
@@ -136,119 +141,117 @@ class VertexVeoProvider(VideoProvider):
         last_frame_path: Optional[str] = None,
     ) -> bytes:
         veo_client = self._client()
-        tmp_dir = tempfile.mkdtemp(prefix="veo_crop_")
 
-        try:
-            first_frame_path, last_frame_path, reference_image_paths = _crop_inputs(
-                tmp_dir, first_frame_path, last_frame_path,
-                reference_image_paths, aspect_ratio,
-            )
-
-            logger.info("Starting Veo generation with prompt: %s...", motion_prompt[:100])
-            prompt = motion_prompt
-
-            # reference_images mode requires exactly 8s duration
-            effective_duration = 8 if reference_image_paths else shot_duration
-
-            config = types.GenerateVideosConfig(
-                aspect_ratio=aspect_ratio,
-                duration_seconds=effective_duration,
-                number_of_videos=1,
-            )
-
-            # Set target last frame for image-to-video mode (frame interpolation)
-            if last_frame_path and not reference_image_paths:
-                config.last_frame = types.Image.from_file(location=last_frame_path)
-
-            logger.info(
-                "generate_video call: model=%s, first_frame_path=%s, reference_image_paths=%s, "
-                "last_frame_path=%s, shot_duration=%s, prompt=%s",
-                settings.veo_model, first_frame_path, reference_image_paths,
-                last_frame_path, shot_duration, prompt[:500],
-            )
-
-            # Wrap API call with timeout to prevent SSL hangs
-            api_timeout = 120  # seconds for the initial API call
+        async with workspace() as ws:
             try:
-                if reference_image_paths:
-                    config.reference_images = [
-                        types.VideoGenerationReferenceImage(
-                            image=types.Image.from_file(location=p),
-                            reference_type=types.VideoGenerationReferenceType.ASSET,
+                first_frame_path, last_frame_path, reference_image_paths = await _crop_inputs(
+                    ws, first_frame_path, last_frame_path,
+                    reference_image_paths, aspect_ratio,
+                )
+
+                logger.info("Starting Veo generation with prompt: %s...", motion_prompt[:100])
+                prompt = motion_prompt
+
+                # reference_images mode requires exactly 8s duration
+                effective_duration = 8 if reference_image_paths else shot_duration
+
+                config = types.GenerateVideosConfig(
+                    aspect_ratio=aspect_ratio,
+                    duration_seconds=effective_duration,
+                    number_of_videos=1,
+                )
+
+                # Set target last frame for image-to-video mode (frame interpolation)
+                if last_frame_path and not reference_image_paths:
+                    config.last_frame = types.Image.from_file(location=last_frame_path)
+
+                logger.info(
+                    "generate_video call: model=%s, first_frame_path=%s, reference_image_paths=%s, "
+                    "last_frame_path=%s, shot_duration=%s, prompt=%s",
+                    settings.veo_model, first_frame_path, reference_image_paths,
+                    last_frame_path, shot_duration, prompt[:500],
+                )
+
+                # Wrap API call with timeout to prevent SSL hangs
+                api_timeout = 120  # seconds for the initial API call
+                try:
+                    if reference_image_paths:
+                        config.reference_images = [
+                            types.VideoGenerationReferenceImage(
+                                image=types.Image.from_file(location=p),
+                                reference_type=types.VideoGenerationReferenceType.ASSET,
+                            )
+                            for p in reference_image_paths
+                        ]
+                        operation = await asyncio.wait_for(
+                            veo_client.aio.models.generate_videos(
+                                model=settings.veo_model,
+                                prompt=prompt,
+                                config=config,
+                            ),
+                            timeout=api_timeout,
                         )
-                        for p in reference_image_paths
-                    ]
-                    operation = await asyncio.wait_for(
-                        veo_client.aio.models.generate_videos(
-                            model=settings.veo_model,
-                            prompt=prompt,
-                            config=config,
-                        ),
-                        timeout=api_timeout,
-                    )
-                else:
-                    operation = await asyncio.wait_for(
-                        veo_client.aio.models.generate_videos(
-                            model=settings.veo_model,
-                            prompt=prompt,
-                            image=types.Image.from_file(location=first_frame_path) if first_frame_path else None,
-                            config=config,
-                        ),
-                        timeout=api_timeout,
-                    )
-            except asyncio.TimeoutError:
-                raise VideoGenerationTimeout(
-                    f"Veo API call timed out after {api_timeout}s (network issue)"
-                )
-
-            # Poll for completion
-            elapsed = 0
-            poll_interval = settings.veo_poll_interval_seconds
-            max_wait = settings.veo_max_wait_seconds
-
-            while not operation.done:
-                if elapsed >= max_wait:
+                    else:
+                        operation = await asyncio.wait_for(
+                            veo_client.aio.models.generate_videos(
+                                model=settings.veo_model,
+                                prompt=prompt,
+                                image=types.Image.from_file(location=first_frame_path) if first_frame_path else None,
+                                config=config,
+                            ),
+                            timeout=api_timeout,
+                        )
+                except asyncio.TimeoutError:
                     raise VideoGenerationTimeout(
-                        f"Veo operation timed out after {max_wait} seconds"
+                        f"Veo API call timed out after {api_timeout}s (network issue)"
                     )
-                await asyncio.sleep(poll_interval)
-                elapsed += poll_interval
-                logger.debug("Polling Veo operation... elapsed=%ds", elapsed)
-                operation = await veo_client.aio.operations.get(operation)
 
-            if operation.error:
-                raise VideoGenerationError(f"Veo generation failed: {operation.error}")
+                # Poll for completion
+                elapsed = 0
+                poll_interval = settings.veo_poll_interval_seconds
+                max_wait = settings.veo_max_wait_seconds
 
-            if (
-                operation.response
-                and operation.response.generated_videos
-                and len(operation.response.generated_videos) > 0
-            ):
-                video = operation.response.generated_videos[0].video
+                while not operation.done:
+                    if elapsed >= max_wait:
+                        raise VideoGenerationTimeout(
+                            f"Veo operation timed out after {max_wait} seconds"
+                        )
+                    await asyncio.sleep(poll_interval)
+                    elapsed += poll_interval
+                    logger.debug("Polling Veo operation... elapsed=%ds", elapsed)
+                    operation = await veo_client.aio.operations.get(operation)
 
-                if video.video_bytes:
-                    video_bytes = video.video_bytes
-                elif video.uri:
-                    logger.info("Downloading video from URI: %s", video.uri)
-                    video_bytes = await veo_client.aio.files.download(file=video.uri)
+                if operation.error:
+                    raise VideoGenerationError(f"Veo generation failed: {operation.error}")
+
+                if (
+                    operation.response
+                    and operation.response.generated_videos
+                    and len(operation.response.generated_videos) > 0
+                ):
+                    video = operation.response.generated_videos[0].video
+
+                    if video.video_bytes:
+                        video_bytes = video.video_bytes
+                    elif video.uri:
+                        logger.info("Downloading video from URI: %s", video.uri)
+                        video_bytes = await veo_client.aio.files.download(file=video.uri)
+                    else:
+                        raise VideoGenerationError("No video data or URI returned from Veo")
+
+                    logger.info("Video generated successfully: %d bytes", len(video_bytes))
+                    return video_bytes
                 else:
-                    raise VideoGenerationError("No video data or URI returned from Veo")
+                    logger.error(
+                        "No video returned from Veo. response=%s",
+                        operation.response,
+                    )
+                    raise VideoGenerationError("No video returned from Veo")
 
-                logger.info("Video generated successfully: %d bytes", len(video_bytes))
-                return video_bytes
-            else:
-                logger.error(
-                    "No video returned from Veo. response=%s",
-                    operation.response,
-                )
-                raise VideoGenerationError("No video returned from Veo")
-
-        except (VideoGenerationTimeout, VideoGenerationError):
-            raise
-        except Exception as e:
-            raise VideoGenerationError(f"Unexpected error during video generation: {e}")
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            except (VideoGenerationTimeout, VideoGenerationError):
+                raise
+            except Exception as e:
+                raise VideoGenerationError(f"Unexpected error during video generation: {e}")
 
 
 # --------------------------------------------------------------------------- #
@@ -437,50 +440,48 @@ class KieVeoProvider(VideoProvider):
         aspect_ratio: str = "16:9",
         last_frame_path: Optional[str] = None,
     ) -> bytes:
-        tmp_dir = tempfile.mkdtemp(prefix="kie_crop_")
         api_timeout = 120  # seconds per HTTP request
 
-        try:
-            first_frame_path, last_frame_path, reference_image_paths = _crop_inputs(
-                tmp_dir, first_frame_path, last_frame_path,
-                reference_image_paths, aspect_ratio,
-            )
-
-            prompt = motion_prompt
-            generation_type, image_paths, model = self._resolve_mode(
-                first_frame_path, last_frame_path, reference_image_paths,
-            )
-            duration = (
-                8 if generation_type == "REFERENCE_2_VIDEO"
-                else _clamp_kie_duration(shot_duration)
-            )
-
-            timeout = httpx.Timeout(api_timeout)
-            async with httpx.AsyncClient(headers=self._headers(), timeout=timeout) as http:
-                image_urls = [await self._upload_image(http, p) for p in image_paths]
-                result_url = await self._create_and_poll(
-                    http, prompt, generation_type, image_urls, model,
-                    duration, aspect_ratio,
+        async with workspace() as ws:
+            try:
+                first_frame_path, last_frame_path, reference_image_paths = await _crop_inputs(
+                    ws, first_frame_path, last_frame_path,
+                    reference_image_paths, aspect_ratio,
                 )
 
-                logger.info("Downloading kie.ai result: %s", result_url)
-                # Result URL is public — no auth header needed
-                async with httpx.AsyncClient(timeout=timeout) as dl:
-                    video_resp = await dl.get(result_url)
-                    video_resp.raise_for_status()
-                    video_bytes = video_resp.content
+                prompt = motion_prompt
+                generation_type, image_paths, model = self._resolve_mode(
+                    first_frame_path, last_frame_path, reference_image_paths,
+                )
+                duration = (
+                    8 if generation_type == "REFERENCE_2_VIDEO"
+                    else _clamp_kie_duration(shot_duration)
+                )
 
-            logger.info("Video generated successfully (kie.ai): %d bytes", len(video_bytes))
-            return video_bytes
+                timeout = httpx.Timeout(api_timeout)
+                async with httpx.AsyncClient(headers=self._headers(), timeout=timeout) as http:
+                    image_urls = [await self._upload_image(http, p) for p in image_paths]
+                    result_url = await self._create_and_poll(
+                        http, prompt, generation_type, image_urls, model,
+                        duration, aspect_ratio,
+                    )
 
-        except (VideoGenerationTimeout, VideoGenerationError):
-            raise
-        except httpx.HTTPError as e:
-            raise VideoGenerationError(f"kie.ai HTTP error: {e}")
-        except Exception as e:
-            raise VideoGenerationError(f"Unexpected error during video generation: {e}")
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+                    logger.info("Downloading kie.ai result: %s", result_url)
+                    # Result URL is public — no auth header needed
+                    async with httpx.AsyncClient(timeout=timeout) as dl:
+                        video_resp = await dl.get(result_url)
+                        video_resp.raise_for_status()
+                        video_bytes = video_resp.content
+
+                logger.info("Video generated successfully (kie.ai): %d bytes", len(video_bytes))
+                return video_bytes
+
+            except (VideoGenerationTimeout, VideoGenerationError):
+                raise
+            except httpx.HTTPError as e:
+                raise VideoGenerationError(f"kie.ai HTTP error: {e}")
+            except Exception as e:
+                raise VideoGenerationError(f"Unexpected error during video generation: {e}")
 
 
 # --------------------------------------------------------------------------- #

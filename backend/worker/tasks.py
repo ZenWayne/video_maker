@@ -26,21 +26,11 @@ from app.services.first_frame import (
     propagate_first_frame_to_next,
 )
 from app.services.storage import (
-    storyboard_path,
-    shot_dir,
-    reference_images_dir,
-    final_video_path,
-    ensure_shot_dir,
     to_media_url,
-    shot_audio_original_path,
-    shot_audio_vc_path,
-    shot_pre_vc_video_path,
-    shot_pre_cc_last_frame_path,
-    get_original_video_for_audio,
-    pristine_last_frame_path,
     ts_uuid_name,
-    shot_candidates_dir,
+    shot_key,
 )
+from app.services.workspace import workspace
 from app.services.events import publish_event
 from app.agents.llm import GeminiProvider
 from app.agents.screenwriter import run_screenwriter as run_screenwriter_agent
@@ -48,6 +38,20 @@ from app.agents.director import run_director as run_director_agent
 from app.agents.video_generator import generate_video
 from app.agents.frame_porter import extract_last_frame
 from app.agents.merger import merge_shots
+
+# 注：以下名称曾从 app.services.storage 导入，Task 5 删除本地路径函数后不再
+# 存在：storyboard_path / shot_dir / reference_images_dir / final_video_path /
+# ensure_shot_dir / shot_audio_original_path / shot_audio_vc_path /
+# shot_pre_vc_video_path / shot_pre_cc_last_frame_path /
+# get_original_video_for_audio / pristine_last_frame_path / shot_candidates_dir。
+# 本 task（7：视频生成链路）只负责 run_shot_pipeline 用到的部分（已改为
+# workspace/COS）。其余仍引用这些裸名字的函数（run_screenwriter 的
+# storyboard_path、_get_character_ref_paths/run_image_candidate/
+# run_character_calibrate 的 pristine_last_frame_path/shot_candidates_dir、
+# run_merger 的 final_video_path、_do_voice_convert_one 的 shot_dir/
+# get_original_video_for_audio）属于其他 task 的范围，故意留作 NameError——
+# 调用时显式报错，而不是让整个模块因缺失 import 而无法加载，掩盖了本任务的
+# 生成链路。
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,45 @@ def resolve_tail_frame(target_last_frame_path: str | None) -> str | None:
         if p.exists():
             return str(p)
     return None
+
+
+async def publish_generated_video(
+    session_factory: async_sessionmaker,
+    project_id: str,
+    shot_id: int,
+    video_bytes: bytes,
+) -> tuple[str, str]:
+    """把生成的视频字节发布到 COS，抽取尾帧，更新 DB。
+
+    返回 (video_key, last_frame_key)。
+
+    一致性：video、last_frame 两个对象都 put 成功后才写 DB，保证 DB 中的
+    key 永远指向真实存在的对象。同时写入 pristine_last_frame_key——角色校准
+    (CC) 会直接覆盖 last_frame_path，这是唯一能追溯回校准前原始尾帧的字段。
+    """
+    async with workspace() as ws:
+        local_video = ws.path(f"output_{ts_uuid_name('.mp4')}")
+        local_video.write_bytes(video_bytes)
+
+        local_frame = ws.path(f"last_frame_{ts_uuid_name('.png')}")
+        extract_last_frame(str(local_video), str(local_frame))
+
+        video_key = await ws.publish(
+            local_video, shot_key(project_id, shot_id, local_video.name))
+        frame_key = await ws.publish(
+            local_frame, shot_key(project_id, shot_id, local_frame.name))
+
+    async with session_factory() as s:
+        shot = (await s.execute(
+            select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+        )).scalar_one()
+        shot.video_path = video_key
+        shot.last_frame_path = frame_key
+        # CC 会覆盖 last_frame_path，故同时记录未校准的原始尾帧作为还原目标
+        shot.pristine_last_frame_key = frame_key
+        await s.commit()
+
+    return video_key, frame_key
 
 
 class WorkerContext:
@@ -412,18 +455,14 @@ async def run_shot_pipeline(
                 },
             )
 
-            # Ensure shot directory
-            ensure_shot_dir(project_id, shot.shot_id)
-            s_dir = shot_dir(project_id, shot.shot_id)
-            # Name the generated video uniquely (output_<ts>_<uuid>.mp4) so a
-            # regenerated video is always a new URL — the browser can never replay a
-            # cached copy. A fresh generation is a clean slate: delete EVERY prior
-            # video (output_/trimmed_/vc_ — all uniquely named, no fixed backups), so
-            # no stale trim/VC predecessor can survive and be sourced later.
-            for _old in s_dir.glob("*.mp4"):
-                _old.unlink(missing_ok=True)
-            video_out = s_dir / f"output_{ts_uuid_name('.mp4')}"
-
+            # Generated artifacts are published straight to COS (no local shot
+            # directory to manage any more — see publish_generated_video). A
+            # regenerated video/last-frame always gets a fresh ts_uuid_name(),
+            # so its key/URL is always new — the browser can never replay a
+            # cached copy. Prior output_/trimmed_/vc_ objects become orphans,
+            # which the project's stated consistency rule explicitly accepts
+            # ("宁可留孤儿对象") rather than risk deleting a key still referenced
+            # elsewhere.
             video_model = (
                 settings.kie_veo_model
                 if settings.video_provider == "kie"
@@ -450,58 +489,64 @@ async def run_shot_pipeline(
                     aspect_ratio=project.aspect_ratio,
                     last_frame_path=last_frame,
                 )
-                video_out.write_bytes(video_bytes)
-                shot.video_path = str(video_out)
-                from app.agents.video_trimmer import get_video_info as _gvi
-                _src_info = _gvi(str(video_out))
+
+                # Tail-frame alignment / speech-end auto-trim mutate the video
+                # in place and need a real local file (ffmpeg) — done on a
+                # throwaway local copy BEFORE anything is published to COS, so
+                # the object that lands in COS is already the final cut.
+                async with workspace() as trim_ws:
+                    local_video = trim_ws.path(f"gen_{ts_uuid_name('.mp4')}")
+                    local_video.write_bytes(video_bytes)
+
+                    if shot.auto_trim:
+                        from app.agents.video_trimmer import (
+                            auto_trim_to_tail_frame,
+                            auto_trim_to_speech_end,
+                        )
+                        resolved_tail = resolve_tail_frame(shot.target_last_frame_path)
+                        if resolved_tail:
+                            # Align-and-trim to the target tail frame (SSIM).
+                            trim_result = auto_trim_to_tail_frame(
+                                str(local_video), resolved_tail,
+                            )
+                            trim_mode = "tail frame alignment"
+                        else:
+                            # No tail-frame constraint: trim trailing silence/frozen tail.
+                            trim_result = auto_trim_to_speech_end(str(local_video))
+                            trim_mode = "speech-end"
+                        if trim_result:
+                            logger.info(
+                                "Auto-trimmed shot %d to %d frames (%s)",
+                                shot.shot_id, trim_result["trimmed_to_frame"], trim_mode,
+                            )
+
+                    from app.agents.video_trimmer import get_video_info as _gvi
+                    _src_info = _gvi(str(local_video))
+                    video_bytes = local_video.read_bytes()
+
                 shot.source_fps = _src_info["fps"]
                 shot.source_frames = _src_info["total_frames"]
                 shot.trim_frames = None
                 shot.vc_audio_path = None
+
+                # Publish the (possibly trimmed) video + its extracted last
+                # frame to COS and update the DB — both objects are put()
+                # successfully before either key is written to the row.
+                video_key, last_frame_key = await publish_generated_video(
+                    session_factory, project_id, shot.shot_id, video_bytes,
+                )
+
                 observability.update_span(
                     vid_gen,
                     output={
-                        "video_path": to_media_url(str(video_out)),
+                        "video_path": to_media_url(video_key),
                         "size_bytes": len(video_bytes),
                     },
                 )
 
-            # Tail-frame alignment: auto-trim to the frame closest to the target
-            if shot.auto_trim:
-                from app.agents.video_trimmer import (
-                    auto_trim_to_tail_frame,
-                    auto_trim_to_speech_end,
-                )
-                resolved_tail = resolve_tail_frame(shot.target_last_frame_path)
-                if resolved_tail:
-                    # Align-and-trim to the target tail frame (SSIM).
-                    trim_result = auto_trim_to_tail_frame(
-                        str(video_out), resolved_tail,
-                    )
-                    trim_mode = "tail frame alignment"
-                else:
-                    # No tail-frame constraint: trim the trailing silence/frozen tail.
-                    trim_result = auto_trim_to_speech_end(str(video_out))
-                    trim_mode = "speech-end"
-                if trim_result:
-                    logger.info(
-                        "Auto-trimmed shot %d to %d frames (%s)",
-                        shot.shot_id, trim_result["trimmed_to_frame"], trim_mode,
-                    )
-
-            # Extract last frame to a UNIQUE name so its URL changes on every
-            # (re)generation — a stable last_frame.png would be replayed from the
-            # browser cache (stale poster + stale next-shot first frame). Delete ALL
-            # prior last_frame*.png, including the pre-CC backup: a fresh generation
-            # makes the old extracted frames AND calibrated (cc_) frames stale too.
-            for _old in list(s_dir.glob("last_frame*.png")) + list(s_dir.glob("cc_*.png")):
-                _old.unlink(missing_ok=True)
-            last_frame_out = s_dir / f"last_frame_{ts_uuid_name('.png')}"
-            extract_last_frame(str(video_out), str(last_frame_out))
-            shot.last_frame_path = str(last_frame_out)
             # Eagerly propagate last frame to next shot's first frame for frontend visibility.
             await propagate_first_frame_to_next(
-                project_id, shot, str(last_frame_out), session
+                project_id, shot, last_frame_key, session
             )
 
             # Mark as completed
@@ -516,8 +561,8 @@ async def run_shot_pipeline(
                     "type": "shot_completed",
                     "data": {
                         "shot_id": shot.shot_id,
-                        "video_path": to_media_url(str(video_out)),
-                        "last_frame_path": to_media_url(str(last_frame_out)),
+                        "video_path": to_media_url(video_key),
+                        "last_frame_path": to_media_url(last_frame_key),
                     },
                 },
             )
