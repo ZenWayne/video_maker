@@ -1,6 +1,5 @@
 """object_store 原语——打真实 dev bucket，唯一前缀隔离。"""
 import asyncio
-import time
 
 import httpx
 import pytest
@@ -73,6 +72,29 @@ async def test_list_and_delete_prefix(cos_prefix, tmp_path):
     n = await object_store.delete_prefix(f"{cos_prefix}sub/")
     assert n == 3
     assert await object_store.list_prefix(f"{cos_prefix}sub/") == []
+
+
+async def test_list_prefix_pagination_with_real_truncation(cos_prefix, tmp_path):
+    """强制小页触发真实 IsTruncated == 'true'，验证分页取全、不漏不重。
+
+    不新造 1000 个对象——用 _list_prefix_sync 的仅供测试用的 max_keys 把
+    页大小压到 2，5 个小对象即可让服务端真实截断。list_prefix 的公开签名
+    不变，走的是同一段分页代码。
+    """
+    prefix = f"{cos_prefix}page/"
+    for i in range(5):
+        f = tmp_path / f"page{i}.txt"
+        f.write_bytes(b"x")
+        await object_store.put(f"{prefix}p{i}.txt", f)
+
+    client = object_store.get_client()
+    keys = await asyncio.to_thread(
+        object_store._list_prefix_sync, client, prefix, max_keys=2
+    )
+
+    assert sorted(keys) == sorted(f"{prefix}p{i}.txt" for i in range(5))
+    # 与公开入口一致性交叉核对：真实分页结果与 list_prefix() 应当一致
+    assert sorted(await object_store.list_prefix(prefix)) == sorted(keys)
 
 
 async def test_signed_url_actually_fetches_content(cos_prefix, tmp_path):
