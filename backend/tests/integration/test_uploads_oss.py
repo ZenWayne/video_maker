@@ -232,6 +232,59 @@ async def test_delete_first_frame_removes_from_oss(client, db_session_factory, c
     assert shot.ff_status is None
 
 
+async def test_extract_first_frame_copies_resolved_source_to_custom_frames(
+    client, db_session_factory, cos_prefix, tmp_path
+):
+    """pick_first_frame() returns a Path WRAPPING a COS key — extract-first-frame
+    must object_store.copy() it, not call a local .exists()/shutil.copy2 on it
+    (that combination silently 400s: Path(key).exists() is always False for a
+    real COS key)."""
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _add_shot(db_session_factory, pid, 1)
+    src_key = f"projects/{pid}/reference_images/existing_first_frame.png"
+    f = tmp_path / "src.png"
+    f.write_bytes(PNG)
+    await object_store.put(src_key, f)
+    async with db_session_factory() as s:
+        shot = (await s.execute(
+            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
+        )).scalar_one()
+        shot.custom_first_frame_path = src_key
+        await s.commit()
+
+    r = await client.post(f"/api/projects/{pid}/shots/1/extract-first-frame", headers=HEADERS)
+    assert r.status_code == 200, r.text
+
+    async with db_session_factory() as s:
+        shot = (await s.execute(
+            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
+        )).scalar_one()
+    dest_key = shot.custom_first_frame_path
+    assert dest_key != src_key
+    assert dest_key.startswith(f"projects/{pid}/shots/shot_1/custom_frames/")
+    assert not dest_key.startswith("/")
+    assert await object_store.exists(dest_key)
+    assert await object_store.exists(src_key)  # 源文件不受影响（copy 非 move）
+
+
+async def test_extract_first_frame_400_when_key_absent(client, db_session_factory, cos_prefix):
+    """400 when custom_first_frame_path is set but the COS object doesn't exist
+    (pick_first_frame's internal object_store.exists() check filters it out and
+    falls through to no resolvable frame)."""
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _add_shot(db_session_factory, pid, 1)
+    ghost_key = f"projects/{pid}/shots/shot_1/custom_frames/ghost_first_frame.png"
+    async with db_session_factory() as s:
+        shot = (await s.execute(
+            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
+        )).scalar_one()
+        shot.custom_first_frame_path = ghost_key
+        await s.commit()
+
+    r = await client.post(f"/api/projects/{pid}/shots/1/extract-first-frame", headers=HEADERS)
+    assert r.status_code == 400
+
+
 async def test_extract_last_frame_400_when_key_absent(client, db_session_factory, cos_prefix):
     """400 when last_frame_path is set but the COS object doesn't exist."""
     pid = await _make_project(db_session_factory, status="shot_review")
@@ -264,6 +317,7 @@ async def test_extract_last_frame_copies_to_new_key(client, db_session_factory, 
 
     r = await client.post(f"/api/projects/{pid}/shots/1/extract-last-frame", headers=HEADERS)
     assert r.status_code == 200
+    assert r.json()["tf_status"] == "done"
 
     async with db_session_factory() as s:
         shot = (await s.execute(
@@ -272,6 +326,8 @@ async def test_extract_last_frame_copies_to_new_key(client, db_session_factory, 
     dest_key = shot.target_last_frame_path
     assert dest_key != lf_key
     assert dest_key.startswith(f"projects/{pid}/shots/shot_1/")
+    assert not dest_key.startswith("/")
+    assert shot.tf_status == "done"
     assert await object_store.exists(dest_key)
     assert await object_store.exists(lf_key)  # 源文件不受影响（copy 非 move）
 
@@ -328,5 +384,8 @@ async def test_use_prev_last_frame_copies_to_new_key(client, db_session_factory,
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 2)
         )).scalar_one()
     dest_key = shot2.custom_first_frame_path
+    assert dest_key != lf_key
     assert dest_key.startswith(f"projects/{pid}/shots/shot_2/custom_frames/")
+    assert not dest_key.startswith("/")
     assert await object_store.exists(dest_key)
+    assert await object_store.exists(lf_key)  # 源文件（上一镜末帧）不受影响

@@ -4,9 +4,12 @@ TDD: write tests first (RED), then implement the handlers (GREEN).
 
 custom_first_frame_path / target_last_frame_path now hold COS keys, not local
 filesystem paths (Task 10) — "db path" / "file exists" checks go through
-object_store, and the tests that reach the storage layer need real COS
-credentials (cos_prefix fixture warms them; requires_cos in conftest_cos.py
-gates the whole run when unconfigured).
+object_store, and only the tests that actually reach the storage layer (i.e.
+take the cos_prefix fixture) are marked @requires_cos individually. The
+404-guard tests (shot/project not found) return before any object_store call
+and must stay unconditionally runnable so they keep providing regression
+coverage in credential-less dev/CI environments — a file-level pytestmark
+would silently strip that coverage.
 """
 import re
 import pytest
@@ -17,8 +20,6 @@ from tests.integration.conftest import HEADERS, _make_project
 from app.models.project import Shot
 from app.services import object_store
 from tests.integration.conftest_cos import requires_cos
-
-pytestmark = requires_cos
 
 # Minimal valid PNG bytes (8-byte PNG signature, enough to be non-empty)
 PNG_BYTES = (
@@ -57,6 +58,7 @@ async def _get_shot(db_session_factory, project_id, shot_id=1):
 
 # ── upload-first-frame tests ──────────────────────────────────────────────────
 
+@requires_cos
 async def test_upload_first_frame_200(client, db_session_factory, cos_prefix):
     """200 OK; returned URL ends in ts_uuid pattern."""
     pid = await _make_project(db_session_factory, status="shot_review")
@@ -73,6 +75,7 @@ async def test_upload_first_frame_200(client, db_session_factory, cos_prefix):
     assert TS_UUID_RE.search(url), f"URL {url!r} doesn't match ts_uuid pattern"
 
 
+@requires_cos
 async def test_upload_first_frame_db_path(client, db_session_factory, cos_prefix):
     """DB column is set to a COS key whose basename matches ts_uuid."""
     pid = await _make_project(db_session_factory, status="shot_review")
@@ -92,6 +95,7 @@ async def test_upload_first_frame_db_path(client, db_session_factory, cos_prefix
     assert not shot.custom_first_frame_path.startswith("/")
 
 
+@requires_cos
 async def test_upload_first_frame_file_exists(client, db_session_factory, cos_prefix):
     """The object actually lands in COS at the DB-stored key."""
     pid = await _make_project(db_session_factory, status="shot_review")
@@ -132,6 +136,7 @@ async def test_upload_first_frame_project_not_found(client):
 
 # ── upload-tail-frame tests ───────────────────────────────────────────────────
 
+@requires_cos
 async def test_upload_tail_frame_200(client, db_session_factory, cos_prefix):
     """200 OK; returned URL ends in ts_uuid pattern; tf_status is 'done'."""
     pid = await _make_project(db_session_factory, status="shot_review")
@@ -149,6 +154,7 @@ async def test_upload_tail_frame_200(client, db_session_factory, cos_prefix):
     assert data["tf_status"] == "done"
 
 
+@requires_cos
 async def test_upload_tail_frame_db_path(client, db_session_factory, cos_prefix):
     """DB columns target_last_frame_path and tf_status are set correctly."""
     pid = await _make_project(db_session_factory, status="shot_review")
@@ -169,6 +175,7 @@ async def test_upload_tail_frame_db_path(client, db_session_factory, cos_prefix)
     assert shot.tf_status == "done"
 
 
+@requires_cos
 async def test_upload_tail_frame_file_exists(client, db_session_factory, cos_prefix):
     """The object actually lands in COS at the DB-stored key."""
     pid = await _make_project(db_session_factory, status="shot_review")
