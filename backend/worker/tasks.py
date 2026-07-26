@@ -532,9 +532,18 @@ async def run_shot_pipeline(
                 # Publish the (possibly trimmed) video + its extracted last
                 # frame to COS and update the DB — both objects are put()
                 # successfully before either key is written to the row.
+                # publish_generated_video writes via its OWN session (so the
+                # write is atomic and independent of this function's later
+                # commits) — mirror the same values onto this outer `shot`
+                # object so it isn't left stale: anything added after this
+                # point that reads shot.video_path/last_frame_path must see
+                # the real key, not None/whatever it was before generation.
                 video_key, last_frame_key = await publish_generated_video(
                     session_factory, project_id, shot.shot_id, video_bytes,
                 )
+                shot.video_path = video_key
+                shot.last_frame_path = last_frame_key
+                shot.pristine_last_frame_key = last_frame_key
 
                 observability.update_span(
                     vid_gen,
