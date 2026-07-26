@@ -2580,6 +2580,25 @@ git commit -m "feat(oss): 导出合并、预览与项目删除改为 COS
 
 **说明**：`to_media_url` 的 54 处调用点**形态不需要改动**（Task 5 已保持同步签名），本 task 只需确认它们传入的是 key 而非旧的绝对路径，并删除静态挂载。
 
+**本 task additionally 要给 `to_media_url` 加一道校验**（决策依据见下）：
+
+```python
+def to_media_url(key: Optional[str]) -> Optional[str]:
+    if not key:
+        return None
+    if not is_valid_key(key):
+        # 到了本 task，所有写路径都已产出 key；此时还拿到非 key 的值
+        # 就是真 bug。但**不能抛异常**：本函数在约 50 处同步序列化器里被
+        # 调用，抛出会把一行陈旧数据放大成整个项目详情接口 500 ——
+        # 在 Spec B 的回填窗口期尤其糟。优雅降级 + 可观测才是对的取舍。
+        logger.warning("to_media_url_invalid_key", extra={"value": key[:200]})
+        return None
+    return object_store.signed_url(key)
+```
+
+放在 Task 12 而非 Task 5，是因为只有到了本 task 全部写路径才都在产出 key，此前
+（Task 5–11 的红期）传入非 key 值是预期的中间态，提前告警只会制造噪音。
+
 - [ ] **Step 1: 写失败测试**
 
 创建 `backend/tests/integration/test_cos_media_url.py`：
