@@ -1,14 +1,16 @@
-# 存储层 OSS 化 Implementation Plan
+# 存储层 COS 化 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 video_maker 后端的媒体存储层从「本地文件路径」改造为「阿里云 OSS key」，使容器无状态、素材权威副本位于 OSS。
+**Goal:** 把 video_maker 后端的媒体存储层从「本地文件路径」改造为「腾讯云 COS object key」，使容器无状态、素材权威副本位于 COS。
 
-**Architecture:** 新增三个服务模块——`oss_client`（客户端与凭证）、`object_store`（对象原语）、`workspace`（ffmpeg 临时工作区）——并把 `storage.py` 从返回 `Path` 改为返回 OSS key。所有 ffmpeg 操作改为「fetch 到临时目录 → 本地计算 → publish 回 OSS」。浏览器通过后端签发的预签名 URL 直连 OSS，后端不再中转媒体流量。
+**Architecture:** 新增三个服务模块——`cos_client`（客户端与凭证）、`object_store`（对象原语）、`workspace`（ffmpeg 临时工作区）——并把 `storage.py` 从返回 `Path` 改为返回 COS key。所有 ffmpeg 操作改为「fetch 到临时目录 → 本地计算 → publish 回 COS」。浏览器通过后端签发的预签名 URL 直连 COS，后端不再中转媒体流量。
 
-**Tech Stack:** Python 3.12、FastAPI、ARQ、SQLAlchemy 2.0(async)、SQLite(aiosqlite)、`alibabacloud-oss-v2` ≥1.2.0 + aiohttp、pytest(asyncio_mode=auto)
+**Tech Stack:** Python 3.12、FastAPI、ARQ、SQLAlchemy 2.0(async)、SQLite(aiosqlite)、`cos-python-sdk-v5`（`qcloud_cos`）、pytest(asyncio_mode=auto)
 
-**对应 Spec:** [Spec A — 存储层 OSS 化](../specs/2026-07-26-oss-storage-layer-design.md)（阶段 0–5）。存量迁移与生产切换属 [Spec B](../specs/2026-07-26-oss-migration-cutover-design.md)，不在本计划内。
+**对应 Spec:** [Spec A — 存储层 COS 化](../specs/2026-07-26-cos-storage-layer-design.md)（阶段 0–5）。存量迁移与生产切换属 [Spec B](../specs/2026-07-26-cos-migration-cutover-design.md)，不在本计划内。
+
+> **2026-07-26 变更**：本计划原为阿里云 OSS，现改为腾讯云 COS（用户服务器在腾讯云，同地域内网免流量费）。Task 1 已按 OSS 实现并提交（`e46fed9`），本轮 Task 1 的职责变为**把 OSS 接线换成 COS 接线**。Task 4–15 未受影响——云厂商被隔离在 `cos_client` 一个模块内，这正是方案 B 的附带收益。
 
 ---
 
@@ -20,11 +22,14 @@
 - **运行测试**：`uv run --project backend pytest ...`，不套 podman。
 - **禁止硬编码绝对路径**：Python 中一律 `Path(__file__)` 相对定位。
 - **不使用 alembic**：本项目无 alembic。schema 变更写在 `backend/app/db.py`，用 `_has_column()` 守卫的幂等 `ALTER TABLE`（既有写法见 db.py:55-115）。
-- **测试不 mock 基础设施**：除会计费的 AI 模型调用外一律不 mock。OSS 用**真实 dev bucket**，测试对象一律写在 `test/<uuid>/` 唯一前缀下并在 teardown 删除前缀。**禁止**实现 fake object store。
+- **COS SDK 是纯同步的**：`cos-python-sdk-v5` 没有异步客户端。**每一个 SDK 调用都必须经 `await asyncio.to_thread(...)`**，唯一例外是预签名（纯本地 HMAC，不发网络请求）。遗漏一处不会报错，只会在传大文件时让整个服务卡死——这是本计划最隐蔽的一类缺陷。
+- **`CosS3Client` 必须单例**：SDK 明确要求一个 region 只建一个实例并复用，否则进程占用过多连接和线程。
+- **测试不 mock 基础设施**：除会计费的 AI 模型调用外一律不 mock。COS 用**真实 dev bucket**，测试对象一律写在 `test/<uuid>/` 唯一前缀下并在 teardown 删除前缀。**禁止**实现 fake object store。
 - **绝不自行触发生成**：测试与验证中禁止调用真实视频/图像生成（计费）。需要真实视频素材时用 `tests/integration/conftest.py:160` 的 `seed_shot_with_source()`（ffmpeg 合成 testsrc2）。
-- **签名 URL TTL**：`oss_signed_url_ttl_sec` 默认 `7200`（2 小时）。
-- **key 命名**：`projects/<project_id>/...`，与原 `storage_root` 相对路径**逐字符一致**。DB 存**裸 key**，不带 `oss://` 前缀、不带前导 `/`。
-- **一致性不变量**：新增文件先 `put` 成功再写 DB；删除先改 DB 解除引用再删 OSS。**DB 中的 key 必须永远指向真实存在的对象**，宁可留孤儿对象。
+- **签名 URL TTL**：`cos_signed_url_ttl_sec` 默认 `7200`（2 小时）。
+- **key 命名**：`projects/<project_id>/...`，与原 `storage_root` 相对路径**逐字符一致**。DB 存**裸 key**，不带 scheme 前缀、不带前导 `/`。
+- **bucket 名必须含 AppId**：COS 的 bucket 形如 `video-maker-dev-1250000000`，配置里必须填完整名。
+- **一致性不变量**：新增文件先 `put` 成功再写 DB；删除先改 DB 解除引用再删 COS。**DB 中的 key 必须永远指向真实存在的对象**，宁可留孤儿对象。
 - **提交粒度**：每个 task 末尾提交一次，commit message 用中文描述意图。
 
 ---
@@ -35,23 +40,23 @@
 
 | 文件 | 职责 |
 |---|---|
-| `backend/app/services/oss_client.py` | 唯一 `import alibabacloud_oss_v2` 的模块。AsyncClient 单例、凭证 provider、同步签名用的凭证缓存 |
-| `backend/app/services/object_store.py` | 无业务语义的对象原语：put/get/exists/copy/delete/delete_prefix/list_prefix/signed_url |
+| `backend/app/services/cos_client.py` | 唯一 `import qcloud_cos` 的模块。`CosS3Client` 单例、两种凭证模式、同步签名用的凭证缓存 |
+| `backend/app/services/object_store.py` | 对象操作原语：put/get/exists/size/copy/delete/delete_prefix/list_prefix/signed_url。全部 async，内部 `asyncio.to_thread` |
 | `backend/app/services/workspace.py` | ffmpeg 临时工作区上下文管理器 |
-| `backend/tests/unit/test_oss_config.py` | 配置字段单元测试 |
+| `backend/tests/unit/test_cos_config.py` | 配置字段单元测试 |
 | `backend/tests/unit/test_storage_keys.py` | key 拼接纯函数单元测试 |
-| `backend/tests/integration/conftest_oss.py` | OSS 测试夹具（唯一前缀 + teardown） |
+| `backend/tests/integration/conftest_cos.py` | COS 测试夹具（唯一前缀 + teardown） |
 | `backend/tests/integration/test_object_store.py` | 对象原语集成测试（真实 dev bucket） |
 | `backend/tests/integration/test_workspace.py` | 工作区集成测试 |
-| `backend/tests/integration/test_oss_media_url.py` | 签名 URL 可真实 GET 的集成测试 |
+| `backend/tests/integration/test_cos_media_url.py` | 签名 URL 可真实 GET 的集成测试 |
 
 **修改：**
 
 | 文件 | 改动 |
 |---|---|
-| `backend/pyproject.toml` | 加 3 个依赖 |
-| `backend/app/config.py` | 加 8 个 OSS 配置字段 |
-| `backend/app/db.py` | 加 3 列（幂等 ALTER TABLE） |
+| `backend/pyproject.toml` | 换依赖：移除 alibabacloud 三件套，加 `cos-python-sdk-v5` |
+| `backend/app/config.py` | 换配置：`oss_*` → `cos_*` |
+| `backend/app/db.py` | 加 3 列（幂等 ALTER TABLE），并把建列逻辑提取为 `_ensure_columns()` |
 | `backend/app/models/project.py` | Shot 加 3 个 Column |
 | `backend/app/services/storage.py` | 路径函数 → key 函数；`to_media_url` 改签名 URL |
 | `backend/app/main.py:135-149` | 删静态挂载与 no-cache 中间件；lifespan 加凭证预热与 client 关闭 |
@@ -60,67 +65,78 @@
 | `backend/app/agents/video_generator.py` / `video_trimmer.py` / `effective_clip.py` | ffmpeg 输入改 fetch |
 | `backend/worker/tasks.py` | 生成/VC/合并链路改 workspace |
 | `backend/app/services/image_generation.py` / `first_frame.py` | 素材读写点改 key |
-| `deploy/config.yml` / `secrets.yml.example` / `docker-compose.dev.yml` | 配置与密钥接线、NO_PROXY |
+| `deploy/config.yml` / `secrets.yml.example` / `docker-compose.dev.yml` | 换配置与密钥、NO_PROXY 改 `.myqcloud.com` |
 | `frontend-vite/` 播放器组件 | `onError` 重拉换新 URL |
 
 **自然检查点：** Task 6 结束时基础设施完备但业务未切换，是一个适合停下来 review 的位置。
 
 ---
 
-## Task 1: 依赖、配置字段与密钥接线
+## Task 1: 把 OSS 接线换成 COS 接线
 
 **Files:**
-- Modify: `backend/pyproject.toml:5-24`
-- Modify: `backend/app/config.py`（在 `Settings` 类内，紧随既有 kie_* 字段之后）
+- Modify: `backend/pyproject.toml`
+- Modify: `backend/app/config.py`（`Settings` 类内的 OSS 段落）
 - Modify: `deploy/config.yml`
 - Modify: `deploy/secrets.yml.example`
 - Modify: `deploy/docker-compose.dev.yml`
-- Test: `backend/tests/unit/test_oss_config.py`
+- Modify: `backend/tests/unit/test_oss_config.py` → 重命名为 `test_cos_config.py`
 
 **Interfaces:**
 - Consumes: 无（首个 task）
-- Produces: `settings.oss_region`、`settings.oss_bucket`、`settings.oss_endpoint`、`settings.oss_use_internal_endpoint`、`settings.oss_auth_mode`、`settings.oss_ecs_ram_role`、`settings.oss_signed_url_ttl_sec`、`settings.oss_access_key_id`、`settings.oss_access_key_secret`
+- Produces: `settings.cos_region`、`settings.cos_bucket`、`settings.cos_scheme`、`settings.cos_domain`、`settings.cos_auth_mode`、`settings.cos_cvm_role`、`settings.cos_signed_url_ttl_sec`、`settings.cos_secret_id`、`settings.cos_secret_key`
 
-- [ ] **Step 1: 写失败测试**
+**背景**：上一轮已按阿里云 OSS 完成过一次同等接线（commit `e46fed9`）。本 task 是**替换**，不是新增——OSS 的字段、依赖、密钥、NO_PROXY 域名都要一并移除，不能两套并存。
 
-创建 `backend/tests/unit/test_oss_config.py`：
+- [ ] **Step 1: 改测试（TDD 从这里开始）**
+
+`git mv backend/tests/unit/test_oss_config.py backend/tests/unit/test_cos_config.py`，然后用以下内容整体替换：
 
 ```python
-"""OSS 配置字段的默认值与类型约束。"""
+"""COS 配置字段的默认值与类型约束。"""
 from app.config import Settings
 
 
-def test_oss_defaults_are_safe():
-    """未配置时默认走 static 模式、公网 endpoint、2 小时 TTL。"""
+def test_cos_defaults_are_safe():
+    """未配置时默认走 static 模式、https、2 小时 TTL。"""
     s = Settings(_env_file=None)
-    assert s.oss_auth_mode == "static"
-    assert s.oss_use_internal_endpoint is False
-    assert s.oss_signed_url_ttl_sec == 7200
-    assert s.oss_endpoint is None
-    assert s.oss_access_key_id is None
-    assert s.oss_access_key_secret is None
+    assert s.cos_auth_mode == "static"
+    assert s.cos_scheme == "https"
+    assert s.cos_signed_url_ttl_sec == 7200
+    assert s.cos_domain is None
+    assert s.cos_secret_id is None
+    assert s.cos_secret_key is None
 
 
-def test_oss_auth_mode_accepts_ecs_ram_role():
-    s = Settings(_env_file=None, oss_auth_mode="ecs_ram_role", oss_ecs_ram_role="my-role")
-    assert s.oss_auth_mode == "ecs_ram_role"
-    assert s.oss_ecs_ram_role == "my-role"
+def test_cos_auth_mode_accepts_cvm_role():
+    s = Settings(_env_file=None, cos_auth_mode="cvm_role", cos_cvm_role="my-role")
+    assert s.cos_auth_mode == "cvm_role"
+    assert s.cos_cvm_role == "my-role"
 
 
-def test_oss_bucket_and_region_are_plain_strings():
-    s = Settings(_env_file=None, oss_region="cn-hangzhou", oss_bucket="video-maker-dev")
-    assert s.oss_region == "cn-hangzhou"
-    assert s.oss_bucket == "video-maker-dev"
+def test_cos_bucket_keeps_appid_suffix():
+    """COS 的 bucket 名必须含 AppId，配置层不得擅自截断。"""
+    s = Settings(_env_file=None, cos_region="ap-guangzhou",
+                 cos_bucket="video-maker-dev-1250000000")
+    assert s.cos_region == "ap-guangzhou"
+    assert s.cos_bucket == "video-maker-dev-1250000000"
+
+
+def test_no_legacy_oss_fields_remain():
+    """OSS 字段必须彻底移除——两套并存会让 cos_client 读到过期配置。"""
+    s = Settings(_env_file=None)
+    leftovers = [f for f in type(s).model_fields if f.startswith("oss_")]
+    assert leftovers == [], f"残留 OSS 配置字段: {leftovers}"
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `uv run --project backend pytest tests/unit/test_oss_config.py -v`
-Expected: FAIL — `AttributeError` 或 pydantic `ValidationError`（`Settings` 无 `oss_auth_mode` 等字段）
+Run: `uv run --project backend pytest tests/unit/test_cos_config.py -v`
+Expected: FAIL — `ValidationError`（`Settings` 无 `cos_auth_mode` 等字段），且 `test_no_legacy_oss_fields_remain` 因 9 个 `oss_*` 字段仍在而失败
 
-- [ ] **Step 3: 加依赖**
+- [ ] **Step 3: 换依赖**
 
-编辑 `backend/pyproject.toml`，在 `dependencies` 列表末尾追加三项：
+编辑 `backend/pyproject.toml`，**移除**上一轮加的三项：
 
 ```toml
     "alibabacloud-oss-v2>=1.2.0",
@@ -128,186 +144,188 @@ Expected: FAIL — `AttributeError` 或 pydantic `ValidationError`（`Settings` 
     "alibabacloud-credentials>=0.3",
 ```
 
+**加入**：
+
+```toml
+    "cos-python-sdk-v5>=1.9",
+```
+
+只加这一个。COS SDK 基于 requests，不需要 aiohttp；CVM 角色凭证走元数据服务的普通 HTTP GET，用项目已有的 `httpx` 即可，不需要腾讯云凭证 SDK。
+
 执行：
 
 ```bash
 uv sync --project backend
 ```
 
-- [ ] **Step 4: 加配置字段**
+- [ ] **Step 4: 换配置字段**
 
-在 `backend/app/config.py` 的 `Settings` 类内追加（放在既有 `kie_*` 字段之后，保持分组可读）：
+在 `backend/app/config.py` 中，把上一轮加的整个 `# ── 阿里云 OSS ──` 段落替换为：
 
 ```python
-    # ── 阿里云 OSS ──────────────────────────────────────────────────────────
+    # ── 腾讯云 COS ──────────────────────────────────────────────────────────
     # 存储权威副本所在 bucket。dev / prod 使用不同 bucket。
-    oss_region: str = ""
-    oss_bucket: str = ""
-    # 留空则由 SDK 按 region 自动构造公网域名
-    oss_endpoint: Optional[str] = None
-    # 生产 ECS 与 bucket 同地域时置 True，走内网免公网流量费
-    oss_use_internal_endpoint: bool = False
-    # "static"（开发，AK/SK）| "ecs_ram_role"（生产，自动刷新 STS）
-    oss_auth_mode: str = "static"
-    # ecs_ram_role 模式下显式指定角色名可减少元数据服务请求
-    oss_ecs_ram_role: Optional[str] = None
+    # 应与 CVM 同地域，后端↔COS 才走内网免流量费。
+    cos_region: str = ""
+    # 必须含 AppId，形如 video-maker-dev-1250000000
+    cos_bucket: str = ""
+    cos_scheme: str = "https"
+    # 自定义源站域名；留空则用默认域名 {bucket}.cos.{region}.myqcloud.com
+    cos_domain: Optional[str] = None
+    # "static"（开发，永久密钥）| "cvm_role"（生产，实例角色取 STS 临时密钥）
+    cos_auth_mode: str = "static"
+    # cvm_role 模式下绑定在 CVM 上的 CAM 角色名
+    cos_cvm_role: Optional[str] = None
     # 预签名 URL 有效期，默认 2 小时
-    oss_signed_url_ttl_sec: int = 7200
+    cos_signed_url_ttl_sec: int = 7200
     # 仅 static 模式使用，由 /run/secrets/ 注入
-    oss_access_key_id: Optional[str] = None
-    oss_access_key_secret: Optional[str] = None
+    cos_secret_id: Optional[str] = None
+    cos_secret_key: Optional[str] = None
 ```
-
-若 `config.py` 顶部尚未导入 `Optional`，补上 `from typing import Optional`。
 
 - [ ] **Step 5: 运行测试确认通过**
 
-Run: `uv run --project backend pytest tests/unit/test_oss_config.py -v`
-Expected: PASS（3 项）
+Run: `uv run --project backend pytest tests/unit/test_cos_config.py -v`
+Expected: PASS（4 项）
 
-- [ ] **Step 6: 接线 deploy 配置**
+- [ ] **Step 6: 换 deploy 配置**
 
-`deploy/config.yml` 追加（非密钥项）：
-
-```yaml
-oss_region: cn-hangzhou
-oss_bucket: video-maker-dev
-oss_use_internal_endpoint: false
-oss_auth_mode: static
-oss_signed_url_ttl_sec: 7200
-```
-
-`deploy/secrets.yml.example` 追加占位值：
+`deploy/config.yml`：把上一轮的 5 个 `oss_*` 键替换为：
 
 ```yaml
-oss_access_key_id: LTAI5t...
-oss_access_key_secret: xxxxxxxxxxxxxxxxxxxxxxxx
+cos_region: ap-guangzhou
+cos_bucket: video-maker-dev-1250000000
+cos_scheme: https
+cos_auth_mode: static
+cos_signed_url_ttl_sec: 7200
 ```
 
-- [ ] **Step 7: 接线 compose 密钥与 NO_PROXY**
+（region 与 bucket 是占位值，等用户提供真实值后再改。）
+
+`deploy/secrets.yml.example`：把 `oss_access_key_id` / `oss_access_key_secret` 两行替换为：
+
+```yaml
+cos_secret_id: AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+cos_secret_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+**只改 `.example`，绝不创建或写入 `deploy/secrets.yml`（gitignored 真实密钥文件）。**
+
+- [ ] **Step 7: 换 compose 密钥与 NO_PROXY**
 
 `deploy/docker-compose.dev.yml`：
 
-顶层 `secrets:` 段追加（与既有 `kie_api_key` 同级）：
+顶层 `secrets:` 段——把 `oss_access_key_id` / `oss_access_key_secret` 两项替换为（**路径用 `./secrets/`，与既有 6 条一致**）：
 
 ```yaml
-  oss_access_key_id:
-    file: ./secrets/oss_access_key_id  # written by: make secrets
-  oss_access_key_secret:
-    file: ./secrets/oss_access_key_secret  # written by: make secrets
+  cos_secret_id:
+    file: ./secrets/cos_secret_id  # written by: make secrets
+  cos_secret_key:
+    file: ./secrets/cos_secret_key  # written by: make secrets
 ```
 
-> 路径用 `./secrets/`，与文件中既有 6 条一致。compose 文件位于 `deploy/`，
-> secrets 实际在 `deploy/secrets/`，故相对路径是 `./secrets/`。
-> 注意 CLAUDE.md:39 的示例写的是 `../secrets/`——那是文档笔误，会解析到不存在的
-> 仓库根目录 `secrets/`。以实际 compose 文件的约定为准。
-
-`backend` 与 `worker`（及 `vc-worker`，若存在）三个服务各自的 `secrets:` 列表追加：
-
-```yaml
-      - oss_access_key_id
-      - oss_access_key_secret
-```
-
-各服务 `command:` 的 export 链追加两项（与既有 `export KIE_API_KEY=$(cat /run/secrets/kie_api_key)` 同一行式）：
+各服务 `secrets:` 列表里的两项同步改名。各服务 `command:` 的 export 链改为：
 
 ```sh
-export OSS_ACCESS_KEY_ID=$(cat /run/secrets/oss_access_key_id) && \
-export OSS_ACCESS_KEY_SECRET=$(cat /run/secrets/oss_access_key_secret) && \
+export COS_SECRET_ID=$(cat /run/secrets/cos_secret_id) && \
+export COS_SECRET_KEY=$(cat /run/secrets/cos_secret_key) && \
 ```
 
-**关键**：各服务 `environment:` 段追加 `NO_PROXY`，否则 OSS 请求会走为 Google API 设的 `HTTPS_PROXY` 导致随机超时：
+**NO_PROXY 的域名必须从 `.aliyuncs.com` 改为 `.myqcloud.com`**（COS 默认域名是 `{bucket-appid}.cos.{region}.myqcloud.com`）。大小写两份都改：
 
 ```yaml
-      NO_PROXY: localhost,127.0.0.1,host.containers.internal,.aliyuncs.com
-      no_proxy: localhost,127.0.0.1,host.containers.internal,.aliyuncs.com
+      NO_PROXY: localhost,127.0.0.1,host.containers.internal,.myqcloud.com
+      no_proxy: localhost,127.0.0.1,host.containers.internal,.myqcloud.com
 ```
 
-（大小写两份都要写：requests 读 `NO_PROXY`，aiohttp 读小写 `no_proxy`。）
+上一轮已确认需要接线的服务是 `backend`、`worker`、`vc-worker` 三个（`mcp` 只经 `BACKEND_BASE_URL` 代理 REST，不碰存储）。三个都要改。
 
-- [ ] **Step 8: 验证 compose 文件语法有效**
+- [ ] **Step 8: 验证 compose 语法**
 
 Run: `podman compose -f deploy/docker-compose.dev.yml config > /dev/null && echo OK`
-Expected: 输出 `OK`，无 YAML 错误
+Expected: 输出 `OK`
 
-- [ ] **Step 9: 提交**
+- [ ] **Step 9: 确认无 OSS 残留**
+
+Run:
+
+```bash
+grep -rn "oss_\|OSS_\|alibabacloud\|aliyuncs" backend/app backend/pyproject.toml deploy/ || echo "无残留"
+```
+
+Expected: 输出 `无残留`。任何命中都说明替换不彻底。
+
+- [ ] **Step 10: 提交**
 
 ```bash
 git add backend/pyproject.toml backend/uv.lock backend/app/config.py \
-        backend/tests/unit/test_oss_config.py \
+        backend/tests/unit/test_cos_config.py backend/tests/unit/test_oss_config.py \
         deploy/config.yml deploy/secrets.yml.example deploy/docker-compose.dev.yml
-git commit -m "feat(oss): 新增 OSS 配置字段、依赖与密钥接线
+git commit -m "refactor(cos)!: 存储后端由阿里云 OSS 改为腾讯云 COS
 
-NO_PROXY 必须包含 .aliyuncs.com，否则 OSS 请求会走为 Google API
-设置的 HTTPS_PROXY，表现为上传随机超时。"
+用户服务器在腾讯云，同地域内网访问免流量费。
+
+BREAKING: 移除全部 oss_* 配置与 alibabacloud 依赖，换成 cos_*
+与 cos-python-sdk-v5。NO_PROXY 域名同步改为 .myqcloud.com——
+漏改会让 COS 请求走为 Google API 设的代理，表现为上传随机超时。"
 ```
 
 ---
 
-## Task 2: oss_client — 客户端、凭证与同步签名缓存
+## Task 2: cos_client — 客户端、凭证与同步签名缓存
 
 **Files:**
-- Create: `backend/app/services/oss_client.py`
-- Test: `backend/tests/integration/conftest_oss.py`（夹具，本 task 建立）
-- Test: `backend/tests/integration/test_oss_client_smoke.py`
+- Create: `backend/app/services/cos_client.py`
+- Delete: `backend/app/services/oss_client.py`（若上一轮已创建；按当前进度尚未创建，则跳过）
+- Test: `backend/tests/integration/conftest_cos.py`
+- Test: `backend/tests/integration/test_cos_client_smoke.py`
 
 **Interfaces:**
-- Consumes: Task 1 的 `settings.oss_*` 全部字段
+- Consumes: Task 1 的 `settings.cos_*` 全部字段
 - Produces:
-  - `def get_client() -> AsyncClient` — AsyncClient 单例，传输类操作使用
+  - `def get_client() -> CosS3Client` — 单例，传输类操作使用
   - `async def warm_credentials() -> None` — 预热凭证缓存，lifespan 启动时调用
-  - `async def close_client() -> None` — 关闭连接，lifespan 结束时调用
-  - `def get_cached_credentials() -> Credentials` — 同步读缓存，供签名使用；缓存为空时抛 `RuntimeError`
-  - `def credentials_remaining_sec() -> Optional[int]` — 缓存凭证剩余有效秒数；static 模式返回 `None`（永不过期）
-  - `def bucket() -> str` — 返回 `settings.oss_bucket`，集中一处便于测试覆写
+  - `async def start_credential_refresh() -> None` — 启动后台刷新协程（仅 cvm_role）
+  - `async def close_client() -> None` — 停止后台刷新并释放单例。幂等
+  - `def get_cached_credentials() -> dict` — 同步读缓存，返回 `{"secret_id","secret_key","token"}`；缓存为空时抛 `RuntimeError`
+  - `def credentials_remaining_sec() -> Optional[int]` — 剩余有效秒数；static 模式返回 `None`
+  - `def bucket() -> str` — 返回 `settings.cos_bucket`
 
 - [ ] **Step 1: 核对已安装 SDK 的 API 形态**
 
-本 task 的实现依据阿里云官方文档编写，但**必须先对照实际安装的包核对方法名与参数**，因为 SDK 小版本间存在差异。
+**这一步是硬性前置。** 上一轮在阿里云 SDK 上，计划里三处方法名与实际不符（`get_object_to_file`、`upload_file` 在异步客户端上根本不存在），是靠这一步发现的。COS 同样先核对再写。
 
 Run:
 
 ```bash
 uv run --project backend python -c "
-import alibabacloud_oss_v2 as oss
-import alibabacloud_oss_v2.aio as oss_aio
-print('AsyncClient:', [m for m in dir(oss_aio.AsyncClient) if not m.startswith('_')])
+from qcloud_cos import CosConfig, CosS3Client
+import inspect
+want = ['put_object','get_object','head_object','copy_object','list_objects',
+        'delete_object','delete_objects','upload_file','object_exists',
+        'get_presigned_url','get_presigned_download_url']
+have = set(dir(CosS3Client))
+for m in want:
+    print(('OK      ' if m in have else 'MISSING '), m)
 print()
-print('credentials:', [m for m in dir(oss.credentials) if not m.startswith('_')])
-print()
-print('has presign:', hasattr(oss_aio.AsyncClient, 'presign'), hasattr(oss.Client, 'presign'))
+print('CosConfig.__init__:', inspect.signature(CosConfig.__init__))
+for m in ['get_presigned_url','upload_file','copy_object','object_exists']:
+    if hasattr(CosS3Client, m):
+        print(m, inspect.signature(getattr(CosS3Client, m)))
 "
 ```
 
-Expected（已由 controller 在实际安装的包上核对过，以下为**确认事实**）：
-
-`AsyncClient` **有**：`put_object`、`get_object`、`head_object`、`copy_object`、
-`list_objects_v2`、`list_objects_v2_paginator`、`is_object_exist`、`delete_object`、
-`delete_multiple_objects`、`initiate_multipart_upload`、`upload_part`、
-`complete_multipart_upload`、`abort_multipart_upload`、`presign`、`close`。
-
-`AsyncClient` **没有**：`get_object_to_file`、`upload_file`、`uploader`、`downloader`
-——这四个只存在于同步 `oss.Client` 上（`oss.Uploader` / `oss.Downloader` 也是同步取向的）。
-
-`presign` 在 `AsyncClient` 上是 **coroutine**，在同步 `oss.Client` 上是普通函数且
-签名为 `presign(request, **kwargs) -> PresignResult`。本设计的签名走同步 client，
-因此不受影响。
-
-`oss.credentials` 提供 `StaticCredentialsProvider`、`CredentialsProviderFunc`、
-`Credentials`、`AnonymousCredentialsProvider`、`EnvironmentVariableCredentialsProvider`。
-
-本步骤仍要跑一遍，确认你的环境与上述一致。**若有出入，以实际输出为准，并立即
-以 NEEDS_CONTEXT 上报** —— 不要自行改设计。
+记录实际输出。**若某方法缺失或签名与后续步骤不符，以实际为准；拿不准就以 NEEDS_CONTEXT 上报，不要自行改设计。** 把输出粘进提交信息，供 Task 3 对照。
 
 - [ ] **Step 2: 写失败的冒烟测试**
 
-先创建共享夹具 `backend/tests/integration/conftest_oss.py`：
+创建 `backend/tests/integration/conftest_cos.py`：
 
 ```python
-"""OSS 集成测试夹具：唯一前缀隔离 + teardown 清理。
+"""COS 集成测试夹具：唯一前缀隔离 + teardown 清理。
 
-按项目规则，OSS 不 mock —— 这些测试打真实 dev bucket。
-未配置 oss_bucket 时自动 skip，便于无凭证环境跑其余测试。
+按项目规则，COS 不 mock —— 这些测试打真实 dev bucket。
+未配置时自动 skip，便于无凭证环境跑其余测试。
 """
 import uuid
 
@@ -316,22 +334,22 @@ import pytest
 from app.config import settings
 
 
-def _oss_configured() -> bool:
-    if not settings.oss_bucket or not settings.oss_region:
+def _cos_configured() -> bool:
+    if not settings.cos_bucket or not settings.cos_region:
         return False
-    if settings.oss_auth_mode == "static":
-        return bool(settings.oss_access_key_id and settings.oss_access_key_secret)
+    if settings.cos_auth_mode == "static":
+        return bool(settings.cos_secret_id and settings.cos_secret_key)
     return True
 
 
-requires_oss = pytest.mark.skipif(
-    not _oss_configured(),
-    reason="需要 OSS 凭证与 dev bucket（设置 oss_region/oss_bucket/oss_access_key_*）",
+requires_cos = pytest.mark.skipif(
+    not _cos_configured(),
+    reason="需要 COS 凭证与 dev bucket（设置 cos_region/cos_bucket/cos_secret_*）",
 )
 
 
 @pytest.fixture
-async def oss_prefix():
+async def cos_prefix():
     """本次测试专属 key 前缀，退出时递归删除。"""
     from app.services import object_store
 
@@ -340,56 +358,60 @@ async def oss_prefix():
     await object_store.delete_prefix(prefix)
 ```
 
-再创建 `backend/tests/integration/test_oss_client_smoke.py`：
+创建 `backend/tests/integration/test_cos_client_smoke.py`：
 
 ```python
-"""oss_client 冒烟：能建 client、能预热凭证、能干净关闭。"""
-from tests.integration.conftest_oss import requires_oss
+"""cos_client 冒烟：单例、凭证预热、干净关闭。"""
+from tests.integration.conftest_cos import requires_cos
 
-from app.services import oss_client
+from app.services import cos_client
 
 
-@requires_oss
+@requires_cos
 async def test_client_is_singleton():
-    a = oss_client.get_client()
-    b = oss_client.get_client()
+    """SDK 要求一个 region 只建一个实例并复用，否则占用过多连接和线程。"""
+    a = cos_client.get_client()
+    b = cos_client.get_client()
     assert a is b
 
 
-@requires_oss
+@requires_cos
 async def test_warm_credentials_populates_cache():
-    await oss_client.warm_credentials()
-    cred = oss_client.get_cached_credentials()
-    assert cred.access_key_id
-    assert cred.access_key_secret
+    await cos_client.warm_credentials()
+    cred = cos_client.get_cached_credentials()
+    assert cred["secret_id"]
+    assert cred["secret_key"]
 
 
-@requires_oss
+@requires_cos
 async def test_close_client_is_idempotent():
-    oss_client.get_client()
-    await oss_client.close_client()
-    await oss_client.close_client()  # 第二次不应抛异常
+    cos_client.get_client()
+    await cos_client.close_client()
+    await cos_client.close_client()  # 第二次不应抛异常
 ```
 
 - [ ] **Step 3: 运行测试确认失败**
 
-Run: `uv run --project backend pytest tests/integration/test_oss_client_smoke.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'app.services.oss_client'`
+Run: `uv run --project backend pytest tests/integration/test_cos_client_smoke.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'app.services.cos_client'`
 
-- [ ] **Step 4: 实现 oss_client**
+- [ ] **Step 4: 实现 cos_client**
 
-创建 `backend/app/services/oss_client.py`：
+创建 `backend/app/services/cos_client.py`：
 
 ```python
-"""阿里云 OSS 客户端与凭证管理。
+"""腾讯云 COS 客户端与凭证管理。
 
-本模块是全项目唯一 import alibabacloud_oss_v2 的地方；其余代码一律经由
-object_store / workspace 访问 OSS。
+本模块是全项目唯一 import qcloud_cos 的地方；其余代码一律经由
+object_store / workspace 访问 COS。
 
-凭证缓存的存在理由：to_media_url() 是同步函数（被 projects.py 的同步序列化器
-在列表推导中调用），而预签名需要凭证。static 模式凭证是常量无所谓；
-ecs_ram_role 模式下刷新凭证是网络操作，不能在同步函数里做——因此由
-warm_credentials() 预热、后台协程周期刷新，签名时只读缓存。
+两个设计约束：
+1. CosS3Client 必须单例 —— SDK 要求一个 region 只建一个实例并复用，
+   否则进程会占用过多连接和线程。
+2. 凭证缓存 —— to_media_url() 是同步函数（被 projects.py 的同步序列化器
+   在列表推导中调用），而预签名需要凭证。static 模式凭证是常量无所谓；
+   cvm_role 模式下取凭证是网络操作，不能在同步函数里做，因此由
+   warm_credentials() 预热、后台协程周期刷新，签名时只读缓存。
 """
 
 import asyncio
@@ -397,153 +419,128 @@ import logging
 import time
 from typing import Optional
 
-import alibabacloud_oss_v2 as oss
-import alibabacloud_oss_v2.aio as oss_aio
+import httpx
+from qcloud_cos import CosConfig, CosS3Client
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_client: Optional[oss_aio.AsyncClient] = None
-_cached_cred: Optional[oss.credentials.Credentials] = None
+# CVM 实例角色的元数据服务地址
+_METADATA_URL = (
+    "http://metadata.tencentyun.com/latest/meta-data/cam/security-credentials/"
+)
+
+_client: Optional[CosS3Client] = None
+_cached_cred: Optional[dict] = None
 _cred_expires_at: Optional[float] = None  # unix 秒；None = 永不过期（static）
 _refresh_task: Optional[asyncio.Task] = None
 
 
 def bucket() -> str:
-    """目标 bucket 名。集中一处，便于测试覆写。"""
-    if not settings.oss_bucket:
-        raise RuntimeError("未配置 oss_bucket")
-    return settings.oss_bucket
+    """目标 bucket 名（含 AppId）。"""
+    if not settings.cos_bucket:
+        raise RuntimeError("未配置 cos_bucket")
+    return settings.cos_bucket
 
 
-def _build_credentials_provider() -> oss.credentials.CredentialsProvider:
-    if settings.oss_auth_mode == "ecs_ram_role":
-        from alibabacloud_credentials.client import Client as CredClient
-        from alibabacloud_credentials.models import Config as CredConfig
-
-        cred_client = CredClient(CredConfig(
-            type="ecs_ram_role",
-            role_name=settings.oss_ecs_ram_role,
-        ))
-
-        def _fetch():
-            c = cred_client.get_credential()
-            return oss.credentials.Credentials(
-                access_key_id=c.access_key_id,
-                access_key_secret=c.access_key_secret,
-                security_token=c.security_token,
-            )
-
-        return oss.credentials.CredentialsProviderFunc(func=_fetch)
-
-    if not (settings.oss_access_key_id and settings.oss_access_key_secret):
-        raise RuntimeError("static 模式需要 oss_access_key_id / oss_access_key_secret")
-    return oss.credentials.StaticCredentialsProvider(
-        access_key_id=settings.oss_access_key_id,
-        access_key_secret=settings.oss_access_key_secret,
-    )
+def _fetch_cvm_role_credentials() -> dict:
+    """从 CVM 实例元数据服务取 STS 临时密钥。同步阻塞调用。"""
+    if not settings.cos_cvm_role:
+        raise RuntimeError("cvm_role 模式需要 cos_cvm_role")
+    r = httpx.get(f"{_METADATA_URL}{settings.cos_cvm_role}", timeout=5)
+    r.raise_for_status()
+    d = r.json()
+    return {
+        "secret_id": d["TmpSecretId"],
+        "secret_key": d["TmpSecretKey"],
+        "token": d["Token"],
+        "expired_at": d.get("ExpiredTime"),
+    }
 
 
-def _build_config() -> oss.config.Config:
-    cfg = oss.config.load_default()
-    cfg.credentials_provider = _build_credentials_provider()
-    cfg.region = settings.oss_region
-    if settings.oss_endpoint:
-        cfg.endpoint = settings.oss_endpoint
-    if settings.oss_use_internal_endpoint:
-        cfg.use_internal_endpoint = True
-    # 视频文件大，重传代价高但失败代价更高
-    cfg.retry_max_attempts = 5
-    return cfg
+def _build_config(cred: dict) -> CosConfig:
+    kwargs = {
+        "Region": settings.cos_region,
+        "SecretId": cred["secret_id"],
+        "SecretKey": cred["secret_key"],
+        "Scheme": settings.cos_scheme,
+    }
+    if cred.get("token"):
+        kwargs["Token"] = cred["token"]
+    if settings.cos_domain:
+        kwargs["Domain"] = settings.cos_domain
+    return CosConfig(**kwargs)
 
 
-def get_client() -> oss_aio.AsyncClient:
-    """AsyncClient 单例。传输类操作（put/get/copy/delete/list）使用。"""
+def get_client() -> CosS3Client:
+    """CosS3Client 单例。"""
     global _client
     if _client is None:
-        _client = oss_aio.AsyncClient(_build_config())
+        _client = CosS3Client(_build_config(get_cached_credentials()))
         logger.info(
-            "oss_client_created",
-            extra={"region": settings.oss_region, "bucket": settings.oss_bucket,
-                   "auth_mode": settings.oss_auth_mode,
-                   "internal_endpoint": settings.oss_use_internal_endpoint},
+            "cos_client_created",
+            extra={"region": settings.cos_region, "bucket": settings.cos_bucket,
+                   "auth_mode": settings.cos_auth_mode},
         )
     return _client
-
-
-def _sync_signing_client() -> oss.Client:
-    """仅用于预签名的同步 client。
-
-    预签名是纯本地 HMAC 计算，不发网络请求，因此同步调用不会阻塞事件循环。
-    凭证由缓存提供，避免同步路径触发 STS 刷新。
-    """
-    cfg = oss.config.load_default()
-    cred = get_cached_credentials()
-    cfg.credentials_provider = oss.credentials.StaticCredentialsProvider(
-        access_key_id=cred.access_key_id,
-        access_key_secret=cred.access_key_secret,
-        security_token=getattr(cred, "security_token", None),
-    )
-    cfg.region = settings.oss_region
-    if settings.oss_endpoint:
-        cfg.endpoint = settings.oss_endpoint
-    if settings.oss_use_internal_endpoint:
-        cfg.use_internal_endpoint = True
-    return oss.Client(cfg)
 
 
 async def warm_credentials() -> None:
     """预热凭证缓存。FastAPI lifespan 与 worker 启动时调用。
 
-    static 模式下凭证是常量，直接写缓存；ecs_ram_role 模式下在线程池中
-    取一次 STS Token（provider 的 get_credentials 是同步阻塞调用）。
+    cvm_role 模式下临时密钥会变，凭证是构造 CosConfig 时传入的，
+    因此刷新凭证必须一并重建 client —— 这是与永久密钥模式的关键差异。
     """
-    global _cached_cred, _cred_expires_at
+    global _cached_cred, _cred_expires_at, _client
 
-    if settings.oss_auth_mode == "static":
-        _cached_cred = oss.credentials.Credentials(
-            access_key_id=settings.oss_access_key_id,
-            access_key_secret=settings.oss_access_key_secret,
-        )
+    if settings.cos_auth_mode == "static":
+        if not (settings.cos_secret_id and settings.cos_secret_key):
+            raise RuntimeError("static 模式需要 cos_secret_id / cos_secret_key")
+        _cached_cred = {
+            "secret_id": settings.cos_secret_id,
+            "secret_key": settings.cos_secret_key,
+            "token": None,
+        }
         _cred_expires_at = None
         return
 
-    provider = _build_credentials_provider()
-    cred = await asyncio.to_thread(provider.get_credentials)
+    cred = await asyncio.to_thread(_fetch_cvm_role_credentials)
     _cached_cred = cred
-    # STS Token 通常 1 小时。保守按 3600s 计，并在 50% 处刷新。
-    _cred_expires_at = time.time() + 3600
-    logger.info("oss_credentials_warmed", extra={"auth_mode": settings.oss_auth_mode})
+    expired_at = cred.get("expired_at")
+    _cred_expires_at = float(expired_at) if expired_at else time.time() + 3600
+    _client = None  # 强制下次 get_client() 用新凭证重建
+    logger.info("cos_credentials_warmed", extra={"auth_mode": settings.cos_auth_mode})
 
 
 async def _refresh_loop() -> None:
-    """后台按凭证生命周期 50% 周期刷新，保证同步签名路径永远读到有效凭证。"""
+    """按凭证剩余有效期的 50% 周期刷新，保证同步签名路径永远读到有效凭证。"""
     while True:
         try:
-            await asyncio.sleep(1800)  # 3600s 的 50%
+            remaining = credentials_remaining_sec() or 3600
+            await asyncio.sleep(max(60, remaining // 2))
             await warm_credentials()
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("oss_credentials_refresh_failed")
+            logger.exception("cos_credentials_refresh_failed")
             await asyncio.sleep(60)
 
 
 async def start_credential_refresh() -> None:
-    """启动后台刷新协程（仅 ecs_ram_role 模式需要）。"""
+    """启动后台刷新协程（仅 cvm_role 模式需要）。"""
     global _refresh_task
-    if settings.oss_auth_mode != "ecs_ram_role":
+    if settings.cos_auth_mode != "cvm_role":
         return
     if _refresh_task is None or _refresh_task.done():
         _refresh_task = asyncio.create_task(_refresh_loop())
 
 
-def get_cached_credentials() -> oss.credentials.Credentials:
+def get_cached_credentials() -> dict:
     """同步读取缓存凭证。缓存为空时抛错，绝不阻塞去取。"""
     if _cached_cred is None:
         raise RuntimeError(
-            "OSS 凭证缓存为空；应在应用启动时调用 warm_credentials()"
+            "COS 凭证缓存为空；应在应用启动时调用 warm_credentials()"
         )
     return _cached_cred
 
@@ -556,7 +553,7 @@ def credentials_remaining_sec() -> Optional[int]:
 
 
 async def close_client() -> None:
-    """关闭 AsyncClient 并停止后台刷新。幂等。"""
+    """停止后台刷新并释放单例。幂等。"""
     global _client, _refresh_task
     if _refresh_task is not None:
         _refresh_task.cancel()
@@ -565,26 +562,26 @@ async def close_client() -> None:
         except (asyncio.CancelledError, Exception):
             pass
         _refresh_task = None
-    if _client is not None:
-        await _client.close()
-        _client = None
+    _client = None
 ```
 
 - [ ] **Step 5: 运行测试确认通过**
 
-Run: `uv run --project backend pytest tests/integration/test_oss_client_smoke.py -v`
-Expected: PASS（3 项）；若无 OSS 凭证则 3 项 SKIPPED——此时须在有凭证环境重跑确认真实通过，不得以 SKIPPED 当作通过
+Run: `uv run --project backend pytest tests/integration/test_cos_client_smoke.py -v`
+Expected: PASS（3 项）；无凭证环境会 SKIPPED——**SKIPPED 不算通过**，须在有凭证环境重跑确认
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add backend/app/services/oss_client.py \
-        backend/tests/integration/conftest_oss.py \
-        backend/tests/integration/test_oss_client_smoke.py
-git commit -m "feat(oss): 新增 oss_client，AsyncClient 单例与凭证缓存
+git add backend/app/services/cos_client.py \
+        backend/tests/integration/conftest_cos.py \
+        backend/tests/integration/test_cos_client_smoke.py
+git commit -m "feat(cos): 新增 cos_client，CosS3Client 单例与凭证缓存
 
 凭证缓存服务于同步签名路径：to_media_url 被同步序列化器调用，
-不能在其中触发 STS 网络刷新，故由 lifespan 预热 + 后台协程周期刷新。"
+不能在其中触发取凭证的网络请求，故由 lifespan 预热 + 后台协程刷新。
+cvm_role 模式下临时密钥变化必须一并重建 client——Token 是构造
+CosConfig 时传入的，不重建会继续用过期凭证签名。"
 ```
 
 ---
@@ -596,31 +593,19 @@ git commit -m "feat(oss): 新增 oss_client，AsyncClient 单例与凭证缓存
 - Test: `backend/tests/integration/test_object_store.py`
 
 **Interfaces:**
-- Consumes: Task 2 的 `get_client()`、`bucket()`、`get_cached_credentials()`、`credentials_remaining_sec()`、`_sync_signing_client()`
-- Produces:
-  - `async def put(key: str, local_path: Path, content_type: Optional[str] = None) -> str` — 返回 key
-  - `async def get(key: str, dest_path: Path) -> Path` — 返回 dest_path
+- Consumes: Task 2 的 `get_client()`、`bucket()`、`get_cached_credentials()`、`credentials_remaining_sec()`
+- Produces（除 `signed_url` 外全部 `async`）：
+  - `async def put(key: str, local_path: Path, content_type: Optional[str] = None) -> str`
+  - `async def get(key: str, dest_path: Path) -> Path`
   - `async def exists(key: str) -> bool`
-  - `async def size(key: str) -> int` — 对象字节数；不存在时抛 `FileNotFoundError`
-  - `async def copy(src_key: str, dst_key: str) -> str` — 服务端拷贝，返回 dst_key
-  - `async def delete(key: str) -> None` — 幂等，不存在不报错
+  - `async def size(key: str) -> int` — 不存在时抛 `FileNotFoundError`
+  - `async def copy(src_key: str, dst_key: str) -> str`
+  - `async def delete(key: str) -> None` — 幂等
   - `async def delete_prefix(prefix: str) -> int` — 返回删除数量，内部分页
-  - `async def list_prefix(prefix: str) -> list[str]` — 返回全部 key，内部分页
+  - `async def list_prefix(prefix: str) -> list[str]` — 内部分页
   - `def signed_url(key: str, expires_sec: Optional[int] = None, filename: Optional[str] = None) -> str` — **同步**
 
-- [ ] **Step 0: 核对异步流式下载的 body 接口**
-
-`get()` 需要把 `get_object` 返回的响应体流式写盘。先确认流对象的方法名：
-
-```bash
-uv run --project backend python -c "
-import alibabacloud_oss_v2 as oss
-print('AsyncStreamBody:', sorted(m for m in dir(oss.AsyncStreamBody) if not m.startswith('_')))
-"
-```
-
-记录输出。Step 3 的 `get()` 实现按实际方法名写（常见为 `iter_bytes()` 异步迭代器，
-或 `read()` 协程）。**若两者都没有，以 NEEDS_CONTEXT 上报，不要自行换方案。**
+**核心约束**：SDK 是同步的。**每个方法内的 SDK 调用都必须 `await asyncio.to_thread(...)`**，唯一例外是 `signed_url`（纯本地 HMAC，不发网络请求）。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -628,47 +613,50 @@ print('AsyncStreamBody:', sorted(m for m in dir(oss.AsyncStreamBody) if not m.st
 
 ```python
 """object_store 原语——打真实 dev bucket，唯一前缀隔离。"""
+import asyncio
+import time
+
 import httpx
 import pytest
 
-from tests.integration.conftest_oss import requires_oss
+from tests.integration.conftest_cos import requires_cos
 
 from app.services import object_store
 
-pytestmark = requires_oss
+pytestmark = requires_cos
 
 
-async def test_put_then_get_roundtrip(oss_prefix, tmp_path):
+async def test_put_then_get_roundtrip(cos_prefix, tmp_path):
     src = tmp_path / "a.txt"
-    src.write_bytes(b"hello oss")
-    key = await object_store.put(f"{oss_prefix}a.txt", src)
+    src.write_bytes(b"hello cos")
+    key = await object_store.put(f"{cos_prefix}a.txt", src)
 
     dest = tmp_path / "back.txt"
     await object_store.get(key, dest)
-    assert dest.read_bytes() == b"hello oss"
+    assert dest.read_bytes() == b"hello cos"
 
 
-async def test_exists_and_size(oss_prefix, tmp_path):
+async def test_exists_and_size(cos_prefix, tmp_path):
     src = tmp_path / "b.bin"
     src.write_bytes(b"x" * 1234)
-    key = await object_store.put(f"{oss_prefix}b.bin", src)
+    key = await object_store.put(f"{cos_prefix}b.bin", src)
 
     assert await object_store.exists(key) is True
     assert await object_store.size(key) == 1234
-    assert await object_store.exists(f"{oss_prefix}nope.bin") is False
+    assert await object_store.exists(f"{cos_prefix}nope.bin") is False
 
 
-async def test_size_missing_raises(oss_prefix):
+async def test_size_missing_raises(cos_prefix):
     with pytest.raises(FileNotFoundError):
-        await object_store.size(f"{oss_prefix}missing.bin")
+        await object_store.size(f"{cos_prefix}missing.bin")
 
 
-async def test_copy_is_server_side(oss_prefix, tmp_path):
+async def test_copy_is_server_side(cos_prefix, tmp_path):
     src = tmp_path / "c.txt"
     src.write_bytes(b"copy me")
-    key = await object_store.put(f"{oss_prefix}c.txt", src)
+    key = await object_store.put(f"{cos_prefix}c.txt", src)
 
-    dst = await object_store.copy(key, f"{oss_prefix}c_backup.txt")
+    dst = await object_store.copy(key, f"{cos_prefix}c_backup.txt")
     assert await object_store.exists(dst)
 
     back = tmp_path / "c2.txt"
@@ -676,36 +664,36 @@ async def test_copy_is_server_side(oss_prefix, tmp_path):
     assert back.read_bytes() == b"copy me"
 
 
-async def test_delete_is_idempotent(oss_prefix, tmp_path):
+async def test_delete_is_idempotent(cos_prefix, tmp_path):
     src = tmp_path / "d.txt"
     src.write_bytes(b"bye")
-    key = await object_store.put(f"{oss_prefix}d.txt", src)
+    key = await object_store.put(f"{cos_prefix}d.txt", src)
 
     await object_store.delete(key)
     assert await object_store.exists(key) is False
     await object_store.delete(key)  # 第二次不应抛异常
 
 
-async def test_list_and_delete_prefix(oss_prefix, tmp_path):
+async def test_list_and_delete_prefix(cos_prefix, tmp_path):
     for i in range(3):
         f = tmp_path / f"e{i}.txt"
         f.write_bytes(b"z")
-        await object_store.put(f"{oss_prefix}sub/e{i}.txt", f)
+        await object_store.put(f"{cos_prefix}sub/e{i}.txt", f)
 
-    keys = await object_store.list_prefix(f"{oss_prefix}sub/")
+    keys = await object_store.list_prefix(f"{cos_prefix}sub/")
     assert len(keys) == 3
-    assert all(k.startswith(f"{oss_prefix}sub/") for k in keys)
+    assert all(k.startswith(f"{cos_prefix}sub/") for k in keys)
 
-    n = await object_store.delete_prefix(f"{oss_prefix}sub/")
+    n = await object_store.delete_prefix(f"{cos_prefix}sub/")
     assert n == 3
-    assert await object_store.list_prefix(f"{oss_prefix}sub/") == []
+    assert await object_store.list_prefix(f"{cos_prefix}sub/") == []
 
 
-async def test_signed_url_actually_fetches_content(oss_prefix, tmp_path):
+async def test_signed_url_actually_fetches_content(cos_prefix, tmp_path):
     """断言 URL 真能取到内容，而非断言字符串形态——签名算错时形态照样对。"""
     src = tmp_path / "f.txt"
     src.write_bytes(b"signed content")
-    key = await object_store.put(f"{oss_prefix}f.txt", src)
+    key = await object_store.put(f"{cos_prefix}f.txt", src)
 
     url = object_store.signed_url(key)
     async with httpx.AsyncClient(timeout=30) as c:
@@ -714,16 +702,32 @@ async def test_signed_url_actually_fetches_content(oss_prefix, tmp_path):
     assert r.content == b"signed content"
 
 
-async def test_signed_url_with_filename_sets_attachment(oss_prefix, tmp_path):
-    src = tmp_path / "g.mp4"
-    src.write_bytes(b"fake video")
-    key = await object_store.put(f"{oss_prefix}g.mp4", src)
+async def test_transfers_do_not_block_event_loop(cos_prefix, tmp_path):
+    """SDK 是同步的，传输必须在线程池里跑。
 
-    url = object_store.signed_url(key, filename="merged.mp4")
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.get(url)
-    assert r.status_code == 200
-    assert "merged.mp4" in r.headers.get("content-disposition", "")
+    若某个方法漏了 asyncio.to_thread，上传期间事件循环会被独占，
+    并发的心跳协程推进次数会显著下降。这是本方案最隐蔽的一类缺陷，
+    且只在文件够大时才复现，故用 8MB 文件放大信号。
+    """
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"0" * (8 * 1024 * 1024))
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    hb = asyncio.create_task(heartbeat())
+    try:
+        await object_store.put(f"{cos_prefix}big.bin", big)
+    finally:
+        hb.cancel()
+
+    # 事件循环若被阻塞，ticks 会接近 0
+    assert ticks > 5, f"事件循环疑似被阻塞，心跳仅推进 {ticks} 次"
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -736,10 +740,14 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.services.object_st
 创建 `backend/app/services/object_store.py`：
 
 ```python
-"""OSS 对象操作原语。不含任何业务语义。
+"""COS 对象操作原语。不含任何业务语义。
+
+SDK 是纯同步的，因此每个传输方法都用 asyncio.to_thread 把阻塞调用移出
+事件循环。唯一例外是 signed_url —— 预签名是纯本地 HMAC 计算，不发网络
+请求，进线程池只会徒增开销。
 
 一致性约定（调用方须遵守）：新增文件先 put 成功再写 DB；删除先改 DB 解除
-引用再删 OSS。DB 中的 key 必须永远指向真实存在的对象，宁可留孤儿对象。
+引用再删 COS。DB 中的 key 必须永远指向真实存在的对象，宁可留孤儿对象。
 """
 
 import asyncio
@@ -748,33 +756,29 @@ import mimetypes
 from pathlib import Path
 from typing import Optional
 
-import alibabacloud_oss_v2 as oss
-
 from app.config import settings
-from app.services.oss_client import (
+from app.services.cos_client import (
     bucket,
     credentials_remaining_sec,
     get_client,
-    _sync_signing_client,
 )
 
 logger = logging.getLogger(__name__)
 
-# 超过此大小走分片上传管理器，支持断点续传
+# 超过此大小走 upload_file 高级接口（自动分块 + 断点续传）
 MULTIPART_THRESHOLD = 100 * 1024 * 1024
 
 
-def _log_oss_error(op: str, key: str, exc: Exception) -> None:
-    """记录 EC 码——阿里云提供 EC 码自助诊断平台，是排查时最省事的线索。"""
+def _log_cos_error(op: str, key: str, exc: Exception) -> None:
+    """记录 RequestId —— 腾讯云工单排查以它为准。"""
     logger.error(
-        "oss_operation_failed",
+        "cos_operation_failed",
         extra={
             "op": op,
             "key": key,
-            "error_code": getattr(exc, "code", None),
-            "status_code": getattr(exc, "status_code", None),
-            "ec": getattr(exc, "ec", None),
-            "request_id": getattr(exc, "request_id", None),
+            "error_code": getattr(exc, "get_error_code", lambda: None)(),
+            "status_code": getattr(exc, "get_status_code", lambda: None)(),
+            "request_id": getattr(exc, "get_request_id", lambda: None)(),
         },
     )
 
@@ -784,31 +788,28 @@ async def put(key: str, local_path: Path, content_type: Optional[str] = None) ->
     local_path = Path(local_path)
     n = local_path.stat().st_size
     ct = content_type or mimetypes.guess_type(local_path.name)[0]
-
     client = get_client()
-    req_kwargs = {"bucket": bucket(), "key": key}
-    if ct:
-        req_kwargs["content_type"] = ct
+
+    def _do():
+        if n >= MULTIPART_THRESHOLD:
+            # 高级接口按大小自动选简单/分块上传，分块自带断点续传
+            return client.upload_file(
+                Bucket=bucket(), Key=key, LocalFilePath=str(local_path),
+                PartSize=10, MAXThread=10, EnableMD5=False,
+            )
+        kwargs = {"Bucket": bucket(), "Key": key, "EnableMD5": False}
+        if ct:
+            kwargs["ContentType"] = ct
+        with open(local_path, "rb") as f:
+            return client.put_object(Body=f, **kwargs)
 
     try:
-        if n >= MULTIPART_THRESHOLD:
-            # AsyncClient 没有 upload_file/uploader —— 分片上传管理器只存在于
-            # 同步侧。用线程跑同步 Uploader，既拿到断点续传，又不必手写
-            # initiate/upload_part/complete 那套异步分片逻辑。
-            uploader = oss.Uploader(_sync_signing_client())
-            await asyncio.to_thread(
-                uploader.upload_file,
-                oss.PutObjectRequest(**req_kwargs),
-                str(local_path),
-            )
-        else:
-            with open(local_path, "rb") as f:
-                await client.put_object(oss.PutObjectRequest(body=f, **req_kwargs))
+        await asyncio.to_thread(_do)
     except Exception as e:
-        _log_oss_error("put", key, e)
+        _log_cos_error("put", key, e)
         raise
 
-    logger.info("oss_put", extra={"key": key, "bytes": n})
+    logger.info("cos_put", extra={"key": key, "bytes": n})
     return key
 
 
@@ -816,110 +817,120 @@ async def get(key: str, dest_path: Path) -> Path:
     """下载 key 到本地。父目录自动创建。返回 dest_path。"""
     dest_path = Path(dest_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
-    # AsyncClient 没有 get_object_to_file（只在同步 Client 上），因此手动流式写盘。
-    # 流式而非整体读入内存：分镜视频可达数百 MB。
+    client = get_client()
+
+    def _do():
+        r = client.get_object(Bucket=bucket(), Key=key)
+        # 流式写盘，不整体读入内存：分镜视频可达数百 MB
+        r["Body"].get_stream_to_file(str(dest_path))
+
     try:
-        result = await get_client().get_object(
-            oss.GetObjectRequest(bucket=bucket(), key=key)
-        )
-        async with result.body as stream:
-            with open(dest_path, "wb") as f:
-                async for chunk in stream.iter_bytes():
-                    f.write(chunk)
+        await asyncio.to_thread(_do)
     except Exception as e:
-        _log_oss_error("get", key, e)
+        _log_cos_error("get", key, e)
         raise
-    logger.info("oss_get", extra={"key": key, "bytes": dest_path.stat().st_size})
+    logger.info("cos_get", extra={"key": key, "bytes": dest_path.stat().st_size})
     return dest_path
 
 
 async def exists(key: str) -> bool:
-    """对象是否存在。用 SDK 自带的 is_object_exist，省去自行判别 404。"""
+    """对象是否存在。用 SDK 自带的 object_exists。"""
+    client = get_client()
     try:
-        return await get_client().is_object_exist(bucket(), key)
+        return await asyncio.to_thread(client.object_exists, bucket(), key)
     except Exception as e:
-        _log_oss_error("exists", key, e)
+        _log_cos_error("exists", key, e)
         raise
 
 
 async def size(key: str) -> int:
     """对象字节数。不存在时抛 FileNotFoundError。"""
+    client = get_client()
     try:
-        r = await get_client().head_object(
-            oss.HeadObjectRequest(bucket=bucket(), key=key)
-        )
+        r = await asyncio.to_thread(client.head_object, Bucket=bucket(), Key=key)
     except Exception as e:
-        if getattr(e, "status_code", None) == 404 or "NoSuchKey" in str(e):
+        if getattr(e, "get_status_code", lambda: None)() == 404:
             raise FileNotFoundError(key) from e
-        _log_oss_error("size", key, e)
+        _log_cos_error("size", key, e)
         raise
-    return int(r.content_length)
+    return int(r["Content-Length"])
 
 
 async def copy(src_key: str, dst_key: str) -> str:
     """服务端拷贝，不产生本地流量。返回 dst_key。"""
+    client = get_client()
+    source = {
+        "Bucket": bucket(),
+        "Key": src_key,
+        "Region": settings.cos_region,
+    }
     try:
-        await get_client().copy_object(oss.CopyObjectRequest(
-            bucket=bucket(), key=dst_key,
-            source_bucket=bucket(), source_key=src_key,
-        ))
+        await asyncio.to_thread(
+            client.copy_object, Bucket=bucket(), Key=dst_key, CopySource=source
+        )
     except Exception as e:
-        _log_oss_error("copy", src_key, e)
+        _log_cos_error("copy", src_key, e)
         raise
-    logger.info("oss_copy", extra={"src": src_key, "dst": dst_key})
+    logger.info("cos_copy", extra={"src": src_key, "dst": dst_key})
     return dst_key
 
 
 async def delete(key: str) -> None:
     """删除对象。幂等——对象不存在不报错。"""
+    client = get_client()
     try:
-        await get_client().delete_object(
-            oss.DeleteObjectRequest(bucket=bucket(), key=key)
-        )
+        await asyncio.to_thread(client.delete_object, Bucket=bucket(), Key=key)
     except Exception as e:
-        if getattr(e, "status_code", None) == 404:
+        if getattr(e, "get_status_code", lambda: None)() == 404:
             return
-        _log_oss_error("delete", key, e)
+        _log_cos_error("delete", key, e)
         raise
-    logger.info("oss_delete", extra={"key": key})
+    logger.info("cos_delete", extra={"key": key})
 
 
 async def list_prefix(prefix: str) -> list[str]:
-    """列出前缀下全部 key。用 SDK 的分页器，不手写 continuation token 循环。"""
-    keys: list[str] = []
+    """列出前缀下全部 key。单次 list_objects 上限 1000，故循环取到尽。"""
+    client = get_client()
+
+    def _do() -> list[str]:
+        keys: list[str] = []
+        marker = ""
+        while True:
+            r = client.list_objects(Bucket=bucket(), Prefix=prefix, Marker=marker)
+            for obj in r.get("Contents", []):
+                keys.append(obj["Key"])
+            if r.get("IsTruncated") != "true":
+                break
+            marker = r["NextMarker"]
+        return keys
+
     try:
-        paginator = get_client().list_objects_v2_paginator()
-        async for page in paginator.iter_page(
-            oss.ListObjectsV2Request(bucket=bucket(), prefix=prefix)
-        ):
-            for obj in (page.contents or []):
-                keys.append(obj.key)
+        return await asyncio.to_thread(_do)
     except Exception as e:
-        _log_oss_error("list_prefix", prefix, e)
+        _log_cos_error("list_prefix", prefix, e)
         raise
-    return keys
 
 
 async def delete_prefix(prefix: str) -> int:
-    """删除前缀下全部对象。返回删除数量。
-
-    OSS 批量删除单次上限 1000，必须分批。
-    """
+    """删除前缀下全部对象。返回删除数量。批量删单次上限 1000，必须分批。"""
     keys = await list_prefix(prefix)
     if not keys:
         return 0
     client = get_client()
+
+    def _do(chunk: list[str]):
+        return client.delete_objects(
+            Bucket=bucket(),
+            Delete={"Object": [{"Key": k} for k in chunk], "Quiet": "true"},
+        )
+
     for i in range(0, len(keys), 1000):
-        chunk = keys[i:i + 1000]
         try:
-            await client.delete_multiple_objects(oss.DeleteMultipleObjectsRequest(
-                bucket=bucket(),
-                objects=[oss.DeleteObject(key=k) for k in chunk],
-            ))
+            await asyncio.to_thread(_do, keys[i:i + 1000])
         except Exception as e:
-            _log_oss_error("delete_prefix", prefix, e)
+            _log_cos_error("delete_prefix", prefix, e)
             raise
-    logger.info("oss_delete_prefix", extra={"prefix": prefix, "count": len(keys)})
+    logger.info("cos_delete_prefix", extra={"prefix": prefix, "count": len(keys)})
     return len(keys)
 
 
@@ -930,23 +941,28 @@ def signed_url(
 ) -> str:
     """生成预签名 GET URL。**同步**——纯本地 HMAC 计算，不发网络请求。
 
-    有效期取 min(配置 TTL, 凭证剩余有效期)：签名有效期不能超过凭证有效期，
-    否则 URL 会在 TTL 内因凭证先过期而失效。
+    有效期取 min(配置 TTL, 凭证剩余有效期)：签名有效期不能超过临时密钥
+    有效期，否则 URL 会在 TTL 内因凭证先过期而失效。
 
-    filename 非空时附加 response-content-disposition，让 OSS 直接返回附件
+    filename 非空时附加 response-content-disposition，让 COS 直接返回附件
     下载头（用于成片下载）。
     """
-    ttl = expires_sec if expires_sec is not None else settings.oss_signed_url_ttl_sec
+    ttl = expires_sec if expires_sec is not None else settings.cos_signed_url_ttl_sec
     remaining = credentials_remaining_sec()
     if remaining is not None:
         ttl = min(ttl, remaining)
 
-    req = oss.GetObjectRequest(bucket=bucket(), key=key)
+    params = {}
     if filename:
-        req.response_content_disposition = f'attachment; filename="{filename}"'
+        params["response-content-disposition"] = f'attachment; filename="{filename}"'
 
-    result = _sync_signing_client().presign(req, expires=ttl)
-    return result.url
+    return get_client().get_presigned_url(
+        Method="GET",
+        Bucket=bucket(),
+        Key=key,
+        Expired=ttl,
+        Params=params or None,
+    )
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
@@ -954,21 +970,24 @@ def signed_url(
 Run: `uv run --project backend pytest tests/integration/test_object_store.py -v`
 Expected: PASS（8 项）
 
-若 `presign` 的参数名或返回属性与实际 SDK 不符，按 Task 2 Step 1 的输出修正。
+若 `get_presigned_url` 的参数名（`Expired` / `Params`）或异常对象的取值方法（`get_status_code` / `get_request_id`）与 Step 1 核对结果不符，按实际修正。
 
 - [ ] **Step 5: 提交**
 
 ```bash
 git add backend/app/services/object_store.py backend/tests/integration/test_object_store.py
-git commit -m "feat(oss): 新增 object_store 对象原语
+git commit -m "feat(cos): 新增 object_store 对象原语
 
-signed_url 保持同步（纯 HMAC 无网络 IO），有效期取
-min(配置TTL, 凭证剩余有效期) 以免 URL 在 TTL 内因凭证过期而失效。
-delete_prefix 按 1000 分批，符合 OSS 批量删除上限。"
+SDK 是纯同步的，每个传输方法都用 asyncio.to_thread 移出事件循环；
+signed_url 例外——纯 HMAC 无网络 IO，进线程池徒增开销。
+新增事件循环阻塞检测测试：漏 to_thread 不会报错，只会在传大文件时
+让服务卡死，必须由测试守住。
+
+签名有效期取 min(配置TTL, 凭证剩余)，避免 URL 在 TTL 内因临时密钥
+先过期而失效。delete_prefix 按 1000 分批，符合 COS 批量删除上限。"
 ```
 
 ---
-
 ## Task 4: workspace — ffmpeg 临时工作区
 
 **Files:**
@@ -993,18 +1012,18 @@ delete_prefix 按 1000 分批，符合 OSS 批量删除上限。"
 """workspace 上下文管理器——打真实 dev bucket。"""
 import pytest
 
-from tests.integration.conftest_oss import requires_oss
+from tests.integration.conftest_cos import requires_cos
 
 from app.services import object_store
 from app.services.workspace import workspace, ensure_free_space
 
-pytestmark = requires_oss
+pytestmark = requires_cos
 
 
-async def test_fetch_then_publish_roundtrip(oss_prefix, tmp_path):
+async def test_fetch_then_publish_roundtrip(cos_prefix, tmp_path):
     src = tmp_path / "in.txt"
     src.write_bytes(b"workspace roundtrip")
-    key = await object_store.put(f"{oss_prefix}in.txt", src)
+    key = await object_store.put(f"{cos_prefix}in.txt", src)
 
     async with workspace() as ws:
         local = await ws.fetch(key)
@@ -1012,7 +1031,7 @@ async def test_fetch_then_publish_roundtrip(oss_prefix, tmp_path):
 
         out = ws.path("out.txt")
         out.write_bytes(local.read_bytes() + b" processed")
-        out_key = await ws.publish(out, f"{oss_prefix}out.txt")
+        out_key = await ws.publish(out, f"{cos_prefix}out.txt")
 
     assert await object_store.exists(out_key)
     dest = tmp_path / "verify.txt"
@@ -1020,10 +1039,10 @@ async def test_fetch_then_publish_roundtrip(oss_prefix, tmp_path):
     assert dest.read_bytes() == b"workspace roundtrip processed"
 
 
-async def test_tmpdir_removed_on_exit(oss_prefix, tmp_path):
+async def test_tmpdir_removed_on_exit(cos_prefix, tmp_path):
     src = tmp_path / "x.txt"
     src.write_bytes(b"x")
-    key = await object_store.put(f"{oss_prefix}x.txt", src)
+    key = await object_store.put(f"{cos_prefix}x.txt", src)
 
     async with workspace() as ws:
         root = ws.root
@@ -1032,7 +1051,7 @@ async def test_tmpdir_removed_on_exit(oss_prefix, tmp_path):
     assert not root.exists()
 
 
-async def test_tmpdir_removed_even_on_exception(oss_prefix):
+async def test_tmpdir_removed_even_on_exception(cos_prefix):
     captured = {}
     with pytest.raises(ValueError):
         async with workspace() as ws:
@@ -1041,10 +1060,10 @@ async def test_tmpdir_removed_even_on_exception(oss_prefix):
     assert not captured["root"].exists()
 
 
-async def test_fetch_accepts_custom_local_name(oss_prefix, tmp_path):
+async def test_fetch_accepts_custom_local_name(cos_prefix, tmp_path):
     src = tmp_path / "y.mp4"
     src.write_bytes(b"video bytes")
-    key = await object_store.put(f"{oss_prefix}deep/nested/y.mp4", src)
+    key = await object_store.put(f"{cos_prefix}deep/nested/y.mp4", src)
 
     async with workspace() as ws:
         local = await ws.fetch(key, name="source.mp4")
@@ -1069,8 +1088,8 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.services.workspace
 ```python
 """ffmpeg 临时工作区。
 
-OSS 是权威存储，本地不保留任何持久文件。需要跑 ffmpeg 时，把输入 fetch
-到一次性临时目录，算完 publish 回 OSS，退出即删。
+COS 是权威存储，本地不保留任何持久文件。需要跑 ffmpeg 时，把输入 fetch
+到一次性临时目录，算完 publish 回 COS，退出即删。
 
 用法：
     async with workspace() as ws:
@@ -1151,7 +1170,7 @@ Expected: PASS（5 项）
 git add backend/app/services/workspace.py backend/tests/integration/test_workspace.py
 git commit -m "feat(oss): 新增 workspace 临时工作区
 
-不设持久本地缓存——浏览器直连 OSS，本地文件只有 ffmpeg 需要，
+不设持久本地缓存——浏览器直连 COS，本地文件只有 ffmpeg 需要，
 而 ffmpeg 任务都是离散的，用完即弃已足够。"
 ```
 
@@ -1284,9 +1303,9 @@ Expected: FAIL — `AttributeError: module 'app.services.storage' has no attribu
 用以下内容**整体替换** `backend/app/services/storage.py`：
 
 ```python
-"""项目素材的 OSS key 工具。
+"""项目素材的 COS key 工具。
 
-OSS 是权威存储。本模块只负责拼 key 与生成浏览器可访问的签名 URL；
+COS 是权威存储。本模块只负责拼 key 与生成浏览器可访问的签名 URL；
 任何本地文件都只存在于 workspace 的一次性临时目录中。
 
 key 布局与迁移前的 storage_root 相对路径逐字符一致，因此存量迁移是
@@ -1395,7 +1414,7 @@ def is_valid_key(key: str) -> bool:
 
 
 def to_media_url(key: Optional[str]) -> Optional[str]:
-    """把 OSS key 转成浏览器可直接访问的预签名 URL。
+    """把 COS key 转成浏览器可直接访问的预签名 URL。
 
     保持**同步**——projects.py 的 _shot_to_dict / _candidate_to_dict 是同步
     序列化器且在列表推导中调用本函数，改 async 会连锁污染全部上游。
@@ -1420,7 +1439,7 @@ Expected: 大量 `ImportError`（如 `cannot import name 'shot_dir' from 'app.se
 
 ```bash
 git add backend/app/services/storage.py backend/tests/unit/test_storage_keys.py
-git commit -m "refactor(oss)!: storage.py 改为返回 OSS key
+git commit -m "refactor(oss)!: storage.py 改为返回 COS key
 
 BREAKING: 删除全部本地路径函数，调用点将报 ImportError，由后续 task 修复。
 这正是方案 B 的意图——遗漏在所有环境同等失败，不会潜伏到生产。
@@ -1442,7 +1461,7 @@ to_media_url 保持同步：projects.py 的序列化器是同步函数且在列�
 - Consumes: 无
 - Produces: `Shot.pre_vc_video_key`、`Shot.pre_cc_last_frame_key`、`Shot.pristine_last_frame_key`（均为 `Text`，nullable）
 
-**为何需要这三列**：现有代码用目录扫描推导素材状态——`pristine_last_frame_path()`（旧 storage.py:89）靠 `glob` 取 mtime 最新，`pre_cc.exists()`（pipeline.py:1860）靠固定文件名是否存在。OSS 下本地目录随时为空，这些判断全部失效。尤其 CC 在 image_candidates.py:226 直接覆盖 `shot.last_frame_path`，校准后无法从任何现有字段反推校准前的尾帧，而 worker/tasks.py:659、worker/tasks.py:1058、pipeline.py:2093 都以它为还原目标。
+**为何需要这三列**：现有代码用目录扫描推导素材状态——`pristine_last_frame_path()`（旧 storage.py:89）靠 `glob` 取 mtime 最新，`pre_cc.exists()`（pipeline.py:1860）靠固定文件名是否存在。COS 下本地目录随时为空，这些判断全部失效。尤其 CC 在 image_candidates.py:226 直接覆盖 `shot.last_frame_path`，校准后无法从任何现有字段反推校准前的尾帧，而 worker/tasks.py:659、worker/tasks.py:1058、pipeline.py:2093 都以它为还原目标。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1520,7 +1539,7 @@ Expected: FAIL — `AssertionError`（列不存在）及 `ImportError: cannot im
 在 `backend/app/models/project.py` 的 `Shot` 类内，紧随 `vc_audio_path`（:159）之后追加：
 
 ```python
-    # ── 素材状态显式化（原先靠目录扫描/固定文件名推导，OSS 下不成立）──────
+    # ── 素材状态显式化（原先靠目录扫描/固定文件名推导，COS 下不成立）──────
     # VC 前的原视频 key。取代「output_pre_vc.mp4 是否存在」。
     pre_vc_video_key = Column(Text, nullable=True)
     # 角色校准前的尾帧备份 key。取代「last_frame_pre_cc.png 是否存在」。
@@ -1587,14 +1606,14 @@ pipeline.py:2093 都以它为还原目标。
 
 **Interfaces:**
 - Consumes: `workspace()`、`ws.fetch`、`ws.publish`、`storage.shot_key`、`storage.ts_uuid_name`、`object_store.exists`
-- Produces: 生成完成后 `Shot.video_path` 与 `Shot.last_frame_path` 存 OSS key；`Shot.pristine_last_frame_key` 同步写入
+- Produces: 生成完成后 `Shot.video_path` 与 `Shot.last_frame_path` 存 COS key；`Shot.pristine_last_frame_key` 同步写入
 
 - [ ] **Step 1: 写失败测试**
 
 创建 `backend/tests/integration/test_generation_publishes_to_oss.py`：
 
 ```python
-"""生成链路产出物落在 OSS，且 DB 存的是 key 而非本地路径。
+"""生成链路产出物落在 COS，且 DB 存的是 key 而非本地路径。
 
 不调用真实模型（计费）——把 provider 的产出替换为本地合成的 mp4 字节。
 """
@@ -1602,13 +1621,13 @@ import subprocess
 
 from sqlalchemy import select
 
-from tests.integration.conftest_oss import requires_oss
+from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import _make_project, _add_shot
 
 from app.models.project import Shot
 from app.services import object_store, storage
 
-pytestmark = requires_oss
+pytestmark = requires_cos
 
 
 def _make_mp4(path, frames=30):
@@ -1622,8 +1641,8 @@ def _make_mp4(path, frames=30):
     return path
 
 
-async def test_generated_video_lands_in_oss_and_db_stores_key(
-    db_session_factory, tmp_path, oss_prefix, monkeypatch
+async def test_generated_video_lands_in_cos_and_db_stores_key(
+    db_session_factory, tmp_path, cos_prefix, monkeypatch
 ):
     from worker import tasks as tasks_module
 
@@ -1670,7 +1689,7 @@ Expected: FAIL — `AttributeError: module 'worker.tasks' has no attribute 'publ
 ```python
 async def publish_generated_video(session_factory, project_id: str,
                                   shot_id: int, video_bytes: bytes) -> tuple[str, str]:
-    """把生成的视频字节发布到 OSS，抽取尾帧，更新 DB。
+    """把生成的视频字节发布到 COS，抽取尾帧，更新 DB。
 
     返回 (video_key, last_frame_key)。
 
@@ -1711,9 +1730,9 @@ async def publish_generated_video(session_factory, project_id: str,
 
 - [ ] **Step 4: 改造 video_generator 的模型输入**
 
-`backend/app/agents/video_generator.py` 中 `types.Image.from_file(location=...)`（:161/176/194）要求真实本地文件。首尾帧现在是 OSS key，需先取到本地。
+`backend/app/agents/video_generator.py` 中 `types.Image.from_file(location=...)`（:161/176/194）要求真实本地文件。首尾帧现在是 COS key，需先取到本地。
 
-把 `_crop_inputs`（:57）的入参语义从「本地路径」改为「OSS key」，并在函数开头 fetch：
+把 `_crop_inputs`（:57）的入参语义从「本地路径」改为「COS key」，并在函数开头 fetch：
 
 ```python
 async def _crop_inputs(
@@ -1723,7 +1742,7 @@ async def _crop_inputs(
     reference_image_keys: Optional[list[str]],
     aspect_ratio: str,
 ):
-    """把 OSS 上的首尾帧与参考图取到工作区并按比例裁剪。
+    """把 COS 上的首尾帧与参考图取到工作区并按比例裁剪。
 
     返回本地路径三元组，供 types.Image.from_file 使用。
     """
@@ -1752,7 +1771,7 @@ async def _crop_inputs(
 
 调用点（:142、:444）改为在 `async with workspace() as ws:` 内调用并 `await`，同时把原先的 `tmp_dir` + `shutil.rmtree`（:251、:483）删除——工作区已负责清理。
 
-`_upload_image`（:289）的入参也从本地路径改为 OSS key，内部先 `ws.fetch` 再 base64 上传（保持现有 kie 上传逻辑不变；直接传签名 URL 的优化属 Spec A §4.3 标注的可选项，本计划不做）。
+`_upload_image`（:289）的入参也从本地路径改为 COS key，内部先 `ws.fetch` 再 base64 上传（保持现有 kie 上传逻辑不变；直接传签名 URL 的优化属 Spec A §4.3 标注的可选项，本计划不做）。
 
 - [ ] **Step 5: 运行测试确认通过**
 
@@ -1764,7 +1783,7 @@ Expected: PASS（1 项）
 ```bash
 git add backend/worker/tasks.py backend/app/agents/video_generator.py \
         backend/tests/integration/test_generation_publishes_to_oss.py
-git commit -m "feat(oss): 生成链路改为发布到 OSS
+git commit -m "feat(oss): 生成链路改为发布到 COS
 
 抽出 publish_generated_video 便于独立测试。两个对象都 put 成功后才写 DB，
 保证 DB 中的 key 永远指向真实对象。同时写入 pristine_last_frame_key。"
@@ -1784,29 +1803,29 @@ git commit -m "feat(oss): 生成链路改为发布到 OSS
 - Consumes: `workspace()`、`storage.shot_key`、`object_store.delete`
 - Produces: 裁剪/还原后 `Shot.video_path` 指向新 key；`pre_cc_last_frame_key` 被清空且对应对象删除；`cc_status` 重置
 
-**素材变更审计**（CLAUDE.md 规则）：裁剪改变视频 ⇒ 必须重新抽 `last_frame`、清 pre-CC 备份并重置 `cc_status`。key 化后「清备份」= 先把 DB 列置 `None`，再删 OSS 对象（顺序不可颠倒）。
+**素材变更审计**（CLAUDE.md 规则）：裁剪改变视频 ⇒ 必须重新抽 `last_frame`、清 pre-CC 备份并重置 `cc_status`。key 化后「清备份」= 先把 DB 列置 `None`，再删 COS 对象（顺序不可颠倒）。
 
 - [ ] **Step 1: 写失败测试**
 
 创建 `backend/tests/integration/test_trim_oss.py`：
 
 ```python
-"""裁剪后：新视频在 OSS、DB 存新 key、pre-CC 备份被清理。"""
+"""裁剪后：新视频在 COS、DB 存新 key、pre-CC 备份被清理。"""
 from sqlalchemy import select
 
-from tests.integration.conftest_oss import requires_oss
+from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import _make_project, _add_shot, HEADERS
 
 from app.models.project import Shot
 from app.services import object_store
 
-pytestmark = requires_oss
+pytestmark = requires_cos
 
 
 async def test_trim_resets_cc_and_clears_pre_cc_object(
-    client, db_session_factory, oss_prefix, tmp_path
+    client, db_session_factory, cos_prefix, tmp_path
 ):
-    from tests.integration.conftest_oss_seed import seed_shot_source_to_oss
+    from tests.integration.conftest_cos_seed import seed_shot_source_to_oss
 
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1)
@@ -1842,10 +1861,10 @@ async def test_trim_resets_cc_and_clears_pre_cc_object(
     assert await object_store.exists(pre_cc_key) is False
 ```
 
-同时创建共享的 OSS 播种助手 `backend/tests/integration/conftest_oss_seed.py`：
+同时创建共享的 COS 播种助手 `backend/tests/integration/conftest_cos_seed.py`：
 
 ```python
-"""把真实 mp4 素材播种到 OSS 并写好 DB —— Task 8/9/11 复用。
+"""把真实 mp4 素材播种到 COS 并写好 DB —— Task 8/9/11 复用。
 
 对应本地版 conftest.py:160 的 seed_shot_with_source()。
 不调用任何模型：视频由 ffmpeg 合成 testsrc2。
@@ -1863,7 +1882,7 @@ from app.services.storage import shot_key, ts_uuid_name
 
 async def seed_shot_source_to_oss(sf, project_id: str, shot_id: int,
                                   frames: int = 120) -> str:
-    """合成真实 mp4、上传到 OSS、写回 DB。返回 video key。"""
+    """合成真实 mp4、上传到 COS、写回 DB。返回 video key。"""
     from app.agents.video_trimmer import get_video_info
 
     with tempfile.TemporaryDirectory() as td:
@@ -1911,7 +1930,7 @@ Expected: FAIL — `ImportError`（pipeline.py 仍引用已删除的 `shot_pre_c
 
 ```python
     # 3. 尾帧变了 → 重置 CC。VC 不受影响（与 /trim 一致）。
-    # 顺序：先改 DB 解除引用，再删 OSS 对象。反过来会留下悬空引用。
+    # 顺序：先改 DB 解除引用，再删 COS 对象。反过来会留下悬空引用。
     shot.cc_status = None
     shot.cc_error_message = None
     stale_pre_cc = shot.pre_cc_last_frame_key
@@ -1940,11 +1959,11 @@ Expected: PASS（1 项）
 git add backend/app/api/pipeline.py backend/app/agents/video_trimmer.py \
         backend/app/agents/effective_clip.py \
         backend/tests/integration/test_trim_oss.py \
-        backend/tests/integration/conftest_oss_seed.py
-git commit -m "feat(oss): 裁剪/还原链路改为 OSS key
+        backend/tests/integration/conftest_cos_seed.py
+git commit -m "feat(oss): 裁剪/还原链路改为 COS key
 
 按素材变更审计规则，裁剪后清 pre-CC 备份并重置 cc_status。
-删除顺序固定为「先改 DB 解除引用，再删 OSS 对象」，
+删除顺序固定为「先改 DB 解除引用，再删 COS 对象」，
 反过来会在失败时留下悬空引用。"
 ```
 
@@ -1972,18 +1991,18 @@ git commit -m "feat(oss): 裁剪/还原链路改为 OSS key
 """VC/CC 链路：备份用服务端 copy，pristine 尾帧不被 CC 覆盖。"""
 from sqlalchemy import select
 
-from tests.integration.conftest_oss import requires_oss
+from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import _make_project, _add_shot
-from tests.integration.conftest_oss_seed import seed_shot_source_to_oss
+from tests.integration.conftest_cos_seed import seed_shot_source_to_oss
 
 from app.models.project import Shot
 from app.services import object_store
 
-pytestmark = requires_oss
+pytestmark = requires_cos
 
 
 async def test_cc_adopt_preserves_pristine_last_frame(
-    db_session_factory, oss_prefix, tmp_path
+    db_session_factory, cos_prefix, tmp_path
 ):
     """CC 覆盖 last_frame_path，但 pristine_last_frame_key 必须岿然不动。"""
     from app.api.image_candidates import adopt_candidate_to_last_frame
@@ -2023,7 +2042,7 @@ async def test_cc_adopt_preserves_pristine_last_frame(
     assert await object_store.exists(pristine_key)
 
 
-async def test_vc_backup_uses_server_side_copy(db_session_factory, oss_prefix):
+async def test_vc_backup_uses_server_side_copy(db_session_factory, cos_prefix):
     """VC 首次执行时备份原视频，用服务端 copy 不产生本地流量。"""
     from app.api.pipeline import ensure_pre_vc_backup
 
@@ -2089,7 +2108,7 @@ async def adopt_candidate_to_last_frame(session_factory, project_id: str,
 async def ensure_pre_vc_backup(session_factory, project_id: str, shot_id: int) -> str:
     """确保 VC 前的原视频已备份。返回备份 key。幂等。
 
-    用 OSS 服务端 copy——不产生本地流量，比原先的 shutil.copy 还快。
+    用 COS 服务端 copy——不产生本地流量，比原先的 shutil.copy 还快。
     """
     from app.services.storage import shot_key
     from app.services import object_store
@@ -2129,7 +2148,7 @@ Expected: PASS（2 项）
 git add backend/app/api/image_candidates.py backend/app/api/pipeline.py \
         backend/app/api/voice.py backend/worker/tasks.py \
         backend/tests/integration/test_vc_cc_oss.py
-git commit -m "feat(oss): VC/CC 链路改为 OSS key
+git commit -m "feat(oss): VC/CC 链路改为 COS key
 
 备份改用服务端 copy，零流量。CC 采纳覆盖 last_frame_path 时
 绝不触碰 pristine_last_frame_key——它是还原链路的唯一目标。
@@ -2156,18 +2175,18 @@ pristine_last_frame_path() 的目录扫描全部替换为读 DB 列。"
 创建 `backend/tests/integration/test_uploads_oss.py`：
 
 ```python
-"""上传链路：文件落 OSS，DB 存 key；JSON 数组字段每项都是 key。"""
+"""上传链路：文件落 COS，DB 存 key；JSON 数组字段每项都是 key。"""
 import json
 
 from sqlalchemy import select
 
-from tests.integration.conftest_oss import requires_oss
+from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import _make_project, _add_shot, HEADERS
 
 from app.models.project import ReferenceImage, Shot
 from app.services import object_store
 
-pytestmark = requires_oss
+pytestmark = requires_cos
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 128
 
@@ -2267,7 +2286,7 @@ Expected: PASS（2 项）
 git add backend/app/api/uploads.py backend/app/api/pipeline.py \
         backend/app/api/image_candidates.py backend/app/services/first_frame.py \
         backend/tests/integration/test_uploads_oss.py
-git commit -m "feat(oss): 上传链路改为发布到 OSS
+git commit -m "feat(oss): 上传链路改为发布到 COS
 
 custom_reference_paths / ref_paths 是 JSON 数组，数组内每一项
 都必须是 key —— 这是最容易漏的地方，已加专项测试覆盖。"
@@ -2293,21 +2312,21 @@ custom_reference_paths / ref_paths 是 JSON 数组，数组内每一项
 创建 `backend/tests/integration/test_export_and_delete_oss.py`：
 
 ```python
-"""导出合并落 OSS；删除项目清空整个前缀。"""
+"""导出合并落 COS；删除项目清空整个前缀。"""
 from sqlalchemy import select
 
-from tests.integration.conftest_oss import requires_oss
+from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import _make_project, _add_shot, HEADERS
-from tests.integration.conftest_oss_seed import seed_shot_source_to_oss
+from tests.integration.conftest_cos_seed import seed_shot_source_to_oss
 
 from app.models.project import Project
 from app.services import object_store
 from app.services.storage import project_prefix
 
-pytestmark = requires_oss
+pytestmark = requires_cos
 
 
-async def test_merge_publishes_final_video(db_session_factory, oss_prefix):
+async def test_merge_publishes_final_video(db_session_factory, cos_prefix):
     from worker.tasks import merge_project_shots
 
     pid = await _make_project(db_session_factory, status="shot_review")
@@ -2326,7 +2345,7 @@ async def test_merge_publishes_final_video(db_session_factory, oss_prefix):
     assert proj.final_video_path == key
 
 
-async def test_delete_project_clears_oss_prefix(client, db_session_factory):
+async def test_delete_project_clears_cos_prefix(client, db_session_factory):
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1)
     await seed_shot_source_to_oss(db_session_factory, pid, 1, frames=30)
@@ -2401,7 +2420,7 @@ async def merge_project_shots(session_factory, project_id: str) -> str:
 `backend/app/api/projects.py` 中原调用 `delete_project_storage(project_id)` 处改为：
 
 ```python
-    # 先删 DB 行（解除引用），再清 OSS 前缀
+    # 先删 DB 行（解除引用），再清 COS 前缀
     await session.delete(project)
     await session.commit()
     await object_store.delete_prefix(project_prefix(project_id))
@@ -2426,10 +2445,10 @@ Expected: PASS（2 项）
 git add backend/worker/tasks.py backend/app/api/pipeline.py \
         backend/app/api/projects.py backend/app/services/image_generation.py \
         backend/tests/integration/test_export_and_delete_oss.py
-git commit -m "feat(oss): 导出合并、预览与项目删除改为 OSS
+git commit -m "feat(oss): 导出合并、预览与项目删除改为 COS
 
 合并前预检磁盘空间——不预检会表现为 ffmpeg 神秘失败。
-删除项目改用 delete_prefix，内部按 1000 分批符合 OSS 上限。"
+删除项目改用 delete_prefix，内部按 1000 分批符合 COS 上限。"
 ```
 
 ---
@@ -2440,7 +2459,7 @@ git commit -m "feat(oss): 导出合并、预览与项目删除改为 OSS
 - Modify: `backend/app/api/projects.py:31/58-87/235/294`
 - Modify: `backend/app/api/stream.py:70-102`
 - Modify: `backend/app/main.py:135-149`
-- Test: `backend/tests/integration/test_oss_media_url.py`
+- Test: `backend/tests/integration/test_cos_media_url.py`
 
 **Interfaces:**
 - Consumes: `storage.to_media_url`（Task 5 已改为签名 URL）
@@ -2450,20 +2469,20 @@ git commit -m "feat(oss): 导出合并、预览与项目删除改为 OSS
 
 - [ ] **Step 1: 写失败测试**
 
-创建 `backend/tests/integration/test_oss_media_url.py`：
+创建 `backend/tests/integration/test_cos_media_url.py`：
 
 ```python
 """API 返回的媒体 URL 必须能被浏览器直接 GET 到真实内容。"""
 import httpx
 from sqlalchemy import select
 
-from tests.integration.conftest_oss import requires_oss
+from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import _make_project, _add_shot, HEADERS
-from tests.integration.conftest_oss_seed import seed_shot_source_to_oss
+from tests.integration.conftest_cos_seed import seed_shot_source_to_oss
 
 from app.models.project import Shot
 
-pytestmark = requires_oss
+pytestmark = requires_cos
 
 
 async def test_project_response_video_url_is_fetchable(client, db_session_factory):
@@ -2502,7 +2521,7 @@ async def test_null_media_fields_stay_null(client, db_session_factory):
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `uv run --project backend pytest tests/integration/test_oss_media_url.py -v`
+Run: `uv run --project backend pytest tests/integration/test_cos_media_url.py -v`
 Expected: FAIL — `test_media_static_mount_is_gone` 返回 404 以外的状态（挂载仍在）
 
 - [ ] **Step 3: 删除静态挂载与中间件**
@@ -2528,23 +2547,23 @@ app.mount("/api/media", _StaticFiles(directory=str(_storage_dir)), name="media")
 ```python
 from contextlib import asynccontextmanager
 
-from app.services import oss_client
+from app.services import cos_client
 
 
 @asynccontextmanager
 async def lifespan(app):
     # 凭证必须在开始服务前预热：to_media_url 是同步函数，只读缓存不阻塞取。
-    await oss_client.warm_credentials()
-    await oss_client.start_credential_refresh()
+    await cos_client.warm_credentials()
+    await cos_client.start_credential_refresh()
     yield
-    await oss_client.close_client()
+    await cos_client.close_client()
 ```
 
 并把 `lifespan=lifespan` 传给 `FastAPI(...)`。worker 启动/关闭钩子（ARQ 的 `on_startup` / `on_shutdown`）同样加上 `warm_credentials` / `start_credential_refresh` / `close_client`。
 
 - [ ] **Step 5: 运行测试确认通过**
 
-Run: `uv run --project backend pytest tests/integration/test_oss_media_url.py -v`
+Run: `uv run --project backend pytest tests/integration/test_cos_media_url.py -v`
 Expected: PASS（3 项）
 
 - [ ] **Step 6: 跑全量后端测试**
@@ -2556,7 +2575,7 @@ Expected: 全绿。若仍有 `ImportError`，说明 Task 7–11 有遗漏的调�
 
 ```bash
 git add backend/app/main.py backend/app/api/projects.py backend/app/api/stream.py \
-        backend/tests/integration/test_oss_media_url.py
+        backend/tests/integration/test_cos_media_url.py
 git commit -m "feat(oss)!: 删除 /api/media 静态挂载，媒体改走签名 URL
 
 BREAKING: /api/media/* 不再可用。留着等于留了一条绕过签名的后门。
@@ -2583,14 +2602,14 @@ lifespan 预热凭证缓存——同步的 to_media_url 只读缓存，绝不阻
 """assets 路由改 302 重定向到签名 URL。"""
 import httpx
 
-from tests.integration.conftest_oss import requires_oss
+from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import _make_project, _add_shot, HEADERS
-from tests.integration.conftest_oss_seed import seed_shot_source_to_oss
+from tests.integration.conftest_cos_seed import seed_shot_source_to_oss
 
 from app.services import object_store
 from app.services.storage import final_video_key
 
-pytestmark = requires_oss
+pytestmark = requires_cos
 
 
 async def test_final_mp4_redirects_with_attachment_header(client, db_session_factory,
@@ -2611,7 +2630,7 @@ async def test_final_mp4_redirects_with_attachment_header(client, db_session_fac
         got = await c.get(loc)
     assert got.status_code == 200
     assert got.content == b"fake merged video"
-    # 由 OSS 直接返回附件下载头，后端不中转流量
+    # 由 COS 直接返回附件下载头，后端不中转流量
     assert "merged.mp4" in got.headers.get("content-disposition", "")
 
 
@@ -2641,7 +2660,7 @@ Expected: FAIL — 返回 200（`FileResponse`）而非 302
 用以下内容整体替换 `backend/app/api/assets.py`：
 
 ```python
-"""素材路由。媒体本体存在 OSS，本模块只签发重定向，不中转流量。"""
+"""素材路由。媒体本体存在 COS，本模块只签发重定向，不中转流量。"""
 
 from pathlib import Path
 
@@ -2692,7 +2711,7 @@ async def serve_asset(project_id: str, kind: str, file: str):
 async def download_final(project_id: str):
     """302 重定向到成片下载 URL。
 
-    附件下载头由 OSS 通过 response-content-disposition 直接返回，
+    附件下载头由 COS 通过 response-content-disposition 直接返回，
     后端完全不参与视频流量。
     """
     key = final_video_key(project_id)
@@ -2716,7 +2735,7 @@ Expected: PASS（3 项）
 git add backend/app/api/assets.py backend/tests/integration/test_assets_redirect.py
 git commit -m "feat(oss): assets 路由改 302 重定向到签名 URL
 
-成片下载的附件头由 OSS 通过 response-content-disposition 返回，
+成片下载的附件头由 COS 通过 response-content-disposition 返回，
 后端完全不参与视频流量。"
 ```
 
@@ -2751,7 +2770,7 @@ grep -rn "<video" frontend-vite/src --include=*.tsx --include=*.vue --include=*.
 ```typescript
 import { test, expect } from '@playwright/test'
 
-// 真实后端 + 真实 DB + 真实 OSS。只模拟"URL 过期"这一网络状况，
+// 真实后端 + 真实 DB + 真实 COS。只模拟"URL 过期"这一网络状况，
 // 不伪造任何被断言的数据。
 test('视频 URL 过期时自动重拉并恢复播放', async ({ page }) => {
   await page.goto('/projects')
@@ -2853,11 +2872,11 @@ videoUrl 变化时重置重试标记，允许下次过期时再救一次。"
 """
 from pathlib import Path
 
-from tests.integration.conftest_oss import requires_oss
+from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import _make_project, _add_shot, HEADERS
-from tests.integration.conftest_oss_seed import seed_shot_source_to_oss
+from tests.integration.conftest_cos_seed import seed_shot_source_to_oss
 
-pytestmark = requires_oss
+pytestmark = requires_cos
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 128
 
@@ -2884,7 +2903,7 @@ async def test_full_flow_leaves_storage_root_empty(client, db_session_factory, t
 - [ ] **Step 2: 运行确认通过**
 
 Run: `uv run --project backend pytest tests/integration/test_no_local_storage_writes.py -v`
-Expected: PASS。若失败，输出会直接列出仍在写本地的文件——逐个改到 OSS。
+Expected: PASS。若失败，输出会直接列出仍在写本地的文件——逐个改到 COS。
 
 - [ ] **Step 3: 扫描遗留的本地路径用法**
 
@@ -2909,7 +2928,7 @@ Expected: 只剩 `workspace.py` 内部与配置读取。任何业务模块里残
 - [ ] **Step 5: 跑全量测试**
 
 Run: `uv run --project backend pytest tests/ -q`
-Expected: 全绿，无 SKIPPED（在有 OSS 凭证的环境下跑）
+Expected: 全绿，无 SKIPPED（在有 COS 凭证的环境下跑）
 
 - [ ] **Step 6: 真实栈验收**
 
@@ -2941,22 +2960,25 @@ git commit -m "test(oss): 新增「不写本地磁盘」守卫测试
 
 | Spec A 章节 | 对应 Task |
 |---|---|
+| §2.2 同步 SDK 与事件循环 | Task 3（全部 `asyncio.to_thread` + 阻塞检测测试）、Task 15（覆盖完整性扫描） |
 | §3.1 模块分层 | Task 2、3、4 |
 | §3.2 Key 命名 | Task 5 |
 | §3.3 不设持久缓存 | Task 4（工作区退出即删）+ Task 15（守卫测试） |
 | §3.4 配置与凭证 + 代理陷阱 | Task 1 |
+| §3.5 凭证缓存（cvm_role） | Task 2（缓存/刷新/重建 client）、Task 12（lifespan 预热） |
 | §4.1 文件系统约定 → DB 列 | Task 6（建列）+ Task 9（替换目录扫描） |
 | §4.2 一致性规则 | Task 7、8、9、11（各处写入顺序） |
 | §4.3 各业务链路 | Task 7（生成）、8（裁剪）、9（VC/CC）、10（上传）、11（导出/删除） |
 | §4.4 签名 URL + 同步约束 | Task 3（signed_url）、5（to_media_url）、12（lifespan 预热）、14（前端兜底） |
 | §4.5 serve 路径去向 | Task 12（删挂载）、13（assets 302） |
-| §5 错误处理 | Task 3（重试/分片/EC 码日志）、4（磁盘预检）、14（403 兜底） |
-| §6 测试策略 | 各 task 的测试 + Task 15 |
-| §7 阶段 0–5 | Task 1–3(阶段0)、4–5(阶段1)、6(阶段2)、7–11(阶段3)、12–13(阶段4)、14(阶段5) |
-| §8 开发期环境隔离 | Task 15 Step 6 |
-| §9 需逐行核对的代码 | Task 15 Step 3、4 |
+| §5 错误处理 | Task 3（upload_file 分片续传 / RequestId 日志）、4（磁盘预检）、14（403 兜底） |
+| §6 成本模型 | **无对应 Task（有意为之）** —— 全部是运维侧配置与地域选择，属 Spec B §6 的清单，不落代码 |
+| §7 测试策略 | 各 task 的测试 + Task 15 |
+| §8 阶段 0–5 | Task 1–3(阶段0)、4–5(阶段1)、6(阶段2)、7–11(阶段3)、12–13(阶段4)、14(阶段5) |
+| §9 开发期环境隔离 | Task 15 Step 6 |
+| §10 需逐行核对的代码 | Task 15 Step 3、4 |
 
-无遗漏。
+无遗漏。§6 成本模型不产生 Task 是有意的：bucket 与 CVM 同地域、流量告警等均为控制台操作，已记入 Spec B 第 6 节的运维待办清单。
 
 **2. 占位符扫描**：无 TBD / TODO / "类似 Task N" / "适当处理错误"。Task 2 Step 1 与 Task 14 Step 1 是**可执行的核查命令**（打印 SDK API 形态、定位播放器组件），不是占位符——它们产出具体值供后续步骤使用。
 
@@ -2970,5 +2992,7 @@ git commit -m "test(oss): 新增「不写本地磁盘」守卫测试
 
 **4. 已知实施风险**
 
-- **Task 2 Step 1 的 SDK API 核对是硬性前置**。本计划的 SDK 调用依据官方文档编写，`presign` 的参数名（`expires` vs `expiration`）、`ListObjectsV2Request` 的分页字段名在小版本间可能不同。核对结果与计划不符时以实际为准，并同步修正 Task 3 的实现。
+- **Task 2 Step 1 的 SDK API 核对是硬性前置。** 本计划的 SDK 调用依据腾讯云官方文档编写，尚未在实际安装的包上验证。上一轮在阿里云 SDK 上，计划里有三处方法名与实际不符（异步客户端根本没有 `upload_file` / `get_object_to_file`），正是靠这一步发现的。COS 这边需重点核对：`get_presigned_url` 的参数名（`Expired` / `Params`）、`object_exists` 是否存在、异常对象取错误码的方法名（`get_status_code` / `get_request_id`）、`list_objects` 分页字段（`IsTruncated` 返回的是字符串 `"true"` 还是布尔）。不符时以实际为准并同步修正 Task 3。
+- **`asyncio.to_thread` 的覆盖完整性是本方案独有的隐蔽风险。** COS SDK 是纯同步的，漏包一处不会报任何错，只会在传大文件时让整个服务卡死，且小文件测试完全测不出来。Task 3 已内置事件循环阻塞检测测试（8MB 文件 + 心跳协程计数），Task 15 再做一次全局扫描。审查时应重点核对每个 SDK 调用点。
 - **Task 5 之后到 Task 12 之前，全量测试是红的**。这是方案 B 的设计意图（遗漏立刻失败），不是缺陷。若采用 subagent 逐 task 执行，需提前告知执行者不要因为「其他测试红了」而回滚 Task 5。
+- **Task 1 是替换而非新增**。上一轮已按阿里云 OSS 完成过同等接线并提交（`e46fed9`），本轮必须把 `oss_*` 字段、`alibabacloud` 依赖、`.aliyuncs.com` 的 NO_PROXY 全部移除。两套并存会让 `cos_client` 读到过期配置，Task 1 Step 9 的残留扫描就是为此设的闸。
