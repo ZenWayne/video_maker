@@ -1,5 +1,7 @@
 """Application configuration using pydantic-settings."""
 
+from typing import Optional
+
 from pydantic_settings import BaseSettings
 
 
@@ -65,6 +67,24 @@ class Settings(BaseSettings):
     # Retry once on transient upstream failure (successFlag=3, "upstream gen failed").
     kie_max_retries: int = 1
     kie_retry_backoff_seconds: int = 15
+
+    # ── 阿里云 OSS ──────────────────────────────────────────────────────────
+    # 存储权威副本所在 bucket。dev / prod 使用不同 bucket。
+    oss_region: str = ""
+    oss_bucket: str = ""
+    # 留空则由 SDK 按 region 自动构造公网域名
+    oss_endpoint: Optional[str] = None
+    # 生产 ECS 与 bucket 同地域时置 True，走内网免公网流量费
+    oss_use_internal_endpoint: bool = False
+    # "static"（开发，AK/SK）| "ecs_ram_role"（生产，自动刷新 STS）
+    oss_auth_mode: str = "static"
+    # ecs_ram_role 模式下显式指定角色名可减少元数据服务请求
+    oss_ecs_ram_role: Optional[str] = None
+    # 预签名 URL 有效期，默认 2 小时
+    oss_signed_url_ttl_sec: int = 7200
+    # 仅 static 模式使用，由 /run/secrets/ 注入
+    oss_access_key_id: Optional[str] = None
+    oss_access_key_secret: Optional[str] = None
 
     # Voice conversion (in-process vc2.VoiceConverter)
     model_dir: str = "/workspace/exported_vc2"

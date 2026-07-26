@@ -21,6 +21,9 @@ dependencies = [
     "scikit-image>=0.24",
     "langfuse>=3.0",
     "fastmcp>=2.0",
+    "alibabacloud-oss-v2>=1.2.0",
+    "aiohttp>=3.9",
+    "alibabacloud-credentials>=0.3",
 ]
 
 [dependency-groups]
