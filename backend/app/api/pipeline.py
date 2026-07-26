@@ -1710,32 +1710,6 @@ async def _publish_new_last_frame(
     )
 
 
-async def ensure_pre_vc_backup(session_factory, project_id: str, shot_id: int) -> str:
-    """确保 VC 前的原视频已备份。返回备份 key。幂等。
-
-    用 COS 服务端 copy——不产生本地流量，比本地 shutil.copy 还快。已备份
-    （pre_vc_video_key 已设置）时直接返回原备份 key，绝不重复拷贝。
-    """
-    async with session_factory() as s:
-        shot = (await s.execute(
-            select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
-        )).scalar_one()
-        if shot.pre_vc_video_key:
-            return shot.pre_vc_video_key
-        src = shot.video_path
-
-    backup_key = shot_key(project_id, shot_id, "output_pre_vc.mp4")
-    await object_store.copy(src, backup_key)
-
-    async with session_factory() as s:
-        shot = (await s.execute(
-            select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
-        )).scalar_one()
-        shot.pre_vc_video_key = backup_key
-        await s.commit()
-    return backup_key
-
-
 @router.post("/projects/{project_id}/shots/{shot_id}/trim")
 async def trim_shot_video(
     project_id: str,

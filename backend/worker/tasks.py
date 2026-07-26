@@ -951,14 +951,18 @@ async def _do_voice_convert_one(
     from app.agents.audio_extractor import extract_audio_wav
     from app.services.cosyvoice_client import voice_convert
     from app.services.storage import shot_audio_vc_key
-    # NOTE: ensure_pre_vc_backup lives in app.api.pipeline (brief-mandated location,
-    # also where the trim/restore endpoints already keep their COS helpers). Importing
-    # it here pulls in app.main (pipeline.py does `from app.main import get_redis` at
-    # module level) the first time this runs in the arq worker process — a one-time,
-    # harmless-but-wasteful FastAPI app construction inside a process that never serves
-    # HTTP. Worth hoisting ensure_pre_vc_backup into a plain service module if this ever
-    # becomes a real cost; not done here to stay within this task's scope.
-    from app.api.pipeline import ensure_pre_vc_backup
+    # ensure_pre_vc_backup lives in app.services.vc_backup — a plain service
+    # module with zero app.main/FastAPI dependency. This worker function runs
+    # inside the vc-worker process (worker.vc_arq_worker), which only imports
+    # worker.tasks and NEVER app.main. Importing from app.api.pipeline here
+    # would pull in app.main (pipeline.py does `from app.main import
+    # get_redis` at module level) the first time this runs — verified to
+    # crash for real with ImportError: cannot import name '_require_user'
+    # from partially initialized module 'app.api.pipeline' (circular import,
+    # since app.main's router loading tries to re-import the
+    # still-initializing app.api.pipeline). See app/services/vc_backup.py's
+    # module docstring for the full trace.
+    from app.services.vc_backup import ensure_pre_vc_backup
 
     async with session_factory() as session:
         result = await session.execute(

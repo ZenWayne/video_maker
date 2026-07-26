@@ -1,9 +1,12 @@
 """Integration test: VC worker publishes a fixed audio_vc.wav key; source video untouched."""
-# _do_voice_convert_one lazily imports app.api.pipeline.ensure_pre_vc_backup at call
-# time; app.main's routers form the same partial-circular-import trap documented in
-# test_stream_snapshot_candidates.py, so force app.main to finish loading first.
-import app.main  # noqa: F401
-
+# NOTE: this file deliberately does NOT `import app.main` first. _do_voice_convert_one
+# runs for real in the vc-worker process (worker.vc_arq_worker), which never imports
+# app.main — so this file's first test calls it exactly the way production does, as a
+# regression guard against the app.api.pipeline circular-import crash that this class of
+# "add an app.main guard to the test" masking previously caused (see
+# app/services/vc_backup.py's module docstring and the Task 9 report's Critical-fix
+# section for the full trace). Do not add an `import app.main` guard here — that would
+# hide exactly the bug this file exists to catch.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

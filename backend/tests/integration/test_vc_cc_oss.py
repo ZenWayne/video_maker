@@ -1,11 +1,19 @@
 """VC/CC 链路：备份用服务端 copy，pristine 尾帧不被 CC 覆盖。"""
-# app.main 在模块底部依次 import 全部路由子模块（含 image_candidates/voice，
-# 两者都在自己顶层 `from app.main import get_redis`）。若测试先直接
-# `from app.api.image_candidates import ...`，会在 app.main 完成自身初始化
-# 前触发它去反向 import 仍处于"正在加载"状态的 image_candidates，拿到的是
-# 一个还没定义 router 属性的半成品模块 → AttributeError（同款坑 test_stream_
-# snapshot_candidates.py 已踩过一次）。这里显式先把 app.main 加载完整，
-# 保证后续任何直接 import 子模块都拿到的是完整模块。
+# 这道护栏只为 adopt_candidate_to_last_frame（app.api.image_candidates）和
+# character_calibrate_revert（app.api.pipeline，经 client fixture 走 HTTP）
+# 而设，且它模拟的是**真实生产行为**、不掩盖任何 bug：这两者只在 FastAPI
+# app 里被调用，生产环境唯一入口就是 uvicorn 先跑 app.main 把全部路由子模块
+# 按固定顺序 import 完，所以"先把 app.main 加载完整"就是生产的真实导入顺序。
+# 问题只出在测试进程里——pytest 允许某个测试文件先直接
+# `from app.api.image_candidates import ...`，绕过 app.main 的顺序 import，
+# 撞上"正在加载中"的半成品模块 → AttributeError（同款坑 test_stream_
+# snapshot_candidates.py 已踩过一次）。
+#
+# 反例对照：本文件里 ensure_pre_vc_backup（app.services.vc_backup）的测试
+# 完全不依赖这道护栏——它跑在 vc-worker 进程，那个进程从不 import app.main，
+# 所以"先加载 app.main 再测"反而会掩盖真实入口的循环 import bug（Task 9
+# 审查发现的 Critical 缺陷正是这样被测试掩盖过一次）。该函数的"不依赖
+# app.main"结论改为在独立、未加载 app.main 的进程里验证，见 Task 9 报告。
 import app.main  # noqa: F401
 
 from sqlalchemy import select
@@ -108,8 +116,16 @@ async def test_character_calibrate_revert_uses_pristine_key_and_deletes_old_cc(
 
 
 async def test_vc_backup_uses_server_side_copy(db_session_factory, cos_prefix):
-    """VC 首次执行时备份原视频，用服务端 copy 不产生本地流量。"""
-    from app.api.pipeline import ensure_pre_vc_backup
+    """VC 首次执行时备份原视频，用服务端 copy 不产生本地流量。
+
+    ensure_pre_vc_backup 特意放在 app.services.vc_backup（纯 service 模块，
+    不依赖 app.main）——vc-worker 进程只 import worker.tasks，从不 import
+    app.main；若从 app.api.pipeline 导入会在该进程处理第一个 run_voice_convert
+    任务时崩溃（ImportError: 循环 import）。这个测试直接从新位置导入，不依赖
+    本文件顶部的 `import app.main` 护栏——它就是用来确认"不先加载 app.main
+    也能正常工作"这件事本身。
+    """
+    from app.services.vc_backup import ensure_pre_vc_backup
 
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1)
