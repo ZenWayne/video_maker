@@ -93,6 +93,12 @@ def reference_image_key(project_id: str, image_id: str, filename: str) -> str:
     return f"{reference_images_prefix(project_id)}{image_id}_{filename}"
 
 
+def reference_voice_prompt_key(project_id: str) -> str:
+    """VC 音色克隆的基准 prompt wav（上传的项目级基准音色，与迁移前的
+    reference_voice/prompt.wav 相对路径逐字符一致）。"""
+    return f"{project_prefix(project_id)}reference_voice/prompt.wav"
+
+
 # ── 校验与 URL ────────────────────────────────────────────────────────────────
 
 def is_valid_key(key: str) -> bool:

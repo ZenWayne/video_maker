@@ -7,9 +7,7 @@ per-shot / batch voice conversion + revert. The actual conversion runs in the
 that decides which prompt wav a conversion uses.
 """
 
-import shutil
 from datetime import datetime
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy import select
@@ -21,6 +19,8 @@ from app.models.project import Shot
 from app.models.schemas import ReferenceVoiceRequest, AutoVoiceCalibrateRequest
 from app.services.state_machine import ShotStatus
 from app.services.storage import to_media_url
+from app.services import object_store
+from app.services.workspace import workspace
 from app.api.pipeline import _require_user, _get_project_or_404, _get_arq_redis
 
 router = APIRouter()
@@ -86,12 +86,13 @@ async def upload_reference_voice(
     user: str = Depends(_require_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Upload mp4/m4a/wav as the project base voice; normalize to prompt.wav."""
+    """Upload mp4/m4a/wav as the project base voice; normalize to prompt.wav in COS."""
     import subprocess
     from app.services.reference_voice import (
-        reference_voice_dir, reference_voice_prompt_path,
+        reference_voice_prompt_key,
         has_audio_stream, normalize_reference_voice,
     )
+    from pathlib import Path
 
     project = await _get_project_or_404(project_id, session)
 
@@ -103,27 +104,26 @@ async def upload_reference_voice(
     if len(data) > 50 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large (max 50MB)")
 
-    reference_voice_dir(project_id).mkdir(parents=True, exist_ok=True)
-    tmp_in = reference_voice_dir(project_id) / f"upload{ext}"
-    tmp_in.write_bytes(data)
-    out = reference_voice_prompt_path(project_id)
-    try:
-        if not has_audio_stream(str(tmp_in)):
-            raise HTTPException(status_code=400, detail="File has no audio stream")
-        normalize_reference_voice(str(tmp_in), str(out))
-    except subprocess.CalledProcessError:
-        raise HTTPException(status_code=400, detail="Failed to decode audio from file")
-    finally:
-        if tmp_in.exists():
-            tmp_in.unlink()
+    key = reference_voice_prompt_key(project_id)
+    async with workspace() as ws:
+        tmp_in = ws.path(f"upload{ext}")
+        tmp_in.write_bytes(data)
+        out = ws.path("prompt.wav")
+        try:
+            if not has_audio_stream(str(tmp_in)):
+                raise HTTPException(status_code=400, detail="File has no audio stream")
+            normalize_reference_voice(str(tmp_in), str(out))
+        except subprocess.CalledProcessError:
+            raise HTTPException(status_code=400, detail="Failed to decode audio from file")
+        await ws.publish(out, key)
 
-    project.reference_voice_path = str(out)
+    project.reference_voice_path = key
     project.reference_voice_shot_id = None  # mutual exclusivity
     project.updated_at = datetime.utcnow()
     session.add(project)
     await session.commit()
 
-    return {"reference_voice_path": to_media_url(str(out)), "reference_voice_shot_id": None}
+    return {"reference_voice_path": to_media_url(key), "reference_voice_shot_id": None}
 
 
 @router.post("/projects/{project_id}/auto-voice-calibrate")
@@ -137,7 +137,7 @@ async def set_auto_voice_calibrate(
     from app.services.reference_voice import resolve_reference_prompt_wav
 
     project = await _get_project_or_404(project_id, session)
-    if body.enabled and resolve_reference_prompt_wav(project_id, project) is None:
+    if body.enabled and await resolve_reference_prompt_wav(project_id, project, session) is None:
         raise HTTPException(status_code=409, detail="Set a base voice before enabling auto calibration")
 
     project.auto_voice_calibrate = body.enabled
@@ -161,7 +161,7 @@ async def voice_convert_shot(
 
     project = await _get_project_or_404(project_id, session)
 
-    if resolve_reference_prompt_wav(project_id, project) is None:
+    if await resolve_reference_prompt_wav(project_id, project, session) is None:
         raise HTTPException(status_code=400, detail="No reference voice set")
 
     if shot_id == project.reference_voice_shot_id:
@@ -204,7 +204,7 @@ async def voice_convert_all(
 
     project = await _get_project_or_404(project_id, session)
 
-    if resolve_reference_prompt_wav(project_id, project) is None:
+    if await resolve_reference_prompt_wav(project_id, project, session) is None:
         raise HTTPException(status_code=400, detail="No reference voice set")
 
     # Find all completed shots except the reference shot (if a shot is the source)
@@ -262,13 +262,16 @@ async def voice_revert_shot(
 
     # Non-destructive: just drop the vc audio + clear the pointer. video_path
     # already points at the immutable source, so nothing else changes.
-    if shot.vc_audio_path:
-        Path(shot.vc_audio_path).unlink(missing_ok=True)
+    # 素材审计（CLAUDE.md）：先在 DB 里解除引用并提交，再删 COS 对象——
+    # 反过来在删除失败时会留下悬空引用（DB 指向一个可能已被删掉的对象）。
+    stale_vc_audio = shot.vc_audio_path
     shot.vc_audio_path = None
     shot.vc_status = None
     shot.vc_error_message = None
     session.add(shot)
     await session.commit()
+    if stale_vc_audio:
+        await object_store.delete(stale_vc_audio)
 
     ts = int(datetime.utcnow().timestamp())
     return {

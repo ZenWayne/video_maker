@@ -1,40 +1,49 @@
+"""resolve_reference_prompt_wav — pure logic, object_store mocked (no real COS)."""
 from types import SimpleNamespace
-from pathlib import Path
-from app.services.reference_voice import resolve_reference_prompt_wav
-
-
-def test_file_source_returns_existing_path(tmp_path):
-    wav = tmp_path / "prompt.wav"
-    wav.write_bytes(b"RIFF....")
-    proj = SimpleNamespace(reference_voice_path=str(wav), reference_voice_shot_id=None)
-    assert resolve_reference_prompt_wav("p1", proj) == wav
-
-
-def test_file_source_missing_returns_none(tmp_path):
-    proj = SimpleNamespace(reference_voice_path=str(tmp_path / "nope.wav"),
-                           reference_voice_shot_id=None)
-    assert resolve_reference_prompt_wav("p1", proj) is None
-
-
-def test_no_source_returns_none():
-    proj = SimpleNamespace(reference_voice_path=None, reference_voice_shot_id=None)
-    assert resolve_reference_prompt_wav("p1", proj) is None
-
+from unittest.mock import AsyncMock
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+
+from app.services.reference_voice import resolve_reference_prompt_wav
+from app.services import object_store
 
 
 @pytest.mark.asyncio
-async def test_run_voice_convert_uses_file_source(tmp_path, monkeypatch):
-    import worker.tasks as tasks
-    from app.config import settings
-    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+async def test_file_source_returns_existing_key(monkeypatch):
+    monkeypatch.setattr(object_store, "exists", AsyncMock(return_value=True))
+    proj = SimpleNamespace(
+        reference_voice_path="projects/p1/reference_voice/prompt.wav",
+        reference_voice_shot_id=None,
+    )
+    got = await resolve_reference_prompt_wav("p1", proj, session=None)
+    assert got == "projects/p1/reference_voice/prompt.wav"
 
-    # Project with an uploaded file base voice
-    wav = tmp_path / "ref.wav"
-    wav.write_bytes(b"RIFF....")
-    project = MagicMock(reference_voice_path=str(wav), reference_voice_shot_id=None)
+
+@pytest.mark.asyncio
+async def test_file_source_missing_returns_none(monkeypatch):
+    monkeypatch.setattr(object_store, "exists", AsyncMock(return_value=False))
+    proj = SimpleNamespace(
+        reference_voice_path="projects/p1/reference_voice/prompt.wav",
+        reference_voice_shot_id=None,
+    )
+    assert await resolve_reference_prompt_wav("p1", proj, session=None) is None
+
+
+@pytest.mark.asyncio
+async def test_no_source_returns_none():
+    proj = SimpleNamespace(reference_voice_path=None, reference_voice_shot_id=None)
+    assert await resolve_reference_prompt_wav("p1", proj, session=None) is None
+
+
+@pytest.mark.asyncio
+async def test_run_voice_convert_uses_file_source(monkeypatch):
+    """run_voice_convert must pass the resolved key through to _do_voice_convert_one."""
+    import worker.tasks as tasks
+    from unittest.mock import MagicMock
+    import app.services.reference_voice as reference_voice_module
+
+    project = MagicMock(reference_voice_path="projects/p1/reference_voice/prompt.wav",
+                        reference_voice_shot_id=None)
 
     sess = AsyncMock()
     res = MagicMock()
@@ -44,6 +53,10 @@ async def test_run_voice_convert_uses_file_source(tmp_path, monkeypatch):
     sf.return_value.__aenter__.return_value = sess
     sf.return_value.__aexit__.return_value = False
 
+    async def fake_resolver(pid, proj, session):
+        return proj.reference_voice_path
+    monkeypatch.setattr(reference_voice_module, "resolve_reference_prompt_wav", fake_resolver)
+
     captured = {}
     async def fake_do_one(session_factory, redis, pid, sid, ref):
         captured["ref"] = ref
@@ -51,4 +64,4 @@ async def test_run_voice_convert_uses_file_source(tmp_path, monkeypatch):
 
     ctx = {"session_factory": sf, "redis": MagicMock()}
     await tasks.run_voice_convert(ctx, "p1", 2, "user:test")
-    assert captured["ref"] == str(wav)
+    assert captured["ref"] == "projects/p1/reference_voice/prompt.wav"

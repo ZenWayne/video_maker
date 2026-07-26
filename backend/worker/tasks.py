@@ -46,27 +46,41 @@ from app.agents.merger import merge_shots
 # shot_pre_vc_video_path / shot_pre_cc_last_frame_path /
 # get_original_video_for_audio / pristine_last_frame_path / shot_candidates_dir。
 # 本 task（7：视频生成链路）只负责 run_shot_pipeline 用到的部分（已改为
-# workspace/COS）。其余仍引用这些裸名字的函数（run_screenwriter 的
-# storyboard_path、_get_character_ref_paths/run_image_candidate/
-# run_character_calibrate 的 pristine_last_frame_path/shot_candidates_dir、
-# run_merger 的 final_video_path、_do_voice_convert_one 的 shot_dir/
-# get_original_video_for_audio）属于其他 task 的范围，故意留作 NameError——
-# 调用时显式报错，而不是让整个模块因缺失 import 而无法加载，掩盖了本任务的
-# 生成链路。
+# workspace/COS）。run_merger 的 final_video_path 属于导出/删除 task 的范围，
+# 故意留作 NameError——调用时显式报错，而不是让整个模块因缺失 import 而无法
+# 加载，掩盖了本任务的生成链路。
+#
+# Task 9（VC 与 CC 链路）已修复：resolve_tail_frame/_resolve_ff_context/
+# _get_character_ref_paths 的 Path(key).exists() 本地磁盘判断（对 COS key 恒
+# 假，静默禁用 Veo 尾帧定向/参考图解析，无任何报错）改为 object_store.exists()；
+# _do_voice_convert_one/_do_character_calibrate_one 全面改为 workspace()+COS
+# key（pristine 尾帧读 shot.pristine_last_frame_key，不再目录扫描）。
+# run_image_candidate 的 shot_candidates_dir（候选图输出目录，first_frame/
+# tail_frame/cc 三种 slot 共用同一段代码）仍留作 NameError——这不是"CC"或
+# "VC"本体，而是一个更大的、尚未分配 task 号的"图片候选生成链路"（parallel
+# to Task 7 的"视频生成链路"）：image_generation.py 的 calibrate_face/
+# generate_first_frame/generate_tail_frame/generate_custom 都假设本地文件
+# 路径（parts_from_paths 里 Path(p).exists()/read_bytes()），要让它们在 COS
+# 下工作，run_image_candidate 需要把全部参考图/上下文帧 fetch 进 workspace
+# 再调用——这是和 Task 7 的 run_shot_pipeline 同等量级的独立改造，故未在本
+# task 内顺带做掉，留给后续 task。
 
 logger = logging.getLogger(__name__)
 
 
-def resolve_tail_frame(target_last_frame_path: str | None) -> str | None:
-    """Tail frame is used iff its path is set and the file exists.
+async def resolve_tail_frame(target_last_frame_path: str | None) -> str | None:
+    """Tail frame is used iff its key is set and the object exists in COS.
 
     Path presence is the single source of truth — tf_confirmed is
-    intentionally NOT consulted.
+    intentionally NOT consulted. target_last_frame_path is a COS key, not a
+    local path: Path(key).exists() is always False for a real key, which
+    used to silently disable Veo tail-frame targeting for every shot with a
+    configured target — no error, ever. Existence must be checked against
+    the object store.
     """
     if target_last_frame_path:
-        p = Path(target_last_frame_path)
-        if p.exists():
-            return str(p)
+        if await object_store.exists(target_last_frame_path):
+            return target_last_frame_path
     return None
 
 
@@ -442,7 +456,7 @@ async def run_shot_pipeline(
                     ref_paths = None
 
             # Resolve target tail frame for Veo last_frame param (path presence only)
-            last_frame = resolve_tail_frame(shot.target_last_frame_path)
+            last_frame = await resolve_tail_frame(shot.target_last_frame_path)
 
             # Generate video
             shot.status = ShotStatus.VIDEO_GENERATING.value
@@ -506,7 +520,7 @@ async def run_shot_pipeline(
                             auto_trim_to_tail_frame,
                             auto_trim_to_speech_end,
                         )
-                        resolved_tail = resolve_tail_frame(shot.target_last_frame_path)
+                        resolved_tail = await resolve_tail_frame(shot.target_last_frame_path)
                         if resolved_tail:
                             # Align-and-trim to the target tail frame (SSIM).
                             trim_result = auto_trim_to_tail_frame(
@@ -655,15 +669,15 @@ async def _get_character_ref_paths(
         )
     )
     refs = result.scalars().all()
-    return [r.storage_path for r in refs if Path(r.storage_path).exists()]
+    return [r.storage_path for r in refs if await object_store.exists(r.storage_path)]
 
 
-def _resolve_ff_context(shot: Shot) -> str | None:
+async def _resolve_ff_context(shot: Shot) -> str | None:
     """first_frame/custom-first 的 context 帧：目标尾帧 → 实际尾帧 → 无。"""
-    ctx = resolve_tail_frame(shot.target_last_frame_path)
+    ctx = await resolve_tail_frame(shot.target_last_frame_path)
     if ctx:
         return ctx
-    if shot.last_frame_path and Path(shot.last_frame_path).exists():
+    if shot.last_frame_path and await object_store.exists(shot.last_frame_path):
         return shot.last_frame_path
     return None
 
@@ -725,7 +739,7 @@ async def run_image_candidate(
                     ff = await pick_first_frame(project_id, shot, session)
                     context = str(ff) if ff else None
                 else:
-                    context = _resolve_ff_context(shot)
+                    context = await _resolve_ff_context(shot)
                 await ig.generate_custom(
                     prompt=cand.custom_prompt,
                     output_path=out,
@@ -772,7 +786,7 @@ async def run_image_candidate(
             else:  # first_frame auto
                 await ig.generate_first_frame(
                     character_ref_paths=char_refs,
-                    context_frame_path=_resolve_ff_context(shot),
+                    context_frame_path=await _resolve_ff_context(shot),
                     visual_description=shot.visual_description,
                     shot_type=shot.shot_type,
                     output_path=out,
@@ -1015,12 +1029,12 @@ async def run_voice_convert(
             logger.error("Project %s not found", project_id)
             return
         from app.services.reference_voice import resolve_reference_prompt_wav
-        ref_audio = resolve_reference_prompt_wav(project_id, project)
-        if ref_audio is None:
+        ref_audio_key = await resolve_reference_prompt_wav(project_id, project, session)
+        if ref_audio_key is None:
             logger.error("Project %s has no reference voice set", project_id)
             return
 
-    await _do_voice_convert_one(session_factory, redis, project_id, shot_id, str(ref_audio))
+    await _do_voice_convert_one(session_factory, redis, project_id, shot_id, ref_audio_key)
 
 
 async def run_voice_convert_batch(
@@ -1045,17 +1059,16 @@ async def run_voice_convert_batch(
             logger.error("Project %s not found", project_id)
             return
         from app.services.reference_voice import resolve_reference_prompt_wav
-        ref_audio_path = resolve_reference_prompt_wav(project_id, project)
-        if ref_audio_path is None:
+        ref_audio_key = await resolve_reference_prompt_wav(project_id, project, session)
+        if ref_audio_key is None:
             logger.error("Project %s has no reference voice set", project_id)
             return
-    ref_audio = str(ref_audio_path)
 
     converted = 0
     failed = 0
     for sid in shot_ids:
         try:
-            await _do_voice_convert_one(session_factory, redis, project_id, sid, ref_audio)
+            await _do_voice_convert_one(session_factory, redis, project_id, sid, ref_audio_key)
             converted += 1
         except Exception:
             failed += 1

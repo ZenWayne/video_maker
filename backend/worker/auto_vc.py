@@ -15,7 +15,7 @@ async def maybe_enqueue_auto_vc(redis, session, project_id, project, shot) -> bo
     """
     if not getattr(project, "auto_voice_calibrate", False):
         return False
-    if resolve_reference_prompt_wav(project_id, project) is None:
+    if await resolve_reference_prompt_wav(project_id, project, session) is None:
         return False
     if shot.shot_id == project.reference_voice_shot_id:
         return False
