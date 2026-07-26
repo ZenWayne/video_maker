@@ -55,15 +55,14 @@ from app.agents.merger import merge_shots
 # 假，静默禁用 Veo 尾帧定向/参考图解析，无任何报错）改为 object_store.exists()；
 # _do_voice_convert_one/_do_character_calibrate_one 全面改为 workspace()+COS
 # key（pristine 尾帧读 shot.pristine_last_frame_key，不再目录扫描）。
-# run_image_candidate 的 shot_candidates_dir（候选图输出目录，first_frame/
-# tail_frame/cc 三种 slot 共用同一段代码）仍留作 NameError——这不是"CC"或
-# "VC"本体，而是一个更大的、尚未分配 task 号的"图片候选生成链路"（parallel
-# to Task 7 的"视频生成链路"）：image_generation.py 的 calibrate_face/
-# generate_first_frame/generate_tail_frame/generate_custom 都假设本地文件
-# 路径（parts_from_paths 里 Path(p).exists()/read_bytes()），要让它们在 COS
-# 下工作，run_image_candidate 需要把全部参考图/上下文帧 fetch 进 workspace
-# 再调用——这是和 Task 7 的 run_shot_pipeline 同等量级的独立改造，故未在本
-# task 内顺带做掉，留给后续 task。
+# Task 10（Task 11b，紧急插入，此前无人认领）已修复：run_image_candidate 的
+# shot_candidates_dir（候选图输出目录，first_frame/tail_frame/cc 三种 slot 共用
+# 同一段代码）此前无条件在 slot 分支之前引用，NameError 必然命中——经
+# app/api/image_candidates.py 的 create_image_candidate 端点可达，每次创建候选
+# 图都会入队一个必崩的任务。现改为 workspace()+COS：全部参考图/上下文帧/
+# pristine 帧先 fetch 进一次性 workspace 再传给 image_generation.py 的
+# calibrate_face/generate_custom/generate_tail_frame/generate_first_frame（它们
+# 只认本地文件路径），产物 publish 到 shot_candidates_prefix 下的新 key。
 
 logger = logging.getLogger(__name__)
 
@@ -686,8 +685,16 @@ async def _resolve_ff_context(shot: Shot) -> str | None:
 async def run_image_candidate(
     ctx: Dict[str, Any], project_id: str, shot_id: int, candidate_id: str, actor: str
 ) -> None:
-    """统一图片候选生成：模式 = slot + 有无 custom_prompt；不触碰 project 状态机。"""
+    """统一图片候选生成：模式 = slot + 有无 custom_prompt；不触碰 project 状态机。
+
+    app.services.image_generation 的生成函数只认本地文件路径（parts_from_paths
+    对每个入参做 Path(p).exists()/read_bytes()，对 COS key 恒静默判"不存在"、
+    悄悄从提示词里丢掉该参考图，不报任何错）。因此本函数必须先把全部参考图/
+    上下文帧/pristine 帧 fetch 进一次性 workspace 再调用，产物 publish 回
+    shot_candidates_prefix 下的新 key，绝不把裸 key 字符串递给 ig.*。
+    """
     from app.services import image_generation as ig
+    from app.services.storage import shot_candidates_prefix
 
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory
@@ -714,6 +721,7 @@ async def run_image_candidate(
         })
 
         success = False
+        out_key: Optional[str] = None
         try:
             refs = json.loads(cand.ref_paths) if cand.ref_paths else {}
             if "character" in refs:
@@ -722,81 +730,107 @@ async def run_image_candidate(
                 char_refs = await _get_character_ref_paths(project_id, session)
             obj_refs = refs.get("object") or None
 
-            out_dir = shot_candidates_dir(project_id, shot_id)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out = str(out_dir / ts_uuid_name(".png"))
+            async with workspace() as ws:
+                async def _fetch_all(keys: Optional[list[str]], label: str) -> list[str]:
+                    if not keys:
+                        return []
+                    out_paths = []
+                    for i, k in enumerate(keys):
+                        p = await ws.fetch(k, name=f"{label}_{i}{Path(k).suffix or '.png'}")
+                        out_paths.append(str(p))
+                    return out_paths
 
-            if cand.slot == "cc":
-                # pristine_last_frame_key is the source of truth (never a directory
-                # scan); fall back to the current last_frame_path for shots that
-                # predate the column.
-                pristine = shot.pristine_last_frame_key or shot.last_frame_path
-                if pristine is None:
-                    raise ValueError("Shot has no last frame to calibrate")
-                await ig.calibrate_face(char_refs, str(pristine), out)
+                async def _fetch_one(key: Optional[str], name: str) -> Optional[str]:
+                    if not key:
+                        return None
+                    p = await ws.fetch(key, name=f"{name}{Path(key).suffix or '.png'}")
+                    return str(p)
 
-            elif cand.custom_prompt:
-                if cand.slot == "tail_frame":
-                    ff = await pick_first_frame(project_id, shot, session)
-                    context = str(ff) if ff else None
-                else:
-                    context = await _resolve_ff_context(shot)
-                await ig.generate_custom(
-                    prompt=cand.custom_prompt,
-                    output_path=out,
-                    character_ref_paths=char_refs,
-                    object_ref_paths=obj_refs,
-                    context_frame_path=context,
-                    aspect_ratio=project.aspect_ratio,
-                )
+                local_char_refs = await _fetch_all(char_refs, "char")
+                local_obj_refs = await _fetch_all(obj_refs, "obj") if obj_refs else None
+                local_out = str(ws.path("candidate_out.png"))
 
-            elif cand.slot == "tail_frame":
-                first_frame = await pick_first_frame(project_id, shot, session)
-                if shot.motion_prompt and not obj_refs:
-                    motion_prompt = shot.motion_prompt
-                else:
-                    motion_prompt = await run_director_agent(
-                        shot_id=shot.shot_id,
-                        shot_type=shot.shot_type,
-                        visual_description=shot.visual_description,
-                        text=shot.text,
-                        duration=shot.shot_duration,
-                        llm_provider=get_provider(),
-                        reference_image_paths=obj_refs,
+                if cand.slot == "cc":
+                    # pristine_last_frame_key is the source of truth (never a
+                    # directory scan); fall back to the current last_frame_path
+                    # for shots that predate the column.
+                    pristine_key = shot.pristine_last_frame_key or shot.last_frame_path
+                    if pristine_key is None:
+                        raise ValueError("Shot has no last frame to calibrate")
+                    local_pristine = await _fetch_one(pristine_key, "pristine")
+                    await ig.calibrate_face(local_char_refs, local_pristine, local_out)
+
+                elif cand.custom_prompt:
+                    if cand.slot == "tail_frame":
+                        ff = await pick_first_frame(project_id, shot, session)
+                        context_key = str(ff) if ff else None
+                    else:
+                        context_key = await _resolve_ff_context(shot)
+                    local_context = await _fetch_one(context_key, "context")
+                    await ig.generate_custom(
+                        prompt=cand.custom_prompt,
+                        output_path=local_out,
+                        character_ref_paths=local_char_refs,
+                        object_ref_paths=local_obj_refs,
+                        context_frame_path=local_context,
+                        aspect_ratio=project.aspect_ratio,
                     )
-                    shot.motion_prompt = motion_prompt
-                    session.add(shot)
-                    await session.commit()
 
-                async def _on_cot(end_pose: str) -> None:
-                    await publish_event(redis, project_id, {
-                        "type": "tf_pose_analyzed",
-                        "data": {"shot_id": shot_id, "end_pose": end_pose},
-                    })
+                elif cand.slot == "tail_frame":
+                    first_frame = await pick_first_frame(project_id, shot, session)
+                    local_first_frame = await _fetch_one(
+                        str(first_frame) if first_frame else None, "first_frame"
+                    )
+                    if shot.motion_prompt and not obj_refs:
+                        motion_prompt = shot.motion_prompt
+                    else:
+                        motion_prompt = await run_director_agent(
+                            shot_id=shot.shot_id,
+                            shot_type=shot.shot_type,
+                            visual_description=shot.visual_description,
+                            text=shot.text,
+                            duration=shot.shot_duration,
+                            llm_provider=get_provider(),
+                            reference_image_paths=obj_refs,
+                        )
+                        shot.motion_prompt = motion_prompt
+                        session.add(shot)
+                        await session.commit()
 
-                await ig.generate_tail_frame(
-                    character_ref_paths=char_refs,
-                    first_frame_path=str(first_frame) if first_frame else None,
-                    motion_prompt=motion_prompt,
-                    output_path=out,
-                    object_ref_paths=obj_refs,
-                    aspect_ratio=project.aspect_ratio,
-                    on_cot_complete=_on_cot,
-                )
+                    async def _on_cot(end_pose: str) -> None:
+                        await publish_event(redis, project_id, {
+                            "type": "tf_pose_analyzed",
+                            "data": {"shot_id": shot_id, "end_pose": end_pose},
+                        })
 
-            else:  # first_frame auto
-                await ig.generate_first_frame(
-                    character_ref_paths=char_refs,
-                    context_frame_path=await _resolve_ff_context(shot),
-                    visual_description=shot.visual_description,
-                    shot_type=shot.shot_type,
-                    output_path=out,
-                    motion_prompt=shot.motion_prompt,
-                    object_ref_paths=obj_refs,
-                    aspect_ratio=project.aspect_ratio,
-                )
+                    await ig.generate_tail_frame(
+                        character_ref_paths=local_char_refs,
+                        first_frame_path=local_first_frame,
+                        motion_prompt=motion_prompt,
+                        output_path=local_out,
+                        object_ref_paths=local_obj_refs,
+                        aspect_ratio=project.aspect_ratio,
+                        on_cot_complete=_on_cot,
+                    )
 
-            cand.file_path = out
+                else:  # first_frame auto
+                    context_key = await _resolve_ff_context(shot)
+                    local_context = await _fetch_one(context_key, "context")
+                    await ig.generate_first_frame(
+                        character_ref_paths=local_char_refs,
+                        context_frame_path=local_context,
+                        visual_description=shot.visual_description,
+                        shot_type=shot.shot_type,
+                        output_path=local_out,
+                        motion_prompt=shot.motion_prompt,
+                        object_ref_paths=local_obj_refs,
+                        aspect_ratio=project.aspect_ratio,
+                    )
+
+                out_key = f"{shot_candidates_prefix(project_id, shot_id)}{ts_uuid_name('.png')}"
+                await ws.publish(Path(local_out), out_key)
+
+            cand.file_path = out_key
             cand.status = "done"
             cand.error = None
             if cand.slot == "cc":
@@ -844,7 +878,7 @@ async def run_image_candidate(
                         "shot_id": shot_id,
                         "candidate_id": candidate_id,
                         "slot": cand.slot,
-                        "file_path": to_media_url(out),
+                        "file_path": to_media_url(out_key),
                     },
                 })
             except Exception:
