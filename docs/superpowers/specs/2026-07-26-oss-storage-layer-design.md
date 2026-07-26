@@ -146,7 +146,9 @@ DB 存**裸 key**，不加 `oss://` 前缀。
 | `shot_pre_vc_video_path()` storage.py:62 | 依赖固定名 `output_pre_vc.mp4` 是否存在 | 存在性判断变成一次 OSS 请求 |
 | `shot_pre_cc_last_frame_path()` storage.py:67 | 依赖固定名 `last_frame_pre_cc.png` | 同上 |
 
-一律改为显式 DB 列（一次 alembic 迁移新增三列）：
+一律改为显式 DB 列（新增三列）。
+
+> **迁移机制更正**：本项目**不使用 alembic**（`backend/pyproject.toml` 无该依赖，仓库中也无 `alembic/` 目录）。schema 变更一律写在 `app/db.py` 中，由 `_has_column()` 守卫的幂等 `ALTER TABLE` 语句完成（见 db.py:55-115 的既有写法）。新增列须沿用这一模式。
 
 - `Shot.pre_vc_video_key` — 替代「`output_pre_vc.mp4` 是否存在」
 - `Shot.pre_cc_last_frame_key` — 替代「`last_frame_pre_cc.png` 是否存在」（现由 pipeline.py:1860 的 `pre_cc.exists()` 判断）
@@ -190,6 +192,21 @@ kie provider 的 `_upload_image()`（video_generator.py:289）现将本地帧 ba
 `to_media_url(key)` 改为返回预签名 URL。
 
 **关键事实**：签名是纯本地 HMAC 计算，不发网络请求。因此每次 API 响应现签一次成本约等于零——无需缓存或复用 URL。用户拿到响应即开始观看，几乎不可能过期；真正会过期的只有「页面长时间开着」这一种情况。
+
+#### `to_media_url()` 必须保持同步
+
+`_shot_to_dict()`（projects.py:38）与 `_candidate_to_dict()`（projects.py:22）是**同步**函数，且在同步列表推导中调用 `to_media_url`。若把签名改成 `async`，这些序列化器及其全部上游调用者都要连锁改造，波及面远超收益。因此：
+
+**`to_media_url()` 保持同步签名不变**，全部 54 处调用点的形态不需要改动，只是返回值从 `/api/media/...` 变为签名 URL。
+
+这带来一个必须处理的约束：签名需要凭证，而 `ecs_ram_role` 模式下凭证刷新是网络操作，不能在同步函数里做（会阻塞事件循环）。方案：
+
+- **`static` 模式**（开发）：AK/SK 是常量，同步签名无任何问题
+- **`ecs_ram_role` 模式**（生产）：模块内维护**凭证缓存**。在 FastAPI lifespan 启动时预热一次，并起一个后台协程按凭证生命周期的 50% 周期刷新（STS Token 约 1 小时，即约每 30 分钟刷新）。`signed_url()` 只读缓存，绝不触发网络请求。
+- 刷新余量取 50% 而非临近过期，是为了保证「用缓存凭证签出的 URL，在其 2 小时 TTL 内不会因凭证先过期而失效」——签名有效期不能超过凭证有效期，故实际 TTL 取 `min(oss_signed_url_ttl_sec, 凭证剩余有效期)`。
+- 若缓存为空（启动竞态），`signed_url()` 直接抛异常而非阻塞，由 lifespan 预热保证这种情况不发生。
+
+传输类操作（`put` / `get` / `copy` / `delete`）仍走 `AsyncClient`，不受此约束影响。
 
 - TTL 取 **2 小时**
 - SSE 推送的 URL 同样现签，每条推送都是新签，不存在推送陈旧 URL 的问题
@@ -248,7 +265,7 @@ kie provider 的 `_upload_image()`（video_generator.py:289）现将本地帧 ba
 |---|---|---|
 | **0** | 依赖、config 字段、secrets 接线、`oss_client`、`object_store` | 冒烟脚本：连上 dev bucket 完成传/取/签/删。**不碰业务代码** |
 | **1** | `workspace()` 原语 + `storage.py` key 函数（新增，旧函数暂留） | 单元 + 集成测试 |
-| **2** | 新增 `pre_vc_video_key` / `pre_cc_last_frame_key` / `pristine_last_frame_key` 三列 + alembic 迁移 | 迁移可正反向执行 |
+| **2** | 在 `app/db.py` 中按 `_has_column()` 幂等模式新增 `pre_vc_video_key` / `pre_cc_last_frame_key` / `pristine_last_frame_key` 三列 | 空库与已有库上均可重复启动 |
 | **3** | **写路径**改造：生成、上传、各 ffmpeg 链路，产出并存 key | 集成测试走真实素材 |
 | **4** | **读路径**改造：`to_media_url` 签名、`assets.py` 改 302、删 `/api/media` 挂载 | e2e 真实播放 |
 | **5** | 前端 `onError` 重拉换新 URL；删除 `storage.py` 遗留的本地路径函数 | e2e 模拟过期 |
