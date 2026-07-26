@@ -68,23 +68,24 @@ class Settings(BaseSettings):
     kie_max_retries: int = 1
     kie_retry_backoff_seconds: int = 15
 
-    # ── 阿里云 OSS ──────────────────────────────────────────────────────────
+    # ── 腾讯云 COS ──────────────────────────────────────────────────────────
     # 存储权威副本所在 bucket。dev / prod 使用不同 bucket。
-    oss_region: str = ""
-    oss_bucket: str = ""
-    # 留空则由 SDK 按 region 自动构造公网域名
-    oss_endpoint: Optional[str] = None
-    # 生产 ECS 与 bucket 同地域时置 True，走内网免公网流量费
-    oss_use_internal_endpoint: bool = False
-    # "static"（开发，AK/SK）| "ecs_ram_role"（生产，自动刷新 STS）
-    oss_auth_mode: str = "static"
-    # ecs_ram_role 模式下显式指定角色名可减少元数据服务请求
-    oss_ecs_ram_role: Optional[str] = None
+    # 应与 CVM 同地域，后端↔COS 才走内网免流量费。
+    cos_region: str = ""
+    # 必须含 AppId，形如 video-maker-dev-1250000000
+    cos_bucket: str = ""
+    cos_scheme: str = "https"
+    # 自定义源站域名；留空则用默认域名 {bucket}.cos.{region}.myqcloud.com
+    cos_domain: Optional[str] = None
+    # "static"（开发，永久密钥）| "cvm_role"（生产，实例角色取 STS 临时密钥）
+    cos_auth_mode: str = "static"
+    # cvm_role 模式下绑定在 CVM 上的 CAM 角色名
+    cos_cvm_role: Optional[str] = None
     # 预签名 URL 有效期，默认 2 小时
-    oss_signed_url_ttl_sec: int = 7200
+    cos_signed_url_ttl_sec: int = 7200
     # 仅 static 模式使用，由 /run/secrets/ 注入
-    oss_access_key_id: Optional[str] = None
-    oss_access_key_secret: Optional[str] = None
+    cos_secret_id: Optional[str] = None
+    cos_secret_key: Optional[str] = None
 
     # Voice conversion (in-process vc2.VoiceConverter)
     model_dir: str = "/workspace/exported_vc2"

@@ -32,9 +32,9 @@ CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000
 LANGFUSE_ENABLED: "true"
 LANGFUSE_HOST: "https://us.cloud.langfuse.com"
 
-# Aliyun OSS (object storage for shot media)
-oss_region: cn-hangzhou
-oss_bucket: video-maker-dev
-oss_use_internal_endpoint: false
-oss_auth_mode: static
-oss_signed_url_ttl_sec: 7200
+# Tencent Cloud COS (object storage for shot media)
+cos_region: ap-guangzhou
+cos_bucket: video-maker-dev-1414782845
+cos_scheme: https
+cos_auth_mode: static
+cos_signed_url_ttl_sec: 7200
