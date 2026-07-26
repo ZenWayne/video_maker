@@ -12,7 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.models.project import Project, ReferenceImage
 from app.models.schemas import ReferenceImageResponse
-from app.services.storage import reference_images_dir, reference_image_path
+# 注：reference_images_dir/reference_image_path 已被 Task 5 删除（本地目录/路径
+# 函数，COS 下不成立）。上传改为 COS key 属于 uploads task 的范围，此处只去掉
+# 顶层 import 让模块能被 app.main 加载——两个名字仍在 upload_reference_images()
+# 里以裸名引用，调用时会 NameError（而非让整个 app 无法启动）。
 
 router = APIRouter()
 

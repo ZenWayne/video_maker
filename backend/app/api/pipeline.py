@@ -30,12 +30,25 @@ from app.services.state_machine import (
     ProjectStatus, ShotStatus,
     transition_project_status, InvalidTransitionError
 )
-from app.services.storage import (
-    storyboard_path, archived_storyboard_path, shot_custom_frames_dir, to_media_url,
-    shot_pre_vc_video_path, shot_audio_original_path, shot_audio_vc_path,
-    shot_pre_cc_last_frame_path, join_preview_path, shot_dir, ts_uuid_name,
-    shot_source_path,
-)
+# 注：原来的本地路径 import 块一次性 import 了 10 个已被 Task 5 删除的函数
+# （storyboard_path/archived_storyboard_path/shot_custom_frames_dir/
+# shot_pre_vc_video_path/shot_audio_original_path/shot_audio_vc_path/
+# shot_pre_cc_last_frame_path/join_preview_path/shot_dir/shot_source_path），
+# 导致整个模块 ImportError。Task 8 只负责 trim/restore-trim/align-tail-frame
+# （下方已重写为 workspace()+COS key，不再需要 shot_dir/shot_source_path/
+# shot_pre_cc_last_frame_path）。其余仍以裸名引用的名字留给对应 task 处理，
+# 调用时会 NameError（而非让整个模块无法加载）：
+#   storyboard_path/archived_storyboard_path — storyboard 相关端点
+#   shot_custom_frames_dir/shot_dir（部分残留调用）— 上传相关端点（uploads task）
+#   join_preview_path — 连贯性预览端点
+#   shot_source_path（_dialog_source 用）/ pristine_video_path /
+#     pristine_last_frame_path — 只读展示端点 video-info/waveform/filmstrip
+#     与 CC 还原（读路径 / CC task）
+#   shot_pre_vc_video_path/shot_audio_original_path/shot_audio_vc_path — 死
+#     import，正文从未使用
+from app.services.storage import to_media_url, ts_uuid_name, shot_key
+from app.services import object_store
+from app.services.workspace import workspace
 from app.services.events import publish_event
 
 router = APIRouter()
@@ -1668,6 +1681,35 @@ async def _commit_new_current_video(
     await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
 
 
+async def _reset_cc_and_clear_pre_cc_backup(shot: Shot) -> None:
+    """Last frame changed → reset CC; clear the pre-CC backup key + object.
+
+    素材变更审计（CLAUDE.md）：顺序固定为「先改 DB 解除引用，再删 COS 对象」——
+    反过来在删除失败时会留下悬空引用（DB 指向一个可能已被删掉的对象）。
+    This only mutates the passed-in ORM object + issues the COS delete; the
+    caller is responsible for committing the session first.
+    """
+    shot.cc_status = None
+    shot.cc_error_message = None
+    stale_pre_cc = shot.pre_cc_last_frame_key
+    shot.pre_cc_last_frame_key = None
+    return stale_pre_cc
+
+
+async def _publish_new_last_frame(
+    ws, local_source: Path, frame_idx: int, project_id: str, shot_id: int
+) -> str:
+    """Extract *frame_idx* from the (already-fetched) local source video and
+    publish it to a fresh, uniquely-named COS key. Returns the new key."""
+    from app.agents.frame_porter import extract_frame_at
+
+    local_lf = ws.path("new_last_frame.png")
+    extract_frame_at(str(local_source), frame_idx, str(local_lf))
+    return await ws.publish(
+        local_lf, shot_key(project_id, shot_id, f"last_frame_{ts_uuid_name('.png')}")
+    )
+
+
 @router.post("/projects/{project_id}/shots/{shot_id}/trim")
 async def trim_shot_video(
     project_id: str,
@@ -1678,13 +1720,13 @@ async def trim_shot_video(
 ):
     """Non-destructive trim: record trim_frames and refresh the last frame.
 
-    The source output_*.mp4 is never modified. Trimming changes the effective
-    last frame (index N-1 of the source) → re-extract it and reset CC. VC is
-    untouched (the vc audio is full-length and independent of trim length).
+    shot.video_path (the source video object in COS) is never modified — only
+    trim_frames metadata changes. Trimming changes the effective last frame
+    (index N-1 of the source) → re-extract it, publish it to a fresh key, and
+    reset CC. VC is untouched (the vc audio is full-length and independent of
+    trim length).
     """
     from app.agents.video_trimmer import get_video_info
-    from app.agents.frame_porter import extract_frame_at
-    from app.services.storage import shot_source_path
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1695,40 +1737,38 @@ async def trim_shot_video(
         raise HTTPException(status_code=404, detail="Shot or video not found")
     if shot.status != "completed":
         raise HTTPException(status_code=409, detail="Shot is not completed")
-
-    source = shot_source_path(project_id, shot_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="Source video not found")
-    info = get_video_info(str(source))
-    total = info["total_frames"]
-
     if body.end_frame < 24:
         raise HTTPException(status_code=400, detail="Must keep at least 24 frames")
-    n = min(body.end_frame, total)  # clamp; full length is a no-op trim
 
-    # 1. Metadata only — source file is never touched
+    source_key = shot.video_path
+
+    async with workspace() as ws:
+        local_source = await ws.fetch(source_key, name="source.mp4")
+        info = get_video_info(str(local_source))
+        total = info["total_frames"]
+        n = min(body.end_frame, total)  # clamp; full length is a no-op trim
+
+        frame_idx = (n - 1) if n < total else (total - 1)
+        new_lf_key = await _publish_new_last_frame(
+            ws, local_source, frame_idx, project_id, shot_id
+        )
+
+    # 1. Metadata only — source object in COS is never touched
     shot.trim_frames = n if n < total else None
-    shot.video_path = str(source)   # always the immutable source
     shot.source_fps = info["fps"]
     shot.source_frames = total
 
-    # 2. Refresh last frame = source frame N-1 (or full last frame when no trim)
-    s_dir = shot_dir(project_id, shot_id)
-    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
-        _old.unlink(missing_ok=True)
-    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
-    frame_idx = (n - 1) if n < total else (total - 1)
-    extract_frame_at(str(source), frame_idx, str(new_lf))
-    shot.last_frame_path = str(new_lf)
-    repointed = await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+    # 2. Point at the freshly-published last frame
+    shot.last_frame_path = new_lf_key
+    repointed = await _repoint_next_first_frame(project_id, shot.shot_id, new_lf_key, session)
 
-    # 3. Last frame changed → reset CC. VC is untouched.
-    # Note: last_frame_pre_cc.png is already removed by the glob above.
-    shot.cc_status = None
-    shot.cc_error_message = None
+    # 3. Last frame changed → reset CC + clear pre-CC backup (DB first, then COS delete)
+    stale_pre_cc = await _reset_cc_and_clear_pre_cc_backup(shot)
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
+    if stale_pre_cc:
+        await object_store.delete(stale_pre_cc)
 
     resp = {
         "video_path": to_media_url(shot.video_path),
@@ -1736,7 +1776,7 @@ async def trim_shot_video(
         "trim_frames": shot.trim_frames,
         "trim_end_sec": (shot.trim_frames / info["fps"]) if shot.trim_frames else None,
         "version": ts,
-        **get_video_info(str(source)),
+        **info,
     }
     # If the next (un-generated) shot's first frame was auto-repointed to the new
     # trimmed last frame, surface it so the UI updates without a full refetch.
@@ -1757,10 +1797,6 @@ async def restore_trim(
 ):
     """Clear the trim: trim_frames=None, refresh last frame to the source's final frame."""
     from app.agents.video_trimmer import get_video_info
-    from app.agents.frame_porter import extract_frame_at
-    from app.services.storage import (
-        shot_source_path, ts_uuid_name, shot_dir,
-    )
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1770,38 +1806,36 @@ async def restore_trim(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    source = shot_source_path(project_id, shot_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="Source video not found")
-    info = get_video_info(str(source))
-    total = info["total_frames"]
+    source_key = shot.video_path
+
+    async with workspace() as ws:
+        local_source = await ws.fetch(source_key, name="source.mp4")
+        info = get_video_info(str(local_source))
+        total = info["total_frames"]
+        new_lf_key = await _publish_new_last_frame(
+            ws, local_source, total - 1, project_id, shot_id
+        )
 
     shot.trim_frames = None
-    shot.video_path = str(source)
     shot.source_fps = info["fps"]
     shot.source_frames = total
+    shot.last_frame_path = new_lf_key
+    await _repoint_next_first_frame(project_id, shot.shot_id, new_lf_key, session)
 
-    s_dir = shot_dir(project_id, shot_id)
-    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
-        _old.unlink(missing_ok=True)
-    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
-    extract_frame_at(str(source), total - 1, str(new_lf))
-    shot.last_frame_path = str(new_lf)
-    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
-
-    # Note: last_frame_pre_cc.png is already removed by the glob above.
-    shot.cc_status = None
-    shot.cc_error_message = None
+    stale_pre_cc = await _reset_cc_and_clear_pre_cc_backup(shot)
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
+    if stale_pre_cc:
+        await object_store.delete(stale_pre_cc)
+
     return {
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "trim_frames": None,
         "trim_end_sec": None,
         "version": ts,
-        **get_video_info(str(source)),
+        **info,
     }
 
 
@@ -1813,10 +1847,8 @@ async def align_tail_frame(
     session: AsyncSession = Depends(get_session),
 ):
     """Non-destructive auto-trim: update trim_frames metadata to the frame that best
-    matches the target tail frame (SSIM). Source output_*.mp4 is never modified."""
+    matches the target tail frame (SSIM). shot.video_path (source) is never modified."""
     from app.agents.video_trimmer import find_best_tail_frame, get_video_info
-    from app.agents.frame_porter import extract_frame_at
-    from app.services.storage import shot_source_path
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1828,40 +1860,39 @@ async def align_tail_frame(
     if not shot.target_last_frame_path:
         raise HTTPException(status_code=400, detail="No target tail frame for this shot")
 
-    source = shot_source_path(project_id, shot_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="Source video not found")
-    info = get_video_info(str(source))
-    total = info["total_frames"]
+    source_key = shot.video_path
+    target_key = shot.target_last_frame_path
 
-    best = find_best_tail_frame(str(source), shot.target_last_frame_path)
-    n = total if best is None else min(best, total)
+    async with workspace() as ws:
+        local_source = await ws.fetch(source_key, name="source.mp4")
+        local_target = await ws.fetch(target_key, name="target_last_frame.png")
+        info = get_video_info(str(local_source))
+        total = info["total_frames"]
 
-    # 1. Metadata only — source file is never touched
+        best = find_best_tail_frame(str(local_source), str(local_target))
+        n = total if best is None else min(best, total)
+
+        frame_idx = (n - 1) if n < total else (total - 1)
+        new_lf_key = await _publish_new_last_frame(
+            ws, local_source, frame_idx, project_id, shot_id
+        )
+
+    # 1. Metadata only — source object in COS is never touched
     shot.trim_frames = n if n < total else None
-    shot.video_path = str(source)
     shot.source_fps = info["fps"]
     shot.source_frames = total
 
-    # 2. Refresh last frame (same pattern as /trim)
-    s_dir = shot_dir(project_id, shot_id)
-    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
-        _old.unlink(missing_ok=True)
-    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
-    frame_idx = (n - 1) if n < total else (total - 1)
-    extract_frame_at(str(source), frame_idx, str(new_lf))
-    shot.last_frame_path = str(new_lf)
-    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+    # 2. Point at the freshly-published last frame
+    shot.last_frame_path = new_lf_key
+    await _repoint_next_first_frame(project_id, shot.shot_id, new_lf_key, session)
 
     # 3. Last frame changed → reset CC. VC is untouched (consistent with /trim).
-    shot.cc_status = None
-    shot.cc_error_message = None
-    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
-    if pre_cc.exists():
-        pre_cc.unlink()
+    stale_pre_cc = await _reset_cc_and_clear_pre_cc_backup(shot)
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
+    if stale_pre_cc:
+        await object_store.delete(stale_pre_cc)
 
     return {
         "video_path": to_media_url(shot.video_path),
@@ -1870,7 +1901,7 @@ async def align_tail_frame(
         "trim_end_sec": (shot.trim_frames / info["fps"]) if shot.trim_frames else None,
         "version": ts,
         "aligned_to_frame": n,
-        **get_video_info(str(source)),
+        **info,
     }
 
 

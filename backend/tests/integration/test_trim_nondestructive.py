@@ -1,33 +1,32 @@
-"""Integration tests for non-destructive trim endpoint.
+"""Integration tests for non-destructive trim endpoint (real COS).
 
 POST /api/projects/{pid}/shots/{sid}/trim must:
   - set shot.trim_frames = end_frame in the DB
-  - leave the source output_*.mp4 byte-identical (never modified)
-  - NOT create any trimmed_*.mp4 file
-  - refresh last_frame and reset CC state
+  - leave the source video object byte-identical in COS (never modified)
+  - refresh last_frame (a fresh COS object) and reset CC state
 """
-import hashlib
-from pathlib import Path
+from sqlalchemy import select
 
-import pytest
+from tests.integration.conftest_cos import requires_cos
+from tests.integration.conftest import HEADERS, _make_project, _add_shot, seed_shot_with_source
+from app.models.project import Shot
+from app.services import object_store
 
-from .conftest import HEADERS, _make_project, _add_shot, seed_shot_with_source
-
-
-def _md5(p: Path) -> str:
-    return hashlib.md5(p.read_bytes()).hexdigest()
+pytestmark = requires_cos
 
 
-@pytest.mark.asyncio
 async def test_trim_sets_metadata_and_keeps_source_immutable(
-    client, db_session_factory
+    client, db_session_factory, cos_prefix, tmp_path
 ):
-    """Trimming should only update trim_frames in the DB; source file must be unchanged."""
+    """Trimming should only update trim_frames in the DB; the source COS object
+    must be byte-identical before and after."""
     pid = await _make_project(db_session_factory, status="completed")
     await _add_shot(db_session_factory, pid, shot_id=1, status="completed")
-    source = await seed_shot_with_source(db_session_factory, pid, 1)
+    source_key = await seed_shot_with_source(db_session_factory, pid, 1)
 
-    before_md5 = _md5(source)
+    before = tmp_path / "before.mp4"
+    await object_store.get(source_key, before)
+    before_bytes = before.read_bytes()
 
     r = await client.post(
         f"/api/projects/{pid}/shots/1/trim",
@@ -38,33 +37,37 @@ async def test_trim_sets_metadata_and_keeps_source_immutable(
     body = r.json()
     assert body["trim_frames"] == 40
 
-    # Source video must be byte-identical
-    assert _md5(source) == before_md5, "Source file was mutated — must be immutable"
+    async with db_session_factory() as s:
+        shot = (await s.execute(
+            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
+        )).scalar_one()
+    assert shot.video_path == source_key, "video_path must still point at the source key"
 
-    # No trimmed_ files must have been created
-    assert not list(source.parent.glob("trimmed_*.mp4")), "trimmed_*.mp4 was created"
+    after = tmp_path / "after.mp4"
+    await object_store.get(source_key, after)
+    assert after.read_bytes() == before_bytes, "Source object was mutated — must be immutable"
 
 
-@pytest.mark.asyncio
 async def test_trim_resets_cc_and_refreshes_last_frame(
-    client, db_session_factory
+    client, db_session_factory, cos_prefix, tmp_path
 ):
-    """Trim must clear cc_status and write a new last_frame_*.png."""
-    from sqlalchemy import select
-    from app.models.project import Shot
-
+    """Trim must clear cc_status, clear pre_cc_last_frame_key (+ delete the backup
+    object), and publish a new last_frame object."""
     pid = await _make_project(db_session_factory, status="completed")
     await _add_shot(db_session_factory, pid, shot_id=1, status="completed")
-    source = await seed_shot_with_source(db_session_factory, pid, 1)
+    await seed_shot_with_source(db_session_factory, pid, 1)
 
-    # Seed a fake pre-CC file and set cc_status to simulate prior CC run
-    pre_cc = source.parent / "last_frame_pre_cc.png"
-    pre_cc.write_bytes(b"fake")
+    # Seed a fake pre-CC backup object and set cc_status to simulate a prior CC run
+    pre_cc_key = f"projects/{pid}/shots/shot_1/last_frame_pre_cc.png"
+    f = tmp_path / "pre_cc.png"
+    f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"pre-cc")
+    await object_store.put(pre_cc_key, f)
     async with db_session_factory() as s:
         shot = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
         shot.cc_status = "done"
+        shot.pre_cc_last_frame_key = pre_cc_key
         await s.commit()
 
     r = await client.post(
@@ -74,23 +77,22 @@ async def test_trim_resets_cc_and_refreshes_last_frame(
     )
     assert r.status_code == 200
 
-    # CC state cleared
     async with db_session_factory() as s:
         shot = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
         assert shot.cc_status is None
         assert shot.trim_frames == 40
-        # last_frame_path should point to a new file
+        # last_frame_path should point to a new, real COS object
         assert shot.last_frame_path is not None
-        assert Path(shot.last_frame_path).exists()
+        assert await object_store.exists(shot.last_frame_path)
+        assert shot.pre_cc_last_frame_key is None
 
-    # pre-CC backup must be deleted
-    assert not pre_cc.exists(), "last_frame_pre_cc.png should have been removed"
+    # pre-CC backup object must be deleted (DB de-referenced first, then COS delete)
+    assert await object_store.exists(pre_cc_key) is False
 
 
-@pytest.mark.asyncio
-async def test_trim_below_min_frames_rejected(client, db_session_factory):
+async def test_trim_below_min_frames_rejected(client, db_session_factory, cos_prefix):
     """end_frame < 24 must return 400."""
     pid = await _make_project(db_session_factory, status="completed")
     await _add_shot(db_session_factory, pid, shot_id=1, status="completed")
@@ -104,15 +106,13 @@ async def test_trim_below_min_frames_rejected(client, db_session_factory):
     assert r.status_code == 400
 
 
-@pytest.mark.asyncio
-async def test_trim_video_path_still_points_to_source(client, db_session_factory):
-    """After trim, shot.video_path must still point to the original output_*.mp4."""
-    from sqlalchemy import select
-    from app.models.project import Shot
-
+async def test_trim_video_path_still_points_to_source(
+    client, db_session_factory, cos_prefix
+):
+    """After trim, shot.video_path must still point to the original source key."""
     pid = await _make_project(db_session_factory, status="completed")
     await _add_shot(db_session_factory, pid, shot_id=1, status="completed")
-    source = await seed_shot_with_source(db_session_factory, pid, 1)
+    source_key = await seed_shot_with_source(db_session_factory, pid, 1)
 
     r = await client.post(
         f"/api/projects/{pid}/shots/1/trim",
@@ -125,19 +125,20 @@ async def test_trim_video_path_still_points_to_source(client, db_session_factory
         shot = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
-        assert shot.video_path == str(source), (
-            f"video_path changed from source: {shot.video_path} != {source}"
+        assert shot.video_path == source_key, (
+            f"video_path changed from source: {shot.video_path} != {source_key}"
         )
 
 
-@pytest.mark.asyncio
-async def test_restore_clears_trim(client, db_session_factory):
-    """restore-trim must clear trim_frames and leave the source file byte-identical."""
+async def test_restore_clears_trim(client, db_session_factory, cos_prefix, tmp_path):
+    """restore-trim must clear trim_frames and leave the source object byte-identical."""
     pid = await _make_project(db_session_factory, status="completed")
     await _add_shot(db_session_factory, pid, shot_id=1, status="completed")
-    source = await seed_shot_with_source(db_session_factory, pid, 1)
+    source_key = await seed_shot_with_source(db_session_factory, pid, 1)
 
-    before_md5 = _md5(source)
+    before = tmp_path / "before.mp4"
+    await object_store.get(source_key, before)
+    before_bytes = before.read_bytes()
 
     # Apply a trim first
     r = await client.post(
@@ -156,5 +157,7 @@ async def test_restore_clears_trim(client, db_session_factory):
     body = r.json()
     assert body["trim_frames"] is None
 
-    # Source file must be byte-identical across the whole cycle
-    assert _md5(source) == before_md5, "Source file was mutated — must be immutable"
+    # Source object must be byte-identical across the whole cycle
+    after = tmp_path / "after.mp4"
+    await object_store.get(source_key, after)
+    assert after.read_bytes() == before_bytes, "Source object was mutated — must be immutable"

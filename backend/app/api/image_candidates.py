@@ -13,7 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.main import get_redis
 from app.models.project import ImageCandidate, Project, ReferenceImage, Shot
-from app.services.storage import shot_candidates_dir, to_media_url, ts_uuid_name
+# 注：shot_candidates_dir 已被 Task 5 删除（本地目录函数，COS 下不成立）。候选图
+# 存储改为 COS key 属于 CC/候选 task 的范围，此处只去掉顶层 import 让模块能被
+# app.main 加载——该名字仍在正文里以裸名引用，调用时会 NameError。
+from app.services.storage import to_media_url, ts_uuid_name
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

@@ -15,7 +15,13 @@ from app.models.schemas import (
     ProjectCreate, ProjectResponse, ProjectList, ProjectListResponse,
     Storyboard, ErrorResponse
 )
-from app.services.storage import project_dir, delete_project_storage, to_media_url
+# 注：project_dir 是死 import（正文从未使用），delete_project_storage 已被
+# Task 5 删除（本地目录级删除，COS 下不成立）——只在 delete-project 端点用到，
+# 属于导出/删除 task 的范围，故意留作裸名引用（调用时 NameError），不阻塞本
+# 模块加载。app.main 通过 `from app.api import projects, pipeline, ...` 一次性
+# 导入全部路由模块，projects.py 若在此处 ImportError 会连带整个 app 无法加载，
+# 挡住 Task 8（trim/restore-trim/align-tail-frame）需要的真实 HTTP 端到端测试。
+from app.services.storage import to_media_url
 from app.services.state_machine import ProjectStatus, InvalidTransitionError
 
 router = APIRouter()

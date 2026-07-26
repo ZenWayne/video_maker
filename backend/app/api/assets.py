@@ -5,11 +5,10 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from app.services.storage import (
-    reference_images_dir,
-    shot_dir,
-    final_video_path,
-)
+# 注：reference_images_dir/shot_dir/final_video_path 已被 Task 5 删除（本地路径
+# 函数，COS 下不成立）。资产改为签名 URL 属于读路径 task 的范围，此处只去掉顶层
+# import 让模块能被 app.main 加载——三个名字仍在 serve_asset() 里以裸名引用，
+# 调用时会 NameError（而非让整个 app 无法启动）。
 
 router = APIRouter()
 
