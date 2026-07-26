@@ -158,6 +158,14 @@ class Shot(Base):
     source_frames = Column(Integer, nullable=True)    # 源视频总帧数
     vc_audio_path = Column(Text, nullable=True)       # 替换音轨 wav；None=用源原音
     audio_head_mute_frames = Column(Integer, nullable=True)  # 前 [0,N) 帧静音；None/0=不静音
+    # ── 素材状态显式化（原先靠目录扫描/固定文件名推导，COS 下不成立）──────
+    # VC 前的原视频 key。取代「output_pre_vc.mp4 是否存在」。
+    pre_vc_video_key = Column(Text, nullable=True)
+    # 角色校准前的尾帧备份 key。取代「last_frame_pre_cc.png 是否存在」。
+    pre_cc_last_frame_key = Column(Text, nullable=True)
+    # 未经校准的原始尾帧 key（CC 还原目标）。
+    # 必需：CC 会直接覆盖 last_frame_path，校准后无法反推校准前的尾帧。
+    pristine_last_frame_key = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

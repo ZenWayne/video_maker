@@ -39,11 +39,11 @@ async def init_db():
     from app.models.project import Base
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await _run_migrations(conn)
+        await _ensure_columns(conn)
 
 
-async def _run_migrations(conn):
-    """Run idempotent migrations for columns not handled by create_all."""
+async def _ensure_columns(conn) -> None:
+    """幂等建列。启动时调用；Spec B 的迁移脚本也会直接调用以保证回填前列已存在。"""
     import sqlalchemy as sa
 
     # Helper to check if a column exists
@@ -125,6 +125,14 @@ async def _run_migrations(conn):
         ("audio_head_mute_frames", "INTEGER"),
         ("ff_status", "VARCHAR(20)"),
         ("ff_error_message", "TEXT"),
+    ]:
+        if not await _has_column("shots", col):
+            await conn.execute(sa.text(f"ALTER TABLE shots ADD COLUMN {col} {typ}"))
+
+    for col, typ in [
+        ("pre_vc_video_key", "TEXT"),
+        ("pre_cc_last_frame_key", "TEXT"),
+        ("pristine_last_frame_key", "TEXT"),
     ]:
         if not await _has_column("shots", col):
             await conn.execute(sa.text(f"ALTER TABLE shots ADD COLUMN {col} {typ}"))
