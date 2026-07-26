@@ -279,9 +279,25 @@ print('has presign:', hasattr(oss_aio.AsyncClient, 'presign'), hasattr(oss.Clien
 "
 ```
 
-Expected: 打印出 `put_object` / `get_object` / `get_object_to_file` / `head_object` / `copy_object` / `list_objects_v2` / `delete_object` / `delete_multiple_objects` / `upload_file` / `close` 等方法名，以及 `StaticCredentialsProvider` / `CredentialsProviderFunc` / `Credentials`。
+Expected（已由 controller 在实际安装的包上核对过，以下为**确认事实**）：
 
-**若某方法名与本计划后续代码不符，以实际输出为准并同步修正后续 task 的调用。** 把本步的实际输出粘进提交信息，便于后续 task 对照。
+`AsyncClient` **有**：`put_object`、`get_object`、`head_object`、`copy_object`、
+`list_objects_v2`、`list_objects_v2_paginator`、`is_object_exist`、`delete_object`、
+`delete_multiple_objects`、`initiate_multipart_upload`、`upload_part`、
+`complete_multipart_upload`、`abort_multipart_upload`、`presign`、`close`。
+
+`AsyncClient` **没有**：`get_object_to_file`、`upload_file`、`uploader`、`downloader`
+——这四个只存在于同步 `oss.Client` 上（`oss.Uploader` / `oss.Downloader` 也是同步取向的）。
+
+`presign` 在 `AsyncClient` 上是 **coroutine**，在同步 `oss.Client` 上是普通函数且
+签名为 `presign(request, **kwargs) -> PresignResult`。本设计的签名走同步 client，
+因此不受影响。
+
+`oss.credentials` 提供 `StaticCredentialsProvider`、`CredentialsProviderFunc`、
+`Credentials`、`AnonymousCredentialsProvider`、`EnvironmentVariableCredentialsProvider`。
+
+本步骤仍要跑一遍，确认你的环境与上述一致。**若有出入，以实际输出为准，并立即
+以 NEEDS_CONTEXT 上报** —— 不要自行改设计。
 
 - [ ] **Step 2: 写失败的冒烟测试**
 
@@ -592,6 +608,20 @@ git commit -m "feat(oss): 新增 oss_client，AsyncClient 单例与凭证缓存
   - `async def list_prefix(prefix: str) -> list[str]` — 返回全部 key，内部分页
   - `def signed_url(key: str, expires_sec: Optional[int] = None, filename: Optional[str] = None) -> str` — **同步**
 
+- [ ] **Step 0: 核对异步流式下载的 body 接口**
+
+`get()` 需要把 `get_object` 返回的响应体流式写盘。先确认流对象的方法名：
+
+```bash
+uv run --project backend python -c "
+import alibabacloud_oss_v2 as oss
+print('AsyncStreamBody:', sorted(m for m in dir(oss.AsyncStreamBody) if not m.startswith('_')))
+"
+```
+
+记录输出。Step 3 的 `get()` 实现按实际方法名写（常见为 `iter_bytes()` 异步迭代器，
+或 `read()` 协程）。**若两者都没有，以 NEEDS_CONTEXT 上报，不要自行换方案。**
+
 - [ ] **Step 1: 写失败测试**
 
 创建 `backend/tests/integration/test_object_store.py`：
@@ -712,6 +742,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.services.object_st
 引用再删 OSS。DB 中的 key 必须永远指向真实存在的对象，宁可留孤儿对象。
 """
 
+import asyncio
 import logging
 import mimetypes
 from pathlib import Path
@@ -761,8 +792,14 @@ async def put(key: str, local_path: Path, content_type: Optional[str] = None) ->
 
     try:
         if n >= MULTIPART_THRESHOLD:
-            await client.upload_file(
-                oss.PutObjectRequest(**req_kwargs), filepath=str(local_path)
+            # AsyncClient 没有 upload_file/uploader —— 分片上传管理器只存在于
+            # 同步侧。用线程跑同步 Uploader，既拿到断点续传，又不必手写
+            # initiate/upload_part/complete 那套异步分片逻辑。
+            uploader = oss.Uploader(_sync_signing_client())
+            await asyncio.to_thread(
+                uploader.upload_file,
+                oss.PutObjectRequest(**req_kwargs),
+                str(local_path),
             )
         else:
             with open(local_path, "rb") as f:
@@ -779,10 +816,16 @@ async def get(key: str, dest_path: Path) -> Path:
     """下载 key 到本地。父目录自动创建。返回 dest_path。"""
     dest_path = Path(dest_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
+    # AsyncClient 没有 get_object_to_file（只在同步 Client 上），因此手动流式写盘。
+    # 流式而非整体读入内存：分镜视频可达数百 MB。
     try:
-        await get_client().get_object_to_file(
-            oss.GetObjectRequest(bucket=bucket(), key=key), str(dest_path)
+        result = await get_client().get_object(
+            oss.GetObjectRequest(bucket=bucket(), key=key)
         )
+        async with result.body as stream:
+            with open(dest_path, "wb") as f:
+                async for chunk in stream.iter_bytes():
+                    f.write(chunk)
     except Exception as e:
         _log_oss_error("get", key, e)
         raise
@@ -791,16 +834,10 @@ async def get(key: str, dest_path: Path) -> Path:
 
 
 async def exists(key: str) -> bool:
+    """对象是否存在。用 SDK 自带的 is_object_exist，省去自行判别 404。"""
     try:
-        await get_client().head_object(
-            oss.HeadObjectRequest(bucket=bucket(), key=key)
-        )
-        return True
+        return await get_client().is_object_exist(bucket(), key)
     except Exception as e:
-        if getattr(e, "status_code", None) == 404:
-            return False
-        if "NoSuchKey" in str(e) or "NotFound" in str(e):
-            return False
         _log_oss_error("exists", key, e)
         raise
 
@@ -848,24 +885,18 @@ async def delete(key: str) -> None:
 
 
 async def list_prefix(prefix: str) -> list[str]:
-    """列出前缀下全部 key，内部分页直到取完。"""
-    client = get_client()
+    """列出前缀下全部 key。用 SDK 的分页器，不手写 continuation token 循环。"""
     keys: list[str] = []
-    token: Optional[str] = None
-    while True:
-        req = oss.ListObjectsV2Request(bucket=bucket(), prefix=prefix, max_keys=1000)
-        if token:
-            req.continuation_token = token
-        try:
-            r = await client.list_objects_v2(req)
-        except Exception as e:
-            _log_oss_error("list_prefix", prefix, e)
-            raise
-        for obj in (r.contents or []):
-            keys.append(obj.key)
-        if not getattr(r, "is_truncated", False):
-            break
-        token = r.next_continuation_token
+    try:
+        paginator = get_client().list_objects_v2_paginator()
+        async for page in paginator.iter_page(
+            oss.ListObjectsV2Request(bucket=bucket(), prefix=prefix)
+        ):
+            for obj in (page.contents or []):
+                keys.append(obj.key)
+    except Exception as e:
+        _log_oss_error("list_prefix", prefix, e)
+        raise
     return keys
 
 

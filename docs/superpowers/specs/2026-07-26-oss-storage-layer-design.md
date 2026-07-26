@@ -231,7 +231,7 @@ kie provider 的 `_upload_image()`（video_generator.py:289）现将本地帧 ba
 
 | 场景 | 处理 |
 |---|---|
-| **上传失败** | SDK 自带 `StandardRetryer`（3 次 + FullJitter）。调整 `retry_max_attempts=5`。**>100MB 使用 `upload_file` 分片上传管理器**而非 `put_object`，支持断点续传 |
+| **上传失败** | SDK 自带 `StandardRetryer`（3 次 + FullJitter）。调整 `retry_max_attempts=5`。**>100MB 走分片上传管理器**而非 `put_object`，支持断点续传。**注意**：`upload_file` / `uploader` 只存在于同步 `oss.Client`，`AsyncClient` 没有；故大文件用 `asyncio.to_thread` 跑同步 `oss.Uploader`，避免手写异步分片逻辑（已在实际安装的 SDK 上核实） |
 | **下载失败** | `ws.fetch()` 失败即让任务失败并标记 shot 状态，**绝不静默降级**。明确失败可重试，优于悄悄使用错误文件 |
 | **凭证失效** | ECS RAM Role 自动刷新；static AK 失效表现为全量 403。日志须区分「403 凭证问题」与「404 对象不存在」，并记录 OSS 返回的 **EC 码**（阿里云提供 EC 码自助诊断平台） |
 | **tmpdir 空间不足** | 导出合并前检查可用空间是否足以容纳全部分镜，不足则明确报错。否则表现为 ffmpeg 神秘失败 |
