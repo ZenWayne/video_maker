@@ -192,10 +192,15 @@ oss_access_key_secret: xxxxxxxxxxxxxxxxxxxxxxxx
 
 ```yaml
   oss_access_key_id:
-    file: ../secrets/oss_access_key_id
+    file: ./secrets/oss_access_key_id  # written by: make secrets
   oss_access_key_secret:
-    file: ../secrets/oss_access_key_secret
+    file: ./secrets/oss_access_key_secret  # written by: make secrets
 ```
+
+> 路径用 `./secrets/`，与文件中既有 6 条一致。compose 文件位于 `deploy/`，
+> secrets 实际在 `deploy/secrets/`，故相对路径是 `./secrets/`。
+> 注意 CLAUDE.md:39 的示例写的是 `../secrets/`——那是文档笔误，会解析到不存在的
+> 仓库根目录 `secrets/`。以实际 compose 文件的约定为准。
 
 `backend` 与 `worker`（及 `vc-worker`，若存在）三个服务各自的 `secrets:` 列表追加：
 
