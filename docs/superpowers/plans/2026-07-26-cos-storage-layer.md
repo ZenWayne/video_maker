@@ -1204,17 +1204,43 @@ class Workspace:
 
     def __init__(self, root: Path):
         self.root = root
+        # 本地名 -> 产生它的 key，用于探测同名不同源的静默覆盖
+        self._fetched: dict[str, str] = {}
 
     def path(self, name: str) -> Path:
-        """工作区内的新文件路径。不下载任何内容，仅拼路径。"""
-        p = self.root / name
+        """工作区内的新文件路径。不下载任何内容，仅拼路径。
+
+        name 必须是工作区内的相对路径。绝对路径和 .. 都被拒绝——
+        `Path('/tmp/ws') / '/etc/passwd'` 在 pathlib 里会**丢弃左操作数**
+        直接返回 `/etc/passwd`，不挡住就等于允许写到工作区外面，
+        而工作区外的文件不会被退出时的 rmtree 清掉。
+        """
+        rel = Path(name)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise ValueError(f"工作区内文件名必须是不含 .. 的相对路径: {name!r}")
+        p = self.root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
     async def fetch(self, key: str, name: Optional[str] = None) -> Path:
-        """下载 key 到工作区。name 省略时用 key 的最后一段作文件名。"""
-        local = self.path(name or key.rsplit("/", 1)[-1])
+        """下载 key 到工作区。name 省略时用 key 的最后一段作文件名。
+
+        **同一工作区内 fetch 多个 key 时务必显式传 name。** 项目里有一批
+        固定名素材（audio_original.wav、audio_vc.wav、target_last_frame.png
+        等），不同分镜的同类素材最后一段完全相同，用默认名会互相覆盖。
+        下面的守卫会把这种静默覆盖变成显式报错——导出合并那类「多个分镜拉进
+        同一个工作区」的场景，出错总好过悄悄 concat 出 N 份同一个视频。
+        """
+        local_name = name or key.rsplit("/", 1)[-1]
+        prev = self._fetched.get(local_name)
+        if prev is not None and prev != key:
+            raise ValueError(
+                f"工作区内本地名 {local_name!r} 已被 key {prev!r} 占用，"
+                f"现在又要装入 {key!r}；请为其中之一显式指定 name="
+            )
+        local = self.path(local_name)
         await object_store.get(key, local)
+        self._fetched[local_name] = key
         return local
 
     async def publish(self, local_path: Path, key: str) -> str:

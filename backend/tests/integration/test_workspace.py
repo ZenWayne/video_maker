@@ -4,7 +4,7 @@ import pytest
 from tests.integration.conftest_cos import requires_cos
 
 from app.services import object_store
-from app.services.workspace import workspace, ensure_free_space
+from app.services.workspace import workspace
 
 pytestmark = requires_cos
 
@@ -60,6 +60,46 @@ async def test_fetch_accepts_custom_local_name(cos_prefix, tmp_path):
         assert local.read_bytes() == b"video bytes"
 
 
-async def test_ensure_free_space_raises_when_insufficient():
-    with pytest.raises(OSError, match="磁盘空间不足"):
-        await ensure_free_space(1 << 60)  # 1 EiB，必然不足
+async def test_path_rejects_absolute_name(cos_prefix):
+    async with workspace() as ws:
+        with pytest.raises(ValueError):
+            ws.path("/etc/passwd")
+
+
+async def test_path_rejects_dotdot_name(cos_prefix):
+    async with workspace() as ws:
+        with pytest.raises(ValueError):
+            ws.path("../escape.txt")
+
+
+async def test_path_accepts_nested_relative_name(cos_prefix):
+    async with workspace() as ws:
+        p = ws.path("sub/dir/out.png")
+        assert p == ws.root / "sub" / "dir" / "out.png"
+        assert p.parent.is_dir()
+
+
+async def test_fetch_same_local_name_different_key_raises(cos_prefix, tmp_path):
+    a = tmp_path / "a.wav"
+    a.write_bytes(b"shot1 audio")
+    b = tmp_path / "b.wav"
+    b.write_bytes(b"shot2 audio")
+    key_a = await object_store.put(f"{cos_prefix}shot1/audio_original.wav", a)
+    key_b = await object_store.put(f"{cos_prefix}shot2/audio_original.wav", b)
+
+    async with workspace() as ws:
+        await ws.fetch(key_a)
+        with pytest.raises(ValueError):
+            await ws.fetch(key_b)
+
+
+async def test_fetch_same_key_twice_is_idempotent(cos_prefix, tmp_path):
+    src = tmp_path / "z.txt"
+    src.write_bytes(b"same key twice")
+    key = await object_store.put(f"{cos_prefix}z.txt", src)
+
+    async with workspace() as ws:
+        first = await ws.fetch(key)
+        second = await ws.fetch(key)
+        assert first == second
+        assert second.read_bytes() == b"same key twice"
