@@ -1,8 +1,11 @@
-# 阿里云 OSS 持久化存储接入 — 设计文档
+# 存储层 OSS 化 — 设计文档（Spec A / 共 2 篇）
 
 - **日期**: 2026-07-26
 - **状态**: 待评审
-- **目标**: 把 shot 媒体资产（视频、音频、帧图）的权威存储从本地磁盘迁移到阿里云 OSS，使后端/worker 容器无状态化，满足正式上线的云原生与可迁移性要求。
+- **范围**: 把存储层从「本地路径」改造为「OSS key」，使代码能以 OSS 为权威存储运行
+- **后续**: [Spec B — 存量迁移与生产切换](./2026-07-26-oss-migration-cutover-design.md)
+
+> **本 Spec 不可单独上生产。** 完成后代码只认 OSS key，而生产 DB 中存的仍是本地绝对路径，直接部署会导致全部媒体加载失败。生产部署必须与 Spec B 一同进行。本 Spec 的验收环境是**全新的 dev 数据库 + 独立 dev bucket**。
 
 ---
 
@@ -10,20 +13,20 @@
 
 ### 1.1 现状
 
-所有媒体文件写在本地磁盘 `storage/projects/<project_id>/...`，路径逻辑集中在 `backend/app/services/storage.py`。文件通过 `main.py:135` 的 `StaticFiles` 挂载在 `/api/media` 对外提供，`to_media_url()`（storage.py:200）是绝对路径转浏览器 URL 的唯一转换点。DB 中 `Shot.video_path` 等字段存的是本地绝对路径。项目中不存在任何云对象存储代码。
+媒体文件写在本地磁盘 `storage/projects/<project_id>/...`，路径逻辑集中在 `backend/app/services/storage.py`。文件通过 `main.py:135` 的 `StaticFiles` 挂载在 `/api/media` 对外提供；`to_media_url()`（storage.py:200）是绝对路径转浏览器 URL 的唯一转换点。DB 中 `Shot.video_path` 等字段存本地绝对路径。项目中不存在任何云对象存储代码。
 
 ### 1.2 目标
 
-- 媒体资产持久化到 OSS，容器可无状态重启、可换机、可多副本
+- 媒体资产权威存储迁至 OSS，后端/worker 容器无状态化
 - 迁移到新环境只需切换 bucket，不搬运磁盘
-- 不牺牲现有功能：裁剪、VC、CC、导出合并、候选图等链路行为保持不变
+- 现有功能行为不变：裁剪、VC、CC、导出合并、候选图等链路
 
 ### 1.3 非目标
 
 - 不做 CDN 加速与公开分享链接（bucket 保持私有读）
 - 不做浏览器直传 OSS（前端上传仍走后端中转）
 - 不做持久化本地缓存（见 3.3）
-- 不做孤儿对象的自动删除（本次仅产出 dry-run 报告脚本）
+- 存量数据迁移、生产切换、孤儿 GC — 均属 Spec B
 
 ---
 
@@ -37,12 +40,9 @@
 | 生产凭证 | **ECS RAM Role**（自动刷新 STS） | 无需维护 AK/SK；配 `use_internal_endpoint` 免公网流量费 |
 | 开发凭证 | **RAM 用户 AK/SK**，走现有 `/run/secrets/` 机制 | 与 `kie_api_key` 完全一致的注入路径 |
 | 环境划分 | **全环境统一走 OSS**，开发用独立 dev bucket | 代码只有一条路径，杜绝「只在生产复现」的存储 bug |
-| 存量数据 | **一次性迁移脚本全量上云** + DB 回填 | 上线后存储层只有一条路径，无需长期兼容两种格式 |
-| 实现路线 | **以 OSS key 为中心重写 storage.py**，本地只存在于临时工作区 | 漏写会在所有环境立刻失败，不会潜伏到生产（见 2.1） |
+| 实现路线 | **以 OSS key 为中心重写 storage.py**，本地只存在于临时工作区 | 遗漏会在所有环境立刻失败，不会潜伏到生产（见 2.1） |
 | DB 字段名 | **保持 `video_path` 等名称不变**，仅语义改为 key | 免去 alembic 列改名与前端联动；响应体给前端的本来就是 URL |
 | 前端上传 | 走后端中转，不做直传 | 图片体积小，直传需配 CORS 且难以防止后端不感知的对象 |
-| 孤儿 GC | **本次仅 dry-run** | 唯一有不可逆破坏风险的组件，先观察实际孤儿量 |
-| 开发期数据卷 | **独立 DB 卷 + 独立 bucket**，不碰共享卷 | 规避 4.3 的 worktree 协作风险 |
 
 ### 2.1 为何不选「保留路径形状 + 边界插 hook」
 
@@ -68,14 +68,14 @@ app/services/
 
 **`oss_client.py`** — 懒加载单例 `AsyncClient`。必须使用 `alibabacloud_oss_v2.aio.AsyncClient`（要求 SDK ≥ 1.2.0 + aiohttp），因为 FastAPI 与 ARQ worker 均为 async，同步 client 会阻塞事件循环。凭证按 `oss_auth_mode` 分发：
 
-- `ecs_ram_role`：`alibabacloud_credentials` 的 `Config(type='ecs_ram_role', role_name=...)`，包装成 `oss.credentials.CredentialsProviderFunc`
+- `ecs_ram_role`：`alibabacloud_credentials` 的 `Config(type='ecs_ram_role', role_name=...)`，包装为 `oss.credentials.CredentialsProviderFunc`
 - `static`：`oss.credentials.StaticCredentialsProvider`，AK/SK 由 `/run/secrets/` 注入环境变量
 
 在 FastAPI lifespan 与 worker shutdown 中 `await client.close()`，否则连接泄漏。
 
 **`object_store.py`** — 不含业务语义的对象原语。`copy` 使用 OSS 服务端拷贝，pre-VC / pre-CC 备份因此不产生任何流量（现状是本地 `shutil.copy`）。
 
-**`workspace.py`** — 方案 B 的核心原语：
+**`workspace.py`** — 本方案的核心原语：
 
 ```python
 async with workspace() as ws:
@@ -98,7 +98,7 @@ projects/<project_id>/shots/shot_<n>/last_frame_<ts>_<uuid>.png
 projects/<project_id>/final/merged.mp4
 ```
 
-迁移脚本因此是「本地相对路径 = key」的直接映射，零转换逻辑；也便于人工在 OSS 控制台按项目定位。
+这样 Spec B 的迁移脚本就是「本地相对路径 = key」的直接映射，零转换逻辑；也便于人工在 OSS 控制台按项目定位。
 
 `ts_uuid_name()`（storage.py:13）保留，作用从「防浏览器缓存」变为「保证 key 唯一 + 防缓存」。
 
@@ -146,14 +146,16 @@ DB 存**裸 key**，不加 `oss://` 前缀。
 | `shot_pre_vc_video_path()` storage.py:62 | 依赖固定名 `output_pre_vc.mp4` 是否存在 | 存在性判断变成一次 OSS 请求 |
 | `shot_pre_cc_last_frame_path()` storage.py:67 | 依赖固定名 `last_frame_pre_cc.png` | 同上 |
 
-一律改为显式 DB 列：
+一律改为显式 DB 列（一次 alembic 迁移新增三列）：
 
-- `Shot.pre_vc_video_key` — 替代「`output_pre_vc.mp4` 是否存在」（现由 `pipeline.py` 的 `.exists()` 判断）
+- `Shot.pre_vc_video_key` — 替代「`output_pre_vc.mp4` 是否存在」
 - `Shot.pre_cc_last_frame_key` — 替代「`last_frame_pre_cc.png` 是否存在」（现由 pipeline.py:1860 的 `pre_cc.exists()` 判断）
 - `Shot.pristine_last_frame_key` — 替代 `pristine_last_frame_path()` 的目录扫描
 - pristine 视频：非破坏性模型下即 `Shot.video_path` 本身，无需新列
 
-**关于 pristine 尾帧为何必须独立成列**（已核实）：角色校准在 image_candidates.py:226-227 直接覆盖 `shot.last_frame_path` 并置 `cc_status="done"`，因此 CC 之后无法从任何现有字段反推出校准前的尾帧。而 `pristine_last_frame_path()` 正是 worker/tasks.py:659、worker/tasks.py:1058 与 pipeline.py:2093 的还原目标——目录扫描一旦失效，CC 还原链路即断裂。故必须新增 `pristine_last_frame_key` 列。
+**关于 pristine 尾帧为何必须独立成列**（已核实）：角色校准在 image_candidates.py:226-227 直接覆盖 `shot.last_frame_path` 并置 `cc_status="done"`，因此 CC 之后无法从任何现有字段反推出校准前的尾帧。而 `pristine_last_frame_path()` 正是 worker/tasks.py:659、worker/tasks.py:1058 与 pipeline.py:2093 的还原目标——目录扫描一旦失效，CC 还原链路即断裂。
+
+> **与 Spec B 的衔接**：这三列的**初值只能在本地文件尚存时扫描推导**，因此其回填由 Spec B 的迁移脚本负责，且是一次性、不可补做的。本 Spec 只负责建列与读写逻辑。
 
 该改动同时正面满足 CLAUDE.md 中「shot 素材文件变更审计」规则：素材权威状态从「目录里有什么文件」变为「DB 里写了什么」，审计成为可静态检查的事情。
 
@@ -165,7 +167,9 @@ OSS 与 DB 是两个系统，无分布式事务。固定写入顺序：
 - **删除**：先改 DB 解除引用，成功后删 OSS
 - **替换**：新 key 先传 → DB 指过去 → 删旧 key（`ts_uuid_name` 保证不同名）
 
-**不变量：DB 中的 key 永远指向真实存在的对象。** 任何中途失败只产生无人引用的孤儿对象，由生命周期规则与 GC 脚本兜底。反向做法会让用户看到不可自愈的播放 403。
+**不变量：DB 中的 key 永远指向真实存在的对象。** 任何中途失败只产生无人引用的孤儿对象。反向做法会让用户看到不可自愈的播放 403。
+
+> 孤儿对象的清理策略见 Spec B 第 5 节。
 
 ### 4.3 各业务链路
 
@@ -206,53 +210,7 @@ kie provider 的 `_upload_image()`（video_generator.py:289）现将本地帧 ba
 
 ---
 
-## 5. 存量迁移
-
-### 5.1 脚本
-
-`backend/app/scripts/migrate_to_oss.py`，通过 `uv run --project backend python -m app.scripts.migrate_to_oss` 执行。四阶段可分别运行：
-
-```
---scan      扫描 storage_root，输出待迁移清单（文件数、总大小、未被 DB 引用的量）
---upload    上传对象（可在线运行，不动 DB）
---backfill  回填 DB 路径字段 → key（需停写窗口）
---verify    校验 DB 中每个 key 在 OSS 真实存在
-```
-
-**幂等性为硬要求。** `--upload` 对每个文件先 `head_object` 比对大小 / CRC64，一致则跳过，中断后重跑只补差量。`--backfill` 依据值的形态判断是否已转换——以 `/` 开头为待转换的绝对路径，否则视为已是 key——因此同样可安全重跑。失败条目写入报告文件，支持单独重试。
-
-### 5.2 需回填的字段
-
-- `Shot`：`video_path`、`last_frame_path`、`custom_first_frame_path`、`target_last_frame_path`、`vc_audio_path`、**`custom_reference_paths`（JSON 数组）**
-- `Project`：`storyboard_path`、`final_video_path`、`reference_voice_path`
-- `ReferenceImage`：`storage_path`
-- `ImageCandidate`：`file_path`、**`ref_paths`（JSON 数组）**
-
-两个 JSON 数组字段容易遗漏，需单独处理。
-
-**只此一次的时机**：4.1 新增的三列 `pre_vc_video_key` / `pre_cc_last_frame_key` / `pristine_last_frame_key`，初值只能通过扫描本地目录推导——前两者看 `output_pre_vc.mp4`、`last_frame_pre_cc.png` 是否存在，后者按 `pristine_last_frame_path()` 的原逻辑（`last_frame_*.png` 中排除固定名备份后取 mtime 最新）计算。本地文件一旦清理即无法恢复该信息，因此**这三列的填充必须在迁移脚本内完成**，不能留到后续补做。
-
-### 5.3 上线切换顺序
-
-字段语义切换是原子的，代码与数据必须同时切换：
-
-```
-1. 备份 DB（sqlite 直接 cp）+ 开启 bucket 版本控制
-2. 在线运行 --upload（不停服，最耗时的一步在此消化）
-3. 停止服务
-4. 再次运行 --upload 补增量（停服前最后写入的文件）
-5. 运行 --backfill
-6. 部署新代码
-7. 启动 + 运行 --verify
-```
-
-真正的停机窗口仅第 4~7 步，与数据量基本无关。
-
-**回滚**：恢复 DB 备份 + 回滚代码，OSS 对象不删除。**迁移后本地 storage 目录先保留一到两周**作为回滚保险，确认稳定后再清理。
-
----
-
-## 6. 错误处理
+## 5. 错误处理
 
 | 场景 | 处理 |
 |---|---|
@@ -262,20 +220,11 @@ kie provider 的 `_upload_image()`（video_generator.py:289）现将本地帧 ba
 | **tmpdir 空间不足** | 导出合并前检查可用空间是否足以容纳全部分镜，不足则明确报错。否则表现为 ffmpeg 神秘失败 |
 | **签名 URL 403** | 前端 `onError` 重新拉取接口换取新 URL（见 4.4） |
 
-**孤儿对象 GC**：4.2 的一致性规则会持续产生孤儿。清理脚本比对 OSS `list_prefix` 与 DB 引用，识别超过 N 天未被引用的对象。**本次仅实现 dry-run 报告，不执行删除**——它是整套设计中唯一具备不可逆破坏风险的组件，先观察实际孤儿量再决定是否开启自动清理。
-
-**运维侧配置**（非代码，但属设计的一部分）：
-
-- bucket 开启版本控制（GC 的误删保险）
-- 配置生命周期规则（历史版本 30 天后转低频或删除）
-- bucket 保持私有读
-- RAM 策略仅授予目标 bucket 的读写权限，**不使用 `AliyunOSSFullAccess`**
-
 **日志**沿用项目现有 `python-json-logger`，每次对象操作记录 key、操作类型、耗时、字节数、EC 码。Langfuse 用于 LLM 追踪，不纳入此处。
 
 ---
 
-## 7. 测试策略
+## 6. 测试策略
 
 项目规则明确：除会计费的模型调用外，一律不 mock。OSS 是真实基础设施而非计费模型边界，**因此测试必须打真实 OSS**，不实现任何 fake object store。
 
@@ -287,16 +236,13 @@ kie provider 的 `_upload_image()`（video_generator.py:289）现将本地帧 ba
 | **object_store / workspace** | 打真实 dev bucket：put/get/copy/delete/list/签名 |
 | **签名 URL** | **断言真能 `GET` 到内容**，而非断言 URL 字符串形态——签名算错时字符串形态依然正确 |
 | **ffmpeg 链路集成测试** | 复用已有真实 `output_<ts>_<uuid>.mp4` 素材（项目 e2e 规则推荐的做法），走完整 fetch → ffmpeg → publish → DB，**不调用任何模型** |
-| **迁移脚本** | 临时 storage 目录 + 临时 DB 跑全流程，重点验证幂等：**连跑两次结果完全一致** |
 | **e2e (Playwright)** | 真实后端 + 真实 DB + 真实 OSS，仅短路项目规则中列明的 AI 触发端点 |
 
 后端测试用 `uv run pytest` 直接运行，不套 podman。需要 OSS 凭证的测试打 marker，便于无凭证环境跳过。
 
 ---
 
-## 8. 分阶段落地
-
-DB 字段语义切换是原子的，生产环境只有一次切换窗口（见 5.3）。以下为**代码落地顺序**，每阶段可独立验证，在 dev bucket + 全新 dev DB 上跑通，最后一次性切换生产。
+## 7. 分阶段落地
 
 | 阶段 | 内容 | 验证方式 |
 |---|---|---|
@@ -305,26 +251,25 @@ DB 字段语义切换是原子的，生产环境只有一次切换窗口（见 5
 | **2** | 新增 `pre_vc_video_key` / `pre_cc_last_frame_key` / `pristine_last_frame_key` 三列 + alembic 迁移 | 迁移可正反向执行 |
 | **3** | **写路径**改造：生成、上传、各 ffmpeg 链路，产出并存 key | 集成测试走真实素材 |
 | **4** | **读路径**改造：`to_media_url` 签名、`assets.py` 改 302、删 `/api/media` 挂载 | e2e 真实播放 |
-| **5** | 前端 `onError` 重拉换新 URL | e2e 模拟过期 |
-| **6** | 迁移脚本四阶段 + `--verify` | 临时 storage/DB 幂等测试 |
-| **7** | **生产切换**（5.3 的七步） | `--verify` 全绿 + 人工抽查播放 |
-| **8** | 孤儿 GC 脚本（仅 dry-run） | 输出报告，人工核对 |
+| **5** | 前端 `onError` 重拉换新 URL；删除 `storage.py` 遗留的本地路径函数 | e2e 模拟过期 |
 
 阶段 3 必须先于阶段 4：读路径能工作的前提是写路径已在产出 key。
 
+**验收标准**：在全新 dev DB + 独立 dev bucket 上，从建项目到导出成片的完整链路跑通，且本地 `storage/` 目录中除临时工作区外不产生任何持久文件。
+
 ---
 
-## 9. 开发期协作风险
+## 8. 开发期环境隔离
 
 按项目部署约定，**所有 worktree 共用同一套 `deploy_app-data`（DB）与 `deploy_app-storage`（媒体）卷**，同一时刻仅一个栈运行。
 
-风险：**一旦在某 worktree 运行 `--backfill`，共享 dev DB 中的字段即变为 key。此时将栈切回任何旧 worktree，旧代码会把 key 当绝对路径使用，媒体全部加载失败。**
+本 Spec 的改造会让代码只认 key，若跑在共享 DB 上会读到旧的绝对路径而全面失败；反之若在共享 DB 上执行 Spec B 的回填，再切回任何旧 worktree 也会全面失败。
 
-**已采纳的处理方式**：开发期间为本 worktree 使用**独立的 DB 卷与独立 bucket**，完全不触碰共享卷。代价仅是 compose 中多一组卷名，换来整个开发过程零风险。
+**已采纳的处理方式**：开发期间为本 worktree 使用**独立的 DB 卷与独立 dev bucket**，完全不触碰共享卷。代价仅是 compose 中多一组卷名，换来整个开发过程零风险。
 
 ---
 
-## 10. 实施阶段需要逐行核对的代码
+## 9. 实施阶段需要逐行核对的代码
 
 设计层面无未定项。以下几处依赖具体代码细节，在写实施计划时需逐行核对，但均不影响架构选择：
 
