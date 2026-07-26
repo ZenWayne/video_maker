@@ -727,9 +727,10 @@ async def run_image_candidate(
             out = str(out_dir / ts_uuid_name(".png"))
 
             if cand.slot == "cc":
-                pristine = pristine_last_frame_path(project_id, shot_id)
-                if pristine is None and shot.last_frame_path and Path(shot.last_frame_path).exists():
-                    pristine = Path(shot.last_frame_path)
+                # pristine_last_frame_key is the source of truth (never a directory
+                # scan); fall back to the current last_frame_path for shots that
+                # predate the column.
+                pristine = shot.pristine_last_frame_key or shot.last_frame_path
                 if pristine is None:
                     raise ValueError("Shot has no last frame to calibrate")
                 await ig.calibrate_face(char_refs, str(pristine), out)
@@ -935,16 +936,29 @@ async def _do_voice_convert_one(
     redis,
     project_id: str,
     shot_id: int,
-    ref_audio_path: str,
+    ref_audio_key: str,
 ) -> None:
     """Voice-convert a single shot using the given reference audio.
 
-    Extracts original audio from the shot, calls CosyVoice VC service,
-    and stores the result as a new uniquely-named wav file. The source
-    video is never touched; only shot.vc_audio_path is updated (metadata-only).
+    Non-destructive model: shot.video_path is the single immutable source
+    video (VC never depends on trim state — it always reads the full audio
+    from the current video_path); the converted wav is published to a FIXED
+    COS key (shot_audio_vc_key) that a later run simply overwrites, so there
+    is no "drop the prior vc audio" bookkeeping to get wrong. video_path
+    itself is never touched; only shot.vc_audio_path is updated
+    (metadata-only).
     """
     from app.agents.audio_extractor import extract_audio_wav
     from app.services.cosyvoice_client import voice_convert
+    from app.services.storage import shot_audio_vc_key
+    # NOTE: ensure_pre_vc_backup lives in app.api.pipeline (brief-mandated location,
+    # also where the trim/restore endpoints already keep their COS helpers). Importing
+    # it here pulls in app.main (pipeline.py does `from app.main import get_redis` at
+    # module level) the first time this runs in the arq worker process — a one-time,
+    # harmless-but-wasteful FastAPI app construction inside a process that never serves
+    # HTTP. Worth hoisting ensure_pre_vc_backup into a plain service module if this ever
+    # becomes a real cost; not done here to stay within this task's scope.
+    from app.api.pipeline import ensure_pre_vc_backup
 
     async with session_factory() as session:
         result = await session.execute(
@@ -962,21 +976,27 @@ async def _do_voice_convert_one(
         )
 
         try:
-            # 1. Extract full source audio (trim-independent)
-            source_video = get_original_video_for_audio(project_id, shot_id)
-            src_audio = str(shot_dir(project_id, shot_id) / f"audio_in_{ts_uuid_name('.wav')}")
-            extract_audio_wav(str(source_video), src_audio)
+            # Idempotent server-side backup of the pre-VC video (zero local
+            # traffic). ensure_pre_vc_backup opens its OWN session/transaction,
+            # so refresh `shot` afterwards or the later commit on THIS session
+            # would flush its stale in-memory pre_vc_video_key (None) back
+            # over the just-committed value.
+            await ensure_pre_vc_backup(session_factory, project_id, shot_id)
+            await session.refresh(shot)
 
-            # 2. CosyVoice VC → a NEW uniquely-named wav (never overwrite)
-            vc_audio = str(shot_dir(project_id, shot_id) / f"audio_vc_{ts_uuid_name('.wav')}")
-            await voice_convert(src_audio, ref_audio_path, vc_audio)
+            vc_key = shot_audio_vc_key(project_id, shot_id)
+            async with workspace() as ws:
+                local_video = await ws.fetch(shot.video_path, name="source.mp4")
+                local_ref_audio = await ws.fetch(ref_audio_key, name="ref_prompt.wav")
+                local_src_audio = ws.path("audio_in.wav")
+                extract_audio_wav(str(local_video), str(local_src_audio))
 
-            # 3. Metadata only: drop a prior vc audio, point at the new one.
-            #    Source video is NOT touched; video_path stays the source.
-            if shot.vc_audio_path:
-                Path(shot.vc_audio_path).unlink(missing_ok=True)
-            Path(src_audio).unlink(missing_ok=True)
-            shot.vc_audio_path = vc_audio
+                local_vc_audio = ws.path("audio_vc.wav")
+                await voice_convert(str(local_src_audio), str(local_ref_audio), str(local_vc_audio))
+                await ws.publish(local_vc_audio, vc_key)
+
+            # Metadata only: video_path is NOT touched; it stays the source.
+            shot.vc_audio_path = vc_key
             shot.vc_status = "done"
             shot.vc_error_message = None
             session.add(shot)
@@ -989,7 +1009,7 @@ async def _do_voice_convert_one(
                     "type": "vc_completed",
                     "data": {
                         "shot_id": shot_id,
-                        "vc_audio_url": to_media_url(vc_audio),
+                        "vc_audio_url": to_media_url(vc_key),
                         "version": int(_time.time()),
                     },
                 },
@@ -1096,8 +1116,12 @@ async def _do_character_calibrate_one(
     shot_id: int,
     ref_image_paths: list[str],
 ) -> None:
-    """校准一个 shot 的 last frame → 产出 cc 候选（采纳后才替换，见 adopt 端点）。"""
+    """校准一个 shot 的 last frame → 产出 cc 候选（采纳后才替换，见 adopt 端点）。
+
+    ref_image_paths 是角色参考图的 COS key 列表。
+    """
     from app.services import image_generation as ig
+    from app.services.storage import shot_candidates_prefix
 
     async with session_factory() as session:
         result = await session.execute(
@@ -1124,14 +1148,22 @@ async def _do_character_calibrate_one(
         await session.refresh(cand)
 
         try:
-            # 从未校准的 pristine 帧出发（绝不叠加已校准帧）
-            pristine = pristine_last_frame_path(project_id, shot_id) or Path(shot.last_frame_path)
-            out_dir = shot_candidates_dir(project_id, shot_id)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            out = str(out_dir / ts_uuid_name(".png"))
-            await ig.calibrate_face(ref_image_paths, str(pristine), out)
+            # 从未校准的 pristine 帧出发（绝不叠加已校准帧）——pristine_last_frame_key
+            # 是唯一真相来源，不再目录扫描；缺失（旧数据）时退回当前 last_frame_path。
+            pristine_key = shot.pristine_last_frame_key or shot.last_frame_path
+            out_key = f"{shot_candidates_prefix(project_id, shot_id)}{ts_uuid_name('.png')}"
 
-            cand.file_path = out
+            async with workspace() as ws:
+                local_refs = [
+                    str(await ws.fetch(k, name=f"char_ref_{i}{Path(k).suffix or '.png'}"))
+                    for i, k in enumerate(ref_image_paths)
+                ]
+                local_pristine = await ws.fetch(pristine_key, name="pristine_last_frame.png")
+                local_out = ws.path("cc_candidate.png")
+                await ig.calibrate_face(local_refs, str(local_pristine), str(local_out))
+                await ws.publish(local_out, out_key)
+
+            cand.file_path = out_key
             cand.status = "done"
             # 若当前 last_frame 已是已采纳的校准帧（cc_*.png），保持 cc_status="done"
             # 以维持 已校准/还原 UI 与 character-calibrate-revert 可用；否则清空。
@@ -1151,7 +1183,7 @@ async def _do_character_calibrate_one(
                     "data": {
                         "shot_id": shot_id,
                         "candidate_id": cand.id,
-                        "file_path": to_media_url(out),
+                        "file_path": to_media_url(out_key),
                     },
                 },
             )

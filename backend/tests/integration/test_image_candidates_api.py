@@ -1,4 +1,5 @@
-"""候选创建/删除端点（ARQ mock、真实 in-memory DB）."""
+"""候选创建/删除端点（ARQ mock、真实 in-memory DB）。文件上传/删除会真的打 COS
+——涉及的用例用 requires_cos 单独 gate，其余（不碰文件的路由/校验逻辑）不需要。"""
 import io
 import json
 from datetime import datetime, timedelta
@@ -6,7 +7,9 @@ import pytest
 from sqlalchemy import select
 
 from tests.integration.conftest import HEADERS, USER, _make_project, _add_shot, _add_character_image
+from tests.integration.conftest_cos import requires_cos
 from app.models.project import ImageCandidate, ReferenceImage
+from app.services import object_store
 
 
 async def _create(client, pid, shot_id=1, data=None, files=None):
@@ -36,7 +39,10 @@ async def test_create_auto_candidate_enqueues_worker(client, db_session_factory)
     )
 
 
-async def test_create_custom_candidate_with_temp_upload(client, db_session_factory, tmp_path):
+@requires_cos
+async def test_create_custom_candidate_with_temp_upload(
+    client, db_session_factory, tmp_path, cos_prefix
+):
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1)
 
@@ -55,9 +61,10 @@ async def test_create_custom_candidate_with_temp_upload(client, db_session_facto
         refs = json.loads(row.ref_paths)
         assert "character" not in refs  # 未显式传 ref_image_ids → 键不写入，worker 端回退默认角色参考图
         assert len(refs["object"]) == 1
-        assert "candidates" in refs["object"][0]  # 临时上传进 candidates 目录
-        from pathlib import Path
-        assert Path(refs["object"][0]).read_bytes() == b"\x89PNGx"
+        assert "candidates/" in refs["object"][0]  # 临时上传进 candidates/ 前缀
+        got = tmp_path / "got.png"
+        await object_store.get(refs["object"][0], got)
+        assert got.read_bytes() == b"\x89PNGx"
         # 未产生 ReferenceImage 行
         assert (await s.execute(select(ReferenceImage))).scalar_one_or_none() is None
 
@@ -96,7 +103,8 @@ async def test_create_rejects_malformed_ref_image_ids(client, db_session_factory
     assert r2.status_code == 400
 
 
-async def test_delete_candidate(client, db_session_factory, tmp_path):
+@requires_cos
+async def test_delete_candidate(client, db_session_factory, tmp_path, cos_prefix):
     pid = await _make_project(db_session_factory, status="shot_review")
     await _add_shot(db_session_factory, pid, 1)
     r = await _create(client, pid)
@@ -108,17 +116,19 @@ async def test_delete_candidate(client, db_session_factory, tmp_path):
     )
     assert r2.status_code == 409
 
-    # done + 有文件 → 删行 + unlink
+    # done + 有文件 → 删行 + 删 COS 对象
+    key = f"projects/{pid}/shots/shot_1/candidates/c.png"
     f = tmp_path / "c.png"; f.write_bytes(b"x")
+    await object_store.put(key, f)
     async with db_session_factory() as s:
         row = (await s.execute(select(ImageCandidate).where(ImageCandidate.id == cid))).scalar_one()
-        row.status = "done"; row.file_path = str(f)
+        row.status = "done"; row.file_path = key
         await s.commit()
     r3 = await client.delete(
         f"/api/projects/{pid}/shots/1/image-candidates/{cid}", headers=HEADERS
     )
     assert r3.status_code == 200
-    assert not f.exists()
+    assert not await object_store.exists(key)
     async with db_session_factory() as s:
         assert (await s.execute(select(ImageCandidate))).scalar_one_or_none() is None
 

@@ -13,10 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.main import get_redis
 from app.models.project import ImageCandidate, Project, ReferenceImage, Shot
-# 注：shot_candidates_dir 已被 Task 5 删除（本地目录函数，COS 下不成立）。候选图
-# 存储改为 COS key 属于 CC/候选 task 的范围，此处只去掉顶层 import 让模块能被
-# app.main 加载——该名字仍在正文里以裸名引用，调用时会 NameError。
-from app.services.storage import to_media_url, ts_uuid_name
+from app.services.storage import (
+    to_media_url, ts_uuid_name, shot_key,
+    shot_candidates_prefix, shot_custom_frames_prefix,
+)
+from app.services import object_store
+from app.services.workspace import workspace
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -123,13 +125,15 @@ async def create_image_candidate(
         selected_obj += json.loads(shot.custom_reference_paths)
 
     if files:
-        cand_dir = shot_candidates_dir(project_id, shot_id)
-        cand_dir.mkdir(parents=True, exist_ok=True)
-        for f in files:
-            ext = Path(f.filename or "x.png").suffix or ".png"
-            dest = cand_dir / f"ref_{ts_uuid_name(ext)}"
-            dest.write_bytes(await f.read())
-            selected_obj.append(str(dest))
+        prefix = shot_candidates_prefix(project_id, shot_id)
+        async with workspace() as ws:
+            for f in files:
+                ext = Path(f.filename or "x.png").suffix or ".png"
+                local = ws.path(f"ref_{ts_uuid_name(ext)}")
+                local.write_bytes(await f.read())
+                dest_key = f"{prefix}{local.name}"
+                await ws.publish(local, dest_key)
+                selected_obj.append(dest_key)
 
     refs: dict = {}
     if ref_image_ids is not None:
@@ -171,11 +175,50 @@ async def delete_image_candidate(
     cand = await _get_candidate_or_404(project_id, shot_id, candidate_id, session)
     if cand.status == "generating" and (datetime.utcnow() - cand.created_at) < timedelta(minutes=30):
         raise HTTPException(status_code=409, detail="Candidate is still generating")
-    if cand.file_path:
-        Path(cand.file_path).unlink(missing_ok=True)
+    # 素材审计（CLAUDE.md）：先删行（解除引用）再删 COS 对象。
+    file_key = cand.file_path
     await session.delete(cand)
     await session.commit()
+    if file_key:
+        await object_store.delete(file_key)
     return {"deleted": candidate_id}
+
+
+async def adopt_candidate_to_last_frame(
+    session_factory, project_id: str, shot_id: int, candidate_key: str
+) -> str:
+    """采纳候选图为分镜尾帧（角色校准）。返回新的 last_frame key。
+
+    注意：本函数覆盖 last_frame_path，但**绝不**触碰 pristine_last_frame_key
+    ——后者是 CC 还原的唯一目标（worker/tasks.py、app/api/pipeline.py 的
+    character-calibrate-revert 端点都以它为准）。
+
+    备份/入槽全程用 COS 服务端 copy（零流量）。旧的已采纳校准帧（若存在）
+    在 DB 提交之后才删除——先解除引用再删对象，符合素材审计的一致性约定。
+    """
+    from app.services.first_frame import propagate_first_frame_to_next
+
+    dest_key = shot_key(project_id, shot_id, f"cc_{ts_uuid_name('.png')}")
+    await object_store.copy(candidate_key, dest_key)
+
+    async with session_factory() as s:
+        shot = (await s.execute(
+            select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+        )).scalar_one()
+        stale_cc_key = shot.last_frame_path
+        if not (stale_cc_key and Path(stale_cc_key).name.startswith("cc_")):
+            stale_cc_key = None
+
+        shot.last_frame_path = dest_key
+        shot.cc_status = "done"
+        shot.cc_error_message = None
+        await propagate_first_frame_to_next(project_id, shot, dest_key, s)
+        await s.commit()
+
+    if stale_cc_key:
+        await object_store.delete(stale_cc_key)
+
+    return dest_key
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/image-candidates/{candidate_id}/adopt")
@@ -187,50 +230,40 @@ async def adopt_image_candidate(
     session: AsyncSession = Depends(get_session),
 ):
     """采纳候选：复制入槽（路径即真相），同槽位其他候选取消采纳标记。"""
-    import shutil
     from app.api.projects import _candidate_to_dict
-    from app.services.first_frame import propagate_first_frame_to_next
-    from app.services.storage import shot_custom_frames_dir, shot_dir
 
     await _get_project_or_404(project_id, session)
     shot = await _get_shot_or_404(project_id, shot_id, session)
     cand = await _get_candidate_or_404(project_id, shot_id, candidate_id, session)
 
-    if cand.status != "done" or not cand.file_path or not Path(cand.file_path).exists():
+    if cand.status != "done" or not cand.file_path or not await object_store.exists(cand.file_path):
         raise HTTPException(status_code=400, detail="Candidate is not ready to adopt")
 
-    src = Path(cand.file_path)
+    src_key = cand.file_path
     extra: dict = {}
 
     if cand.slot == "first_frame":
-        dest_dir = shot_custom_frames_dir(project_id, shot_id)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / ts_uuid_name(src.suffix or ".png")
-        shutil.copy2(src, dest)
-        shot.custom_first_frame_path = str(dest)
-        extra["custom_first_frame_path"] = to_media_url(str(dest))
+        dest_key = f"{shot_custom_frames_prefix(project_id, shot_id)}{ts_uuid_name(Path(src_key).suffix or '.png')}"
+        await object_store.copy(src_key, dest_key)
+        shot.custom_first_frame_path = dest_key
+        extra["custom_first_frame_path"] = to_media_url(dest_key)
     elif cand.slot == "tail_frame":
-        dest_dir = shot_dir(project_id, shot_id)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / ts_uuid_name(src.suffix or ".png")
-        shutil.copy2(src, dest)
-        shot.target_last_frame_path = str(dest)
+        dest_key = shot_key(project_id, shot_id, ts_uuid_name(Path(src_key).suffix or ".png"))
+        await object_store.copy(src_key, dest_key)
+        shot.target_last_frame_path = dest_key
         shot.tf_status = "done"
-        extra["target_last_frame_path"] = to_media_url(str(dest))
+        extra["target_last_frame_path"] = to_media_url(dest_key)
     elif cand.slot == "cc":
-        s_dir = shot_dir(project_id, shot_id)
-        s_dir.mkdir(parents=True, exist_ok=True)
-        dest = s_dir / f"cc_{ts_uuid_name('.png')}"
-        shutil.copy2(src, dest)
-        # 旧校准帧只留最新（沿用原 CC worker 行为）；pristine last_frame_* 不动
-        for _old in s_dir.glob("cc_*.png"):
-            if _old != dest:
-                _old.unlink(missing_ok=True)
-        shot.last_frame_path = str(dest)
-        shot.cc_status = "done"
-        shot.cc_error_message = None
-        await propagate_first_frame_to_next(project_id, shot, str(dest), session)
-        extra["last_frame_path"] = to_media_url(str(dest))
+        from app.db import AsyncSession as session_factory
+
+        dest_key = await adopt_candidate_to_last_frame(
+            session_factory, project_id, shot_id, src_key
+        )
+        # adopt_candidate_to_last_frame committed on ITS OWN session — refresh
+        # the outer `shot` object so the add_all([cand, shot]) commit below
+        # doesn't flush stale in-memory values back over the just-committed row.
+        await session.refresh(shot)
+        extra["last_frame_path"] = to_media_url(dest_key)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown slot: {cand.slot}")
 

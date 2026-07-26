@@ -1710,6 +1710,32 @@ async def _publish_new_last_frame(
     )
 
 
+async def ensure_pre_vc_backup(session_factory, project_id: str, shot_id: int) -> str:
+    """确保 VC 前的原视频已备份。返回备份 key。幂等。
+
+    用 COS 服务端 copy——不产生本地流量，比本地 shutil.copy 还快。已备份
+    （pre_vc_video_key 已设置）时直接返回原备份 key，绝不重复拷贝。
+    """
+    async with session_factory() as s:
+        shot = (await s.execute(
+            select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+        )).scalar_one()
+        if shot.pre_vc_video_key:
+            return shot.pre_vc_video_key
+        src = shot.video_path
+
+    backup_key = shot_key(project_id, shot_id, "output_pre_vc.mp4")
+    await object_store.copy(src, backup_key)
+
+    async with session_factory() as s:
+        shot = (await s.execute(
+            select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
+        )).scalar_one()
+        shot.pre_vc_video_key = backup_key
+        await s.commit()
+    return backup_key
+
+
 @router.post("/projects/{project_id}/shots/{shot_id}/trim")
 async def trim_shot_video(
     project_id: str,
@@ -2119,20 +2145,25 @@ async def character_calibrate_revert(
         raise HTTPException(status_code=400, detail="Shot has not been character-calibrated")
 
     # Revert by pointing last_frame_path back at the pristine (un-calibrated)
-    # last_frame_; drop the calibrated cc_ file. No fixed-name backup.
-    from app.services.storage import pristine_last_frame_path
-    pristine = pristine_last_frame_path(project_id, shot_id)
-    if pristine is not None and shot.last_frame_path != str(pristine):
-        old = Path(shot.last_frame_path) if shot.last_frame_path else None
-        if old and old.name.startswith("cc_"):
-            old.unlink(missing_ok=True)
-        shot.last_frame_path = str(pristine)
-        await _repoint_next_first_frame(project_id, shot_id, str(pristine), session)
+    # last_frame — pristine_last_frame_key is the single source of truth for
+    # this (never a directory scan): CC adopt never touches it (see
+    # adopt_candidate_to_last_frame in app/api/image_candidates.py).
+    pristine_key = shot.pristine_last_frame_key
+    stale_cc_key = None
+    if pristine_key and shot.last_frame_path != pristine_key:
+        old = shot.last_frame_path
+        if old and Path(old).name.startswith("cc_"):
+            stale_cc_key = old
+        shot.last_frame_path = pristine_key
+        await _repoint_next_first_frame(project_id, shot_id, pristine_key, session)
 
     shot.cc_status = None
     shot.cc_error_message = None
     session.add(shot)
     await session.commit()
+    # 素材审计（CLAUDE.md）：先提交 DB 解除引用，再删 COS 上的旧校准帧对象。
+    if stale_cc_key:
+        await object_store.delete(stale_cc_key)
 
     ts = int(datetime.utcnow().timestamp())
     return {
