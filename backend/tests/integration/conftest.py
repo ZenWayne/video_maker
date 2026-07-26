@@ -1,5 +1,6 @@
 """Shared fixtures for backend integration tests."""
 import subprocess
+import tempfile
 import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -162,45 +163,53 @@ async def _add_character_image(sf, project_id):
         return img.id
 
 
-# ── Shared seeding helper (Tasks 5/6/7/8) ─────────────────────────────────────
+# ── Shared seeding helper (Tasks 5/6/7/8/9) ────────────────────────────────────
 
-async def seed_shot_with_source(sf, project_id: str, shot_id: int, frames: int = 120) -> Path:
-    """Create a real source video for an already-inserted shot and update its DB fields.
+async def seed_shot_with_source(sf, project_id: str, shot_id: int, frames: int = 120) -> str:
+    """Synthesize a real source video via ffmpeg, publish it to COS, and update the
+    already-inserted shot row's ``video_path``/``source_fps``/``source_frames``.
 
-    Writes ``output_<ts>_<uuid>.mp4`` into the shot dir (which must already exist
-    under ``settings.storage_root``), then sets ``video_path``, ``source_fps``, and
-    ``source_frames`` on the shot row.  Returns the Path to the written file.
+    Returns the COS **key** the video was published under (COS is the only
+    storage — there is no local "shot dir" anymore). Callers that need to
+    verify byte-for-byte immutability should ``object_store.get`` the key
+    before/after and compare bytes, rather than touching a local Path.
 
-    Reusable by Tasks 6/7/8 integration tests.
+    Requires COS credentials to be warmed — depend on the ``cos_prefix``
+    fixture (which warms them) and gate the test with ``requires_cos`` from
+    ``tests.integration.conftest_cos``.
+
+    Reusable by Tasks 8/9/... integration tests.
     """
-    from app.services.storage import shot_dir, ts_uuid_name
+    from app.services.storage import shot_key, ts_uuid_name
+    from app.services import object_store
     from app.agents.video_trimmer import get_video_info
 
-    s_dir = shot_dir(project_id, shot_id)
-    s_dir.mkdir(parents=True, exist_ok=True)
-    out = s_dir / f"output_{ts_uuid_name('.mp4')}"
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"testsrc2=size=128x128:rate=30",
-            "-f", "lavfi", "-i", "sine=frequency=440",
-            "-frames:v", str(frames),
-            "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac",
-            "-shortest", str(out),
-        ],
-        check=True,
-        capture_output=True,
-    )
-    info = get_video_info(str(out))
+    with tempfile.TemporaryDirectory() as td:
+        local = Path(td) / f"output_{ts_uuid_name('.mp4')}"
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "testsrc2=size=128x128:rate=30",
+                "-f", "lavfi", "-i", "sine=frequency=440",
+                "-frames:v", str(frames),
+                "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac",
+                "-shortest", str(local),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        info = get_video_info(str(local))
+        key = await object_store.put(shot_key(project_id, shot_id, local.name), local)
+
     async with sf() as s:
         shot = (await s.execute(
             select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
         )).scalar_one()
-        shot.video_path = str(out)
+        shot.video_path = key
         shot.source_fps = info["fps"]
         shot.source_frames = info["total_frames"]
         await s.commit()
-    return out
+    return key
 
 
 # ── State fixtures ─────────────────────────────────────────────────────────────

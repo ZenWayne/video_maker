@@ -30,6 +30,7 @@ from app.services.storage import (
     ts_uuid_name,
     shot_key,
 )
+from app.services import object_store
 from app.services.workspace import workspace
 from app.services.events import publish_event
 from app.agents.llm import GeminiProvider
@@ -405,12 +406,14 @@ async def run_shot_pipeline(
             # (None = multi-image reference mode.)
             first_frame = await pick_first_frame(project_id, shot, session)
 
-            # 自愈悬空的自动传播首帧指针：指向的文件已被清理（如上一镜裁剪时删除旧末帧）
+            # 自愈悬空的自动传播首帧指针：指向的对象已被清理（如上一镜裁剪时删除旧末帧）
             # 时，把指针改到本次实际解析出的首帧；用户上传/提取的 custom_frames/ 覆盖永不改动。
+            # custom_first_frame_path 存的是 COS key，"存在" 要问 object_store 而非本地磁盘
+            # ——否则任何合法 key 都会被误判为悬空，用角色参考图静默顶替上一镜尾帧。
             stale_auto_ptr = (
                 shot.custom_first_frame_path
                 and "custom_frames" not in shot.custom_first_frame_path
-                and not Path(shot.custom_first_frame_path).exists()
+                and not await object_store.exists(shot.custom_first_frame_path)
             )
             if stale_auto_ptr:
                 shot.custom_first_frame_path = str(first_frame) if first_frame else None
