@@ -53,6 +53,8 @@ async def download_final(project_id: str):
     后端完全不参与视频流量。
     """
     key = final_video_key(project_id)
+    if not is_valid_key(key):
+        raise HTTPException(status_code=400, detail="Invalid key")
     if not await object_store.exists(key):
         raise HTTPException(status_code=404, detail="Final video not ready")
 

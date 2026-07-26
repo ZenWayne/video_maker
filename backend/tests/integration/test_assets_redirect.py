@@ -13,7 +13,7 @@ from tests.integration.conftest_cos import requires_cos
 from tests.integration.conftest import _make_project, HEADERS
 
 from app.services import object_store
-from app.services.storage import final_video_key
+from app.services.storage import final_video_key, reference_images_prefix
 
 
 @requires_cos
@@ -49,6 +49,36 @@ async def test_final_mp4_redirects_with_attachment_header(
     assert "merged.mp4" in got.headers.get("content-disposition", "")
 
 
+@requires_cos
+async def test_serve_asset_reference_image_redirects_to_fetchable_content(
+    client, db_session_factory, tmp_path, cos_prefix
+):
+    """serve_asset 的正向覆盖：目前只有 download_final 有真实 302->可下载内容
+    的验证，serve_asset 反而是三分支、逻辑更复杂的那个路由，之前完全没有
+    正向测试。种一个真实 reference_images 对象，走 reference_images 分支，
+    跟随 302 真的 GET 到内容——不只断言 URL 字符串形态。
+    """
+    pid = await _make_project(db_session_factory, status="shot_review")
+
+    f = tmp_path / "ref.png"
+    f.write_bytes(b"fake reference image bytes")
+    key = f"{reference_images_prefix(pid)}ref.png"
+    await object_store.put(key, f)
+
+    r = await client.get(
+        f"/api/projects/{pid}/assets/reference_images/ref.png",
+        headers=HEADERS, follow_redirects=False,
+    )
+    assert r.status_code == 302
+    loc = r.headers["location"]
+    assert loc.startswith("http")
+
+    async with httpx.AsyncClient(timeout=30) as c:
+        got = await c.get(loc)
+    assert got.status_code == 200
+    assert got.content == b"fake reference image bytes"
+
+
 async def test_final_mp4_404_when_absent(client, db_session_factory, monkeypatch):
     from app.api import assets as assets_module
 
@@ -64,9 +94,33 @@ async def test_final_mp4_404_when_absent(client, db_session_factory, monkeypatch
 
 
 async def test_asset_route_rejects_traversal(client, db_session_factory):
+    """路径穿越必须在 is_valid_key() 这层被拒，而不是靠路由匹配"碰巧"挡住。
+
+    ``%2F``（编码斜杠）在 ASGI 层会被解成真正的 "/"，导致请求在到达
+    serve_asset 之前就因为路径段数对不上而被 Starlette 路由匹配拒掉——那时
+    拿到的是框架的通用 404（``{"detail":"Not Found"}``），跟 is_valid_key()
+    毫无关系，是一次假阳性覆盖。single-segment 的 ``%2e%2e``（即 ".."）不含
+    斜杠，能正常路由进 serve_asset，Path(file).name 不会剥掉它（Path("..").name
+    == ".."），key 拼出来后必须在 is_valid_key() 里因为含 ".." 分量被拒——
+    这里断言的是 handler 自己返回的 400 + "Invalid key"，用来跟框架 404 区分开。
+    """
     pid = await _make_project(db_session_factory, status="shot_review")
     r = await client.get(
-        f"/api/projects/{pid}/assets/reference_images/..%2F..%2Fsecret.txt",
+        f"/api/projects/{pid}/assets/reference_images/%2e%2e",
         headers=HEADERS, follow_redirects=False,
     )
-    assert r.status_code in (400, 404)
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "Invalid key"
+
+
+async def test_download_final_rejects_traversal_via_project_id(client):
+    """download_final 没有 file/kind 参数，唯一的用户可控输入是 project_id——
+    同样必须走到 is_valid_key() 而不是被路由挡在外面（download_final 之前
+    完全没调 is_valid_key，这个用例专门盯这条路径不回归）。
+    """
+    r = await client.get(
+        "/api/projects/%2e%2e/final.mp4",
+        headers=HEADERS, follow_redirects=False,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "Invalid key"
