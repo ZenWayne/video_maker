@@ -22,11 +22,18 @@ let pid = ''
 
 test.beforeAll(async () => {
   // Real seed: new project (status=shot_review) + shot 1 (status=completed,
-  // real video copied from an existing generated output_*.mp4, real
-  // source_fps/source_frames read via ffprobe) — see
+  // real video COS-copied from an already-generated shot found via the DB,
+  // real source_fps/source_frames read via ffprobe) — see
   // backend/tests/e2e_seed/seed_trim_dual_track.py for the full seed logic.
+  // Credentials must be exported inside the exec'd shell: the container's
+  // own COS_SECRET_ID/KEY are only exported by the entrypoint's `command:`
+  // wrapper (deploy/docker-compose.dev.yml), not inherited by `podman exec`
+  // sessions — mirrors signed-url-expiry.spec.ts's convention.
   const out = execSync(
-    `podman exec video-maker-backend-dev uv run --project /app python /app/tests/e2e_seed/seed_trim_dual_track.py '{}'`,
+    `podman exec video-maker-backend-dev sh -c '` +
+      `export COS_SECRET_ID=$(cat /run/secrets/cos_secret_id) && ` +
+      `export COS_SECRET_KEY=$(cat /run/secrets/cos_secret_key) && ` +
+      `uv run --project /app python /app/tests/e2e_seed/seed_trim_dual_track.py "{}"'`,
     { encoding: 'utf8' }
   ).trim()
   const lines = out.split('\n')
