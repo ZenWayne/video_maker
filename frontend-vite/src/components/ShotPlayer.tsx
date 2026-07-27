@@ -28,7 +28,9 @@ function fmt(t: number): string {
  *  progress bar, time label and seeking are all bounded to it, and playback stops
  *  at the trim point — native <video controls> would show the full source length. */
 export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null, poster, onVideoError }: ShotPlayerProps) {
-  const handleVideoError = useVideoErrorRetry(videoUrl, onVideoError ?? (() => {}))
+  const { onError: handleVideoError, onLoad: handleVideoLoaded } = useVideoErrorRetry(
+    videoUrl, onVideoError ?? (() => {})
+  )
   const hasVc = !!audioUrl
   const [useVc, setUseVc] = useState(true)
   const [audioError, setAudioError] = useState(false)
@@ -42,10 +44,13 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null,
   // former case do we auto-restore useVc; otherwise we'd silently stomp a
   // user's deliberate A/B toggle choice on every unrelated refetch.
   const recoveringAudioRef = useRef(false)
-  const handleAudioErrorRetry = useVideoErrorRetry(audioUrl, useCallback(() => {
-    recoveringAudioRef.current = true
-    return onVideoError?.()
-  }, [onVideoError]))
+  const { onError: handleAudioErrorRetry, onLoad: handleAudioLoaded } = useVideoErrorRetry(
+    audioUrl,
+    useCallback(() => {
+      recoveringAudioRef.current = true
+      return onVideoError?.()
+    }, [onVideoError])
+  )
 
   useEffect(() => {
     if (!recoveringAudioRef.current) return
@@ -126,7 +131,10 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null,
           poster={poster ?? undefined}
           preload="none"
           muted={audioEnabled}
-          onLoadedMetadata={(e) => setFullDuration((e.currentTarget as HTMLVideoElement).duration)}
+          onLoadedMetadata={(e) => {
+            setFullDuration((e.currentTarget as HTMLVideoElement).duration)
+            handleVideoLoaded()
+          }}
           onPlay={() => { onPlay(); setPlaying(true) }}
           onPause={() => { onPause(); setPlaying(false) }}
           onSeeked={onSeeked}
@@ -184,6 +192,7 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null,
             muted={!useVc || audioError}
             preload="auto"
             onError={handleAudioError}
+            onLoadedData={handleAudioLoaded}
           />
           {audioError && (
             <p data-testid="audio-error-msg" className="text-xs text-red-500 mt-1">

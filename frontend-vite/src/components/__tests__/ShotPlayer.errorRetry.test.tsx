@@ -36,7 +36,10 @@ describe('ShotPlayer video error retry', () => {
     expect(onVideoError).toHaveBeenCalledTimes(1)
   })
 
-  it('retries again after videoUrl changes (freshly-signed URL arrives)', () => {
+  it('does NOT retry again merely because videoUrl changes, with no successful load in between', () => {
+    // q-sign-time regenerates on every signing, so a still-broken video gets
+    // a freshly-signed (different) url on every refetch too — url identity
+    // alone can't distinguish "recovered" from "still broken".
     const onVideoError = vi.fn()
     const { container, rerender } = render(
       <ShotPlayer videoUrl="/v.mp4?sig=1" trimEndSec={null} audioUrl={null} onVideoError={onVideoError} />
@@ -50,6 +53,25 @@ describe('ShotPlayer video error retry', () => {
     )
     video = container.querySelector('video') as HTMLVideoElement
     fireEvent.error(video)
+
+    expect(onVideoError).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries again after a genuine successful load (onLoadedMetadata) resets the budget', () => {
+    const onVideoError = vi.fn()
+    const { container, rerender } = render(
+      <ShotPlayer videoUrl="/v.mp4?sig=1" trimEndSec={null} audioUrl={null} onVideoError={onVideoError} />
+    )
+    let video = container.querySelector('video') as HTMLVideoElement
+    fireEvent.error(video)
+    expect(onVideoError).toHaveBeenCalledTimes(1)
+
+    rerender(
+      <ShotPlayer videoUrl="/v.mp4?sig=2" trimEndSec={null} audioUrl={null} onVideoError={onVideoError} />
+    )
+    video = container.querySelector('video') as HTMLVideoElement
+    fireEvent.loadedMetadata(video) // the freshly-signed url actually loaded
+    fireEvent.error(video) // a later, genuine new expiry
 
     expect(onVideoError).toHaveBeenCalledTimes(2)
   })

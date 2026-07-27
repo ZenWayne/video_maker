@@ -94,7 +94,12 @@ describe('ShotPlayer audio error retry', () => {
     expect(video.muted).toBe(false) // still respects the user's manual choice
   })
 
-  it('retries again after a second real failure on the newly-recovered audioUrl (own budget per url)', () => {
+  it('does NOT retry again when the newly-signed audioUrl fails immediately too, with no successful load in between', () => {
+    // q-sign-time regenerates on every signing, so a still-broken audio
+    // object gets a freshly-signed (different) url on every refetch too —
+    // url identity alone can't distinguish "recovered" from "still broken".
+    // This is the I1 regression: the old code reset the attempt flag purely
+    // because audioUrl changed, so this scenario retried forever.
     const onVideoError = vi.fn()
     const { container, rerender } = render(
       <ShotPlayer videoUrl="/v.mp4" trimEndSec={2} audioUrl="/a.wav?sig=1" onVideoError={onVideoError} />
@@ -107,10 +112,29 @@ describe('ShotPlayer audio error retry', () => {
       <ShotPlayer videoUrl="/v.mp4" trimEndSec={2} audioUrl="/a.wav?sig=2" onVideoError={onVideoError} />
     )
     audio = container.querySelector('audio') as HTMLAudioElement
-    fireEvent.error(audio) // genuinely broken this time too
+    fireEvent.error(audio) // genuinely broken this time too, no load in between
 
-    expect(onVideoError).toHaveBeenCalledTimes(2)
+    expect(onVideoError).toHaveBeenCalledTimes(1)
     const video = container.querySelector('video') as HTMLVideoElement
     expect(video.muted).toBe(false) // fell back again
+  })
+
+  it('retries again after the recovered audioUrl actually loads (onLoadedData) and later genuinely fails again', () => {
+    const onVideoError = vi.fn()
+    const { container, rerender } = render(
+      <ShotPlayer videoUrl="/v.mp4" trimEndSec={2} audioUrl="/a.wav?sig=1" onVideoError={onVideoError} />
+    )
+    let audio = container.querySelector('audio') as HTMLAudioElement
+    fireEvent.error(audio)
+    expect(onVideoError).toHaveBeenCalledTimes(1)
+
+    rerender(
+      <ShotPlayer videoUrl="/v.mp4" trimEndSec={2} audioUrl="/a.wav?sig=2" onVideoError={onVideoError} />
+    )
+    audio = container.querySelector('audio') as HTMLAudioElement
+    fireEvent.loadedData(audio) // the freshly-signed url actually played
+    fireEvent.error(audio) // a later, genuine new expiry
+
+    expect(onVideoError).toHaveBeenCalledTimes(2)
   })
 })

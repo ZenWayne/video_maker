@@ -19,9 +19,6 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://redis:6379"
 
-    # Storage
-    storage_root: str = "./storage"
-
     # Database (3 slashes for relative path)
     database_url: str = "sqlite+aiosqlite:///./metadata.db"
 

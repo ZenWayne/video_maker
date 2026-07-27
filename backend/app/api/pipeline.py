@@ -714,15 +714,28 @@ async def rewrite_motion_prompt(
 
     try:
         async with observability.project_context(project_id, "api-rewrite-motion"):
-            new_prompt = await run_director_agent(
-                shot_id=shot_id,
-                shot_type=shot_type,
-                visual_description=visual_description,
-                text=text,
-                duration=duration,
-                llm_provider=provider,
-                reference_image_paths=object_ref_paths,
-            )
+            # object_ref_paths holds COS keys — director.run_director does
+            # Path(p).exists() (always False for a key), so they must be
+            # fetched into a local workspace before the LLM call (C2).
+            async with workspace() as ref_ws:
+                local_obj_refs: list[str] = []
+                for i, k in enumerate(object_ref_paths or []):
+                    if not k or not await object_store.exists(k):
+                        continue
+                    p = await ref_ws.fetch(
+                        k, name=f"objref_{i}{Path(k).suffix or '.png'}"
+                    )
+                    local_obj_refs.append(str(p))
+
+                new_prompt = await run_director_agent(
+                    shot_id=shot_id,
+                    shot_type=shot_type,
+                    visual_description=visual_description,
+                    text=text,
+                    duration=duration,
+                    llm_provider=provider,
+                    reference_image_paths=local_obj_refs or None,
+                )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Director agent failed: {e}")
 

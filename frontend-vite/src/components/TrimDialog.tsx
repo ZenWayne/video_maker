@@ -177,7 +177,7 @@ export function TrimDialog({
     }
   }, [projectId, shot.shot_id])
 
-  const handleVideoError = useVideoErrorRetry(
+  const { onError: handleVideoError, onLoad: handleVideoLoaded } = useVideoErrorRetry(
     sourceVideoUrl ?? shot.video_path ?? null,
     refreshSourceUrl
   )
@@ -355,7 +355,10 @@ export function TrimDialog({
                 src={sourceVideoUrl ?? shot.video_path ?? undefined}
                 preload="auto"
                 className="max-w-full max-h-full object-contain"
-                onLoadedMetadata={() => seekToFrame(endFrame)}
+                onLoadedMetadata={() => {
+                  seekToFrame(endFrame)
+                  handleVideoLoaded()
+                }}
                 onEnded={stopPreview}
                 onError={handleVideoError}
               />

@@ -82,7 +82,7 @@ async def redis():
 
 
 @pytest.fixture
-async def client(db_engine, db_session_factory, redis, monkeypatch, tmp_path):
+async def client(db_engine, db_session_factory, redis, monkeypatch):
     # Import app.main first so all routers are fully loaded before we access submodules
     from app.main import app, get_redis
     from app.db import get_session
@@ -90,14 +90,10 @@ async def client(db_engine, db_session_factory, redis, monkeypatch, tmp_path):
     import app.api.stream as stream_module
     import app.api.pipeline as pipeline_module
     import app.api.voice as voice_module
-    from app.config import settings
 
     # Override DB session factory everywhere
     monkeypatch.setattr(db_module, "AsyncSession", db_session_factory)
     monkeypatch.setattr(stream_module, "session_factory", db_session_factory)
-
-    # Override storage root so file ops use tmp_path
-    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
 
     # Mock ARQ to prevent actual job execution (would trigger LLM calls)
     arq = MagicMock()

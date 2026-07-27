@@ -24,7 +24,6 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from app.models.project import Project, Shot, ProjectStatus, ShotStatus
-from app.config import settings
 import worker.tasks as tasks
 
 PROJECT_ID = "proj-cfp-priority"
@@ -111,8 +110,7 @@ async def _seed_db(
 
 
 def _run_ctx(monkeypatch, tmp_path):
-    """Common monkeypatching: real storage root, mocked provider + billed model call."""
-    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    """Common monkeypatching: mocked provider + billed model call."""
     fake_provider = MagicMock()
     fake_provider.client = None
     monkeypatch.setattr(tasks, "get_provider", lambda: fake_provider)

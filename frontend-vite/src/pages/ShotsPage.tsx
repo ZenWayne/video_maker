@@ -32,7 +32,6 @@ import {
 } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/state'
-import { versionShotMedia } from '@/lib/media'
 import { useVideoErrorRetry } from '../hooks/useVideoErrorRetry'
 import type { ProjectDetail, ProjectStatus, ReferenceImage, Shot } from '@/lib/types'
 
@@ -109,7 +108,7 @@ export default function ShotsPage() {
       setCurrentProject(project)
       setStatus(project.status as ProjectStatus)
       setSceneOverview(project.scene_overview || '')
-      setShots((project.shots || []).map(versionShotMedia))
+      setShots(project.shots || [])
       setReferenceVoiceShotId(project.reference_voice_shot_id ?? null)
       setReferenceVoicePath(project.reference_voice_path ?? null)
       setAutoVoiceCalibrate(project.auto_voice_calibrate ?? false)
@@ -233,7 +232,8 @@ export default function ShotsPage() {
     }
   }, [projectId, joinPreviewShotIds])
 
-  const handleJoinPreviewVideoError = useVideoErrorRetry(joinPreviewUrl, refreshJoinPreview)
+  const { onError: handleJoinPreviewVideoError, onLoad: handleJoinPreviewVideoLoaded } =
+    useVideoErrorRetry(joinPreviewUrl, refreshJoinPreview)
 
   // 重新生成选中的 shots
   const handleRegenerate = async () => {
@@ -457,7 +457,7 @@ export default function ShotsPage() {
     if (!projectId) return
     try {
       const result = await api.voiceRevert(projectId, shotId)
-      updateShot(shotId, { vc_status: null, vc_error_message: null, video_path: `${result.video_path}?v=${result.version}` })
+      updateShot(shotId, { vc_status: null, vc_error_message: null, video_path: result.video_path })
       addToast({ type: 'success', message: '已还原原始音色' })
     } catch (error) {
       addToast({
@@ -547,7 +547,7 @@ export default function ShotsPage() {
     if (!projectId) return
     try {
       const result = await api.characterCalibrateRevert(projectId, shotId)
-      updateShot(shotId, { cc_status: null, cc_error_message: null, last_frame_path: `${result.last_frame_path}?v=${result.version}` })
+      updateShot(shotId, { cc_status: null, cc_error_message: null, last_frame_path: result.last_frame_path })
       addToast({ type: 'success', message: '已还原末帧' })
     } catch (error) {
       addToast({
@@ -1095,6 +1095,7 @@ export default function ShotsPage() {
               controls
               autoPlay
               onError={handleJoinPreviewVideoError}
+              onLoadedMetadata={handleJoinPreviewVideoLoaded}
               className="w-full rounded"
             />
           </div>

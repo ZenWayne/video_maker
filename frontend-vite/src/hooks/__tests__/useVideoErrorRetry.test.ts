@@ -8,41 +8,64 @@ describe('useVideoErrorRetry', () => {
     const refetch = vi.fn()
     const { result } = renderHook(() => useVideoErrorRetry('https://cos.example/a.mp4?sig=1', refetch))
 
-    act(() => result.current())
+    act(() => result.current.onError())
 
     expect(refetch).toHaveBeenCalledTimes(1)
   })
 
-  it('does NOT retry a second time for the same URL (avoids infinite loop on genuinely broken media)', () => {
+  it('does NOT retry a second time without an intervening successful load', () => {
     const refetch = vi.fn()
     const { result } = renderHook(() => useVideoErrorRetry('https://cos.example/a.mp4?sig=1', refetch))
 
-    act(() => result.current())
-    act(() => result.current())
-    act(() => result.current())
+    act(() => result.current.onError())
+    act(() => result.current.onError())
+    act(() => result.current.onError())
 
     expect(refetch).toHaveBeenCalledTimes(1)
   })
 
-  it('resets the retry flag once the url changes, allowing the next expiry to be rescued too', () => {
+  // Regression test for I1: q-sign-time regenerates on every signing, so a
+  // refetch NEVER returns the same url string — not even for media that is
+  // genuinely, permanently broken. The old implementation reset the "already
+  // attempted" flag on url identity change alone, which made every refetch
+  // look like a fresh chance and turned a permanently-broken file into an
+  // unbounded error -> refetch -> error loop (an expensive server-side
+  // ffmpeg re-merge for the join-preview caller). This must fail if someone
+  // reintroduces a url-keyed reset.
+  it('does NOT reset merely because the url changes, with no successful load in between', () => {
     const refetch = vi.fn()
     const { result, rerender } = renderHook(
       ({ url }) => useVideoErrorRetry(url, refetch),
       { initialProps: { url: 'https://cos.example/a.mp4?sig=1' } }
     )
 
-    act(() => result.current())
+    act(() => result.current.onError())
     expect(refetch).toHaveBeenCalledTimes(1)
 
-    // A second error on the SAME (still-stale) url must not retry again.
-    act(() => result.current())
-    expect(refetch).toHaveBeenCalledTimes(1)
-
-    // Freshly-signed URL arrives (e.g. refetch resolved and updated the prop).
+    // A freshly-signed url arrives (as it always does on refetch), but the
+    // media never actually loaded successfully — still broken.
     rerender({ url: 'https://cos.example/a.mp4?sig=2' })
+    act(() => result.current.onError())
 
-    // A later expiry on the NEW url can be rescued once more.
-    act(() => result.current())
+    expect(refetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('resets the retry budget once onLoad fires (genuine recovery), allowing a later genuine expiry to be rescued too', () => {
+    const refetch = vi.fn()
+    const { result, rerender } = renderHook(
+      ({ url }) => useVideoErrorRetry(url, refetch),
+      { initialProps: { url: 'https://cos.example/a.mp4?sig=1' } }
+    )
+
+    act(() => result.current.onError())
+    expect(refetch).toHaveBeenCalledTimes(1)
+
+    // Freshly-signed url arrives AND the media actually loads this time —
+    // caller wires this to onLoadedMetadata/onLoadedData/onCanPlay.
+    rerender({ url: 'https://cos.example/a.mp4?sig=2' })
+    act(() => result.current.onLoad())
+
+    act(() => result.current.onError())
     expect(refetch).toHaveBeenCalledTimes(2)
   })
 
@@ -50,7 +73,7 @@ describe('useVideoErrorRetry', () => {
     const refetch = vi.fn()
     const { result } = renderHook(() => useVideoErrorRetry(null, refetch))
 
-    act(() => result.current())
+    act(() => result.current.onError())
 
     expect(refetch).not.toHaveBeenCalled()
   })

@@ -31,7 +31,7 @@ from app.services.storage import (
     shot_key,
 )
 from app.services import object_store
-from app.services.workspace import workspace, ensure_free_space
+from app.services.workspace import workspace, ensure_free_space, Workspace
 from app.services.storyboard import write_storyboard
 from app.services.events import publish_event
 from app.agents.llm import GeminiProvider
@@ -210,36 +210,44 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
         )
         ref_images = ref_result.scalars().all()
 
-        reference_images_data = []
-        for img in ref_images:
-            path = Path(img.storage_path)
-            if path.exists():
+        # img.storage_path is a COS key — Path(key).exists() is always False,
+        # so it must be fetched into a local workspace before the LLM call
+        # (see C2: this used to silently drop every reference image).
+        async with workspace() as ref_ws:
+            reference_images_data = []
+            for i, img in enumerate(ref_images):
+                if not await object_store.exists(img.storage_path):
+                    continue
+                local = await ref_ws.fetch(
+                    img.storage_path,
+                    name=f"ref_{i}{Path(img.storage_path).suffix or '.png'}",
+                )
                 reference_images_data.append(
                     {
                         "kind": img.kind,
-                        "path": str(path),
+                        "path": str(local),
                         "filename": img.filename,
                     }
                 )
 
-        # Run screenwriter
-        provider = get_provider()
+            # Run screenwriter
+            provider = get_provider()
 
-        try:
-            storyboard_result = await run_screenwriter_agent(
-                theme_text=project.theme_text,
-                reference_images=reference_images_data,
-                llm_provider=provider,
-                aspect_ratio=project.aspect_ratio,
-            )
-        except Exception as e:
-            logger.error(f"Screenwriter failed: {e}")
-            project.error_message = str(e)
-            session.add(project)
-            await transition_project_status(
-                project, ProjectStatus.FAILED, "system:worker", session, redis
-            )
-            return
+            try:
+                storyboard_result = await run_screenwriter_agent(
+                    theme_text=project.theme_text,
+                    reference_images=reference_images_data,
+                    llm_provider=provider,
+                    aspect_ratio=project.aspect_ratio,
+                )
+            except Exception as e:
+                logger.error(f"Screenwriter failed: {e}")
+                project.error_message = str(e)
+                session.add(project)
+                await transition_project_status(
+                    project, ProjectStatus.FAILED, "system:worker", session, redis
+                )
+                return
 
         # Write storyboard.json
         sb_key = await write_storyboard(
@@ -385,18 +393,26 @@ async def run_shot_pipeline(
                 session.add(shot)
                 await session.commit()
 
-                motion_prompt = await run_director_agent(
-                    shot_id=shot.shot_id,
-                    shot_type=shot.shot_type,
-                    visual_description=shot.visual_description,
-                    text=shot.text,
-                    duration=shot.shot_duration,
-                    llm_provider=provider,
-                    reference_image_paths=(
-                        json.loads(shot.custom_reference_paths)
-                        if shot.custom_reference_paths else None
-                    ),
+                # shot.custom_reference_paths holds COS keys — director.run_director
+                # does Path(p).exists() (always False for a key), so they must be
+                # fetched into a local workspace first (C2).
+                obj_ref_keys = (
+                    json.loads(shot.custom_reference_paths)
+                    if shot.custom_reference_paths else None
                 )
+                async with workspace() as ref_ws:
+                    local_obj_refs = await _fetch_existing_refs(
+                        ref_ws, obj_ref_keys, "objref"
+                    )
+                    motion_prompt = await run_director_agent(
+                        shot_id=shot.shot_id,
+                        shot_type=shot.shot_type,
+                        visual_description=shot.visual_description,
+                        text=shot.text,
+                        duration=shot.shot_duration,
+                        llm_provider=provider,
+                        reference_image_paths=local_obj_refs or None,
+                    )
 
                 # Refresh shot from DB to pick up any reference images
                 # uploaded after the worker loaded the shot list. This must come
@@ -666,6 +682,28 @@ async def _get_character_ref_paths(
     return [r.storage_path for r in refs if await object_store.exists(r.storage_path)]
 
 
+async def _fetch_existing_refs(
+    ws: Workspace, keys: Optional[list[str]], label: str
+) -> list[str]:
+    """Fetch each still-existing COS key into ``ws``, skip stale/missing ones.
+
+    LLM providers (app.agents.llm._build_contents / director.run_director) only
+    accept real filesystem paths — they do a bare ``Path(p).exists()`` check
+    that is unconditionally False for a COS key, so passing keys straight
+    through silently drops every reference image with no error and no log
+    (see the C2 finding this fixes). Mirrors _get_character_ref_paths'
+    existence filtering but also materializes local files, since the LLM call
+    needs bytes on disk, not just a truthy key.
+    """
+    out: list[str] = []
+    for i, k in enumerate(keys or []):
+        if not k or not await object_store.exists(k):
+            continue
+        p = await ws.fetch(k, name=f"{label}_{i}{Path(k).suffix or '.png'}")
+        out.append(str(p))
+    return out
+
+
 async def _resolve_ff_context(shot: Shot) -> str | None:
     """first_frame/custom-first 的 context 帧：目标尾帧 → 实际尾帧 → 无。"""
     ctx = await resolve_tail_frame(shot.target_last_frame_path)
@@ -786,7 +824,10 @@ async def run_image_candidate(
                             text=shot.text,
                             duration=shot.shot_duration,
                             llm_provider=get_provider(),
-                            reference_image_paths=obj_refs,
+                            # local_obj_refs (fetched into ws above) — obj_refs
+                            # itself is a list of COS keys and would be silently
+                            # dropped by director.run_director's Path.exists() (C2).
+                            reference_image_paths=local_obj_refs,
                         )
                         shot.motion_prompt = motion_prompt
                         session.add(shot)
