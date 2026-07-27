@@ -7,6 +7,13 @@ from sqlalchemy.pool import StaticPool
 
 from app.models.project import Base, Project, Shot
 
+# conftest_cos.py (under tests/integration/) defines the cos_prefix fixture used
+# by COS-backed MCP tests. Re-export it here for the same reason
+# tests/integration/conftest.py does — pytest doesn't auto-discover a
+# non-conftest.py module, and a non-top-level conftest can't use pytest_plugins.
+from tests.integration.conftest_cos import cos_prefix  # noqa: F401
+from tests.integration.conftest import install_fake_cos_credentials  # noqa: F401
+
 USER = "mcp-agent"
 
 
@@ -29,18 +36,16 @@ async def db_session_factory(db_engine):
 
 
 @pytest.fixture
-async def http_client(db_engine, db_session_factory, monkeypatch, tmp_path):
+async def http_client(db_engine, db_session_factory, monkeypatch):
     from app.main import app, get_redis
     from app.db import get_session
     import app.db as db_module
     import app.api.stream as stream_module
     import app.api.pipeline as pipeline_module
     import app.api.voice as voice_module
-    from app.config import settings
 
     monkeypatch.setattr(db_module, "AsyncSession", db_session_factory)
     monkeypatch.setattr(stream_module, "session_factory", db_session_factory)
-    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
 
     arq = MagicMock()
     arq.enqueue_job = AsyncMock(return_value=None)

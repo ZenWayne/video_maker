@@ -2,26 +2,40 @@
 """Seed a fresh, isolated project + completed shot 1 with a REAL video for the
 TrimDialog dual-track e2e (frontend-vite/e2e/trim-dual-track.spec.ts).
 
-Runs INSIDE the backend container (real DB, real storage volumes):
+Runs INSIDE the backend container (real DB, real COS bucket):
 
     podman exec video-maker-backend-dev uv run --project /app \\
         python /app/tests/e2e_seed/seed_trim_dual_track.py '{}'
 
-Optionally pass `{"source_video": "/app/storage/projects/.../output_....mp4"}`
-(an absolute path INSIDE the container) to pin a specific source clip; when
-omitted, the script discovers any already-generated `output_*.mp4` under the
-shared storage volume itself (no hardcoded project id / path — mirrors the
-dynamic-discovery approach in tests/e2e/nondestructive-real.spec.ts) and copies
-that — no model call, no billing.
+Optionally pass {"source_video_key": "projects/<pid>/shots/shot_<n>/output_....mp4"}
+(a real COS key, not a local path — there is no local storage anymore) to pin
+a specific source clip.
 
-Real fps/frame-count are read via ffprobe (get_video_info), the same helper the
-trim endpoint itself uses, so the seeded source_fps/source_frames are accurate.
+When omitted, the script discovers a real already-generated video via the DB
+(``Shot.video_path IS NOT NULL``, most-recently-updated first) rather than by
+scanning the object store. This is a deliberate design choice, not a literal
+port of the pre-COS version (which used to glob the local storage_root — see
+git history): that version's local directory scan worked by coincidence,
+because a local filesystem doubles as a free, always-current index of "which
+files exist". COS has no equivalent cheap operation — the closest analog,
+``object_store.list_prefix``, would mean listing the WHOLE bucket (unbounded,
+paginated at 1000 keys/page, plus a HEAD call per candidate to check size)
+every single e2e run, since this script deliberately doesn't know which
+project/shot to look under ahead of time. The DB already tracks exactly which
+shots have a real, completed video — querying it (an O(1) indexed lookup) is
+the object-store-native replacement for what used to be a directory glob, not
+a scan.
+
+No model call, no billing — the discovered video is COS-server-side-copied
+(object_store.copy, zero local byte traffic) into the new shot's key. The only
+local I/O is a one-time fetch of the freshly-copied video to read real
+fps/frame-count via ffprobe (get_video_info, the same helper the trim endpoint
+itself uses), so the seeded source_fps/source_frames are accurate.
 
 Prints the new project_id on the last line of stdout.
 """
 import asyncio
 import json
-import shutil
 import sys
 import uuid
 from datetime import datetime
@@ -32,67 +46,108 @@ from pathlib import Path
 # so `app.*` imports resolve regardless of invocation cwd.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from app.config import settings
+from sqlalchemy import desc, select
+
 from app.db import AsyncSession, init_db
 from app.models.project import Project, Shot
-from app.services.storage import ensure_project_dirs, ensure_shot_dir, shot_dir, ts_uuid_name
+from app.services import cos_client, object_store
+from app.services.storage import shot_key, ts_uuid_name
+from app.services.workspace import workspace
+
+# Skip tiny placeholder stubs written by other seed scripts (e.g.
+# seed_shot_review.py writes 100-byte stand-ins) — the waveform/filmstrip
+# tracks need a genuine multi-second clip with real audio to render.
+MIN_REAL_VIDEO_BYTES = 50_000
+
+# How many most-recently-updated shots (that have a video_path at all) to
+# probe before giving up. The DB query itself is a single indexed SELECT;
+# this only bounds how many object_store existence/size checks we're willing
+# to make against DB rows that might point at stale/missing COS objects.
+CANDIDATE_BATCH = 50
 
 
-def find_real_source_video() -> Path:
-    """Locate any already-generated `output_*.mp4` in the shared storage volume.
+async def _find_real_source(session) -> tuple[str, str | None]:
+    """Return (video_key, last_frame_key_or_None) for a real, already-generated
+    shot video — discovered via the DB (the authoritative record of which
+    shots have a real video), not by scanning the object store.
 
-    Skips tiny placeholder files written by other seed scripts (e.g.
-    seed_shot_review.py writes 100-byte stubs) so we copy a genuine multi-second
-    clip with real audio — required for the waveform/filmstrip tracks to render.
+    DB rows can point at objects that no longer exist in COS (e.g. a stale
+    row from a project whose delete's COS cleanup partially failed — see
+    object_store.delete_prefix's docstring on "sooner leave an orphan object
+    than lie about success" — or just old local dev data). Each candidate is
+    therefore verified with a real object_store.exists() + size() call before
+    being trusted; the first one that checks out wins.
     """
-    root = Path(settings.storage_root) / "projects"
-    candidates = [
-        p for p in root.glob("*/shots/shot_*/output_*.mp4")
-        if p.is_file() and p.stat().st_size > 50_000
-    ]
-    if not candidates:
-        raise FileNotFoundError(
-            "No real output_*.mp4 (>50KB) found under storage/projects to seed from"
-        )
-    # Prefer the largest — most likely a genuine generated clip, not a stub.
-    candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
-    return candidates[0]
+    result = await session.execute(
+        select(Shot)
+        .where(Shot.video_path.isnot(None))
+        .order_by(desc(Shot.updated_at))
+        .limit(CANDIDATE_BATCH)
+    )
+    candidates = result.scalars().all()
+
+    checked = 0
+    for shot in candidates:
+        checked += 1
+        key = shot.video_path
+        if not await object_store.exists(key):
+            continue
+        try:
+            size = await object_store.size(key)
+        except FileNotFoundError:
+            continue
+        if size < MIN_REAL_VIDEO_BYTES:
+            continue
+        return key, shot.last_frame_path
+
+    raise RuntimeError(
+        f"没有可用的已生成视频可复用（检查了最近 {checked} 个带 video_path 的分镜，"
+        "全部缺失于 COS / 是占位桩 / 小于 50KB）。请先在任意项目里真实生成至少一个"
+        "分镜（例如用 video-maker-dialogue MCP 的 start_generation，或直接在前端"
+        "走一遍生成），再重新运行本脚本；也可以显式传 "
+        '{"source_video_key": "projects/<pid>/shots/shot_<n>/output_....mp4"} '
+        "指定一个你已知存在的真实视频 key，跳过自动发现。"
+    )
 
 
 async def main(args: dict) -> None:
     await init_db()
+    await cos_client.warm_credentials()
 
-    source_video = Path(args["source_video"]) if args.get("source_video") else find_real_source_video()
-    if not source_video.exists():
-        raise FileNotFoundError(f"source_video not found: {source_video}")
-
-    from app.agents.video_trimmer import get_video_info
+    async with AsyncSession() as session:
+        if args.get("source_video_key"):
+            source_key = args["source_video_key"]
+            if not await object_store.exists(source_key):
+                raise FileNotFoundError(f"source_video_key not found in COS: {source_key}")
+            source_last_frame_key = None
+        else:
+            source_key, source_last_frame_key = await _find_real_source(session)
 
     project_id = str(uuid.uuid4())
     now = datetime.utcnow()
 
-    ensure_project_dirs(project_id)
-    ensure_shot_dir(project_id, 1)
-    s_dir = shot_dir(project_id, 1)
+    # COS server-side copy — zero local byte traffic for the video itself.
+    dest_video_key = shot_key(project_id, 1, f"output_{ts_uuid_name('.mp4')}")
+    await object_store.copy(source_key, dest_video_key)
 
-    # Copy the real, already-generated video into the new isolated shot dir,
-    # keeping the `output_*.mp4` naming so shot_source_path()'s glob finds it.
-    dest_video = s_dir / f"output_{ts_uuid_name('.mp4')}"
-    shutil.copyfile(source_video, dest_video)
+    # Best-effort: carry over the source shot's last_frame too (purely
+    # cosmetic — the shot card thumbnail — not load-bearing for the trim
+    # dialog itself, which re-derives everything from the video).
+    dest_frame_key = None
+    if source_last_frame_key and await object_store.exists(source_last_frame_key):
+        suffix = Path(source_last_frame_key).suffix or ".png"
+        dest_frame_key = shot_key(project_id, 1, f"last_frame_{ts_uuid_name(suffix)}")
+        await object_store.copy(source_last_frame_key, dest_frame_key)
 
-    info = get_video_info(str(dest_video))
+    # One-time local fetch purely to read real fps/frame-count via ffprobe —
+    # the same get_video_info helper the trim endpoint itself uses.
+    from app.agents.video_trimmer import get_video_info
+
+    async with workspace() as ws:
+        local_video = await ws.fetch(dest_video_key, name="source.mp4")
+        info = get_video_info(str(local_video))
     fps = info["fps"]
     total_frames = info["total_frames"]
-
-    # Best-effort: copy a matching last_frame if one sits next to the source
-    # video (purely cosmetic — the shot card thumbnail — not load-bearing for
-    # the trim dialog itself, which re-derives everything from the video).
-    last_frame_path = None
-    sibling_frames = sorted(source_video.parent.glob("last_frame_*.png"))
-    if sibling_frames:
-        dest_frame = s_dir / f"last_frame_{ts_uuid_name('.png')}"
-        shutil.copyfile(sibling_frames[-1], dest_frame)
-        last_frame_path = str(dest_frame)
 
     async with AsyncSession() as session:
         project = Project(
@@ -117,8 +172,8 @@ async def main(args: dict) -> None:
             shot_duration=6,
             align_with_previous=False,
             status="completed",
-            video_path=str(dest_video),
-            last_frame_path=last_frame_path,
+            video_path=dest_video_key,
+            last_frame_path=dest_frame_key,
             word_count_warning=False,
             source_fps=fps,
             source_frames=total_frames,

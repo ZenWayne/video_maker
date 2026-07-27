@@ -1,48 +1,52 @@
-"""Integration tests for non-destructive align-tail-frame endpoint.
+"""Integration tests for non-destructive align-tail-frame endpoint (real COS).
 
 POST /api/projects/{pid}/shots/{sid}/align-tail-frame must:
   - set shot.trim_frames in the DB (metadata only)
-  - leave the source output_*.mp4 byte-identical (never modified)
-  - NOT create any trimmed_*.mp4 file
+  - leave the source video object byte-identical in COS (never modified)
   - refresh last_frame and reset CC state
   - return aligned_to_frame == the mocked best frame value
 """
-import hashlib
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
+from sqlalchemy import select
 
-from .conftest import HEADERS, _make_project, _add_shot, seed_shot_with_source
+from tests.integration.conftest_cos import requires_cos
+from tests.integration.conftest import HEADERS, _make_project, _add_shot, seed_shot_with_source
+from app.models.project import Shot
+from app.services import object_store
+from app.services.storage import shot_key
+
+pytestmark = requires_cos
 
 
-def _md5(p: Path) -> str:
-    return hashlib.md5(p.read_bytes()).hexdigest()
+async def _seed_target_frame(pid: str, shot_id: int, tmp_path) -> str:
+    key = shot_key(pid, shot_id, "target_last_frame.png")
+    f = tmp_path / "target.png"
+    f.write_bytes(b"fake-target-frame")
+    await object_store.put(key, f)
+    return key
 
 
-@pytest.mark.asyncio
-async def test_align_tail_frame_metadata_only_no_trimmed_file(
-    client, db_session_factory
+async def test_align_tail_frame_metadata_only(
+    client, db_session_factory, cos_prefix, tmp_path
 ):
-    """align-tail-frame should only update trim_frames in DB; source file must be unchanged
-    and no trimmed_*.mp4 should appear in the shot directory."""
+    """align-tail-frame should only update trim_frames in DB; source object must
+    stay byte-identical in COS."""
     pid = await _make_project(db_session_factory, status="completed")
     await _add_shot(db_session_factory, pid, shot_id=1, status="completed")
-    source = await seed_shot_with_source(db_session_factory, pid, 1)
+    source_key = await seed_shot_with_source(db_session_factory, pid, 1)
+    target_key = await _seed_target_frame(pid, 1, tmp_path)
 
-    # Set a target_last_frame_path so the endpoint proceeds
-    target_lf = source.parent / "target_last_frame.png"
-    target_lf.write_bytes(b"fake-target-frame")
-    from sqlalchemy import select
-    from app.models.project import Shot
     async with db_session_factory() as s:
         shot = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
-        shot.target_last_frame_path = str(target_lf)
+        shot.target_last_frame_path = target_key
         await s.commit()
 
-    before_md5 = _md5(source)
+    before = tmp_path / "before.mp4"
+    await object_store.get(source_key, before)
+    before_bytes = before.read_bytes()
 
     with patch("app.agents.video_trimmer.find_best_tail_frame", return_value=40):
         r = await client.post(
@@ -55,36 +59,31 @@ async def test_align_tail_frame_metadata_only_no_trimmed_file(
     assert body["trim_frames"] == 40
     assert body["aligned_to_frame"] == 40
 
-    # Source video must be byte-identical
-    assert _md5(source) == before_md5, "Source file was mutated — must be immutable"
-
-    # No trimmed_ files must have been created
-    assert not list(source.parent.glob("trimmed_*.mp4")), \
-        "trimmed_*.mp4 was created — endpoint must be non-destructive"
+    after = tmp_path / "after.mp4"
+    await object_store.get(source_key, after)
+    assert after.read_bytes() == before_bytes, "Source object was mutated — must be immutable"
 
 
-@pytest.mark.asyncio
-async def test_align_tail_frame_resets_cc(client, db_session_factory):
-    """align-tail-frame must clear cc_status and write a new last_frame_*.png."""
-    from sqlalchemy import select
-    from app.models.project import Shot
-
+async def test_align_tail_frame_resets_cc(client, db_session_factory, cos_prefix, tmp_path):
+    """align-tail-frame must clear cc_status, clear pre_cc_last_frame_key (+ delete
+    the backup object), and publish a new last_frame object."""
     pid = await _make_project(db_session_factory, status="completed")
     await _add_shot(db_session_factory, pid, shot_id=1, status="completed")
-    source = await seed_shot_with_source(db_session_factory, pid, 1)
+    await seed_shot_with_source(db_session_factory, pid, 1)
+    target_key = await _seed_target_frame(pid, 1, tmp_path)
 
-    # Set target_last_frame_path and simulate a prior CC run
-    target_lf = source.parent / "target_last_frame.png"
-    target_lf.write_bytes(b"fake")
-    pre_cc = source.parent / "last_frame_pre_cc.png"
-    pre_cc.write_bytes(b"fake-pre-cc")
+    pre_cc_key = f"projects/{pid}/shots/shot_1/last_frame_pre_cc.png"
+    f = tmp_path / "pre_cc.png"
+    f.write_bytes(b"fake-pre-cc")
+    await object_store.put(pre_cc_key, f)
 
     async with db_session_factory() as s:
         shot = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
-        shot.target_last_frame_path = str(target_lf)
+        shot.target_last_frame_path = target_key
         shot.cc_status = "done"
+        shot.pre_cc_last_frame_key = pre_cc_key
         await s.commit()
 
     with patch("app.agents.video_trimmer.find_best_tail_frame", return_value=40):
@@ -94,7 +93,6 @@ async def test_align_tail_frame_resets_cc(client, db_session_factory):
         )
     assert r.status_code == 200
 
-    # CC state cleared
     async with db_session_factory() as s:
         shot = (await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
@@ -102,14 +100,13 @@ async def test_align_tail_frame_resets_cc(client, db_session_factory):
         assert shot.cc_status is None
         assert shot.trim_frames == 40
         assert shot.last_frame_path is not None
-        assert Path(shot.last_frame_path).exists()
+        assert await object_store.exists(shot.last_frame_path)
+        assert shot.pre_cc_last_frame_key is None
 
-    # pre-CC backup must be deleted
-    assert not pre_cc.exists(), "last_frame_pre_cc.png should have been removed"
+    assert await object_store.exists(pre_cc_key) is False
 
 
-@pytest.mark.asyncio
-async def test_align_tail_frame_no_target_returns_400(client, db_session_factory):
+async def test_align_tail_frame_no_target_returns_400(client, db_session_factory, cos_prefix):
     """Without target_last_frame_path, endpoint must return 400."""
     pid = await _make_project(db_session_factory, status="completed")
     await _add_shot(db_session_factory, pid, shot_id=1, status="completed")

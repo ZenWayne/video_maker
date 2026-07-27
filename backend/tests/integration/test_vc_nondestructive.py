@@ -1,28 +1,43 @@
-"""Integration test: VC worker produces only audio_vc wav; source video untouched."""
-import hashlib
-from pathlib import Path
+"""Integration test: VC worker publishes a fixed audio_vc.wav key; source video untouched."""
+# NOTE: this file deliberately does NOT `import app.main` first. _do_voice_convert_one
+# runs for real in the vc-worker process (worker.vc_arq_worker), which never imports
+# app.main — so this file's first test calls it exactly the way production does, as a
+# regression guard against the app.api.pipeline circular-import crash that this class of
+# "add an app.main guard to the test" masking previously caused (see
+# app/services/vc_backup.py's module docstring and the Task 9 report's Critical-fix
+# section for the full trace). Do not add an `import app.main` guard here — that would
+# hide exactly the bug this file exists to catch.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from worker.tasks import _do_voice_convert_one
 from tests.integration.conftest import _make_project, _add_shot, seed_shot_with_source, HEADERS
+from tests.integration.conftest_cos import requires_cos
+from app.services import object_store
+
+pytestmark = requires_cos
 
 
-def _md5(p: Path) -> str:
-    return hashlib.md5(p.read_bytes()).hexdigest()
-
-
-@pytest.mark.asyncio
-async def test_vc_writes_wav_only_keeps_source(db_session_factory, monkeypatch, tmp_path):
-    """VC worker must write audio_vc_<ts>_<uuid>.wav and leave source video untouched."""
-    from app.config import settings
-    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+async def test_vc_writes_wav_only_keeps_source_and_backs_up(
+    db_session_factory, cos_prefix, tmp_path
+):
+    """VC worker must publish a fixed audio_vc.wav key and leave the source video
+    byte-for-byte untouched; a pre-VC backup is created as a side effect."""
+    from pathlib import Path
 
     pid = await _make_project(db_session_factory, status="completed")
     await _add_shot(db_session_factory, pid, 1)
-    source_mp4 = await seed_shot_with_source(db_session_factory, pid, 1)
-    before_md5 = _md5(source_mp4)
+    video_key = await seed_shot_with_source(db_session_factory, pid, 1)
+
+    before = tmp_path / "before.mp4"
+    await object_store.get(video_key, before)
+    before_bytes = before.read_bytes()
+
+    ref_key = f"{cos_prefix}ref.wav"
+    ref_local = tmp_path / "ref.wav"
+    ref_local.write_bytes(b"RIFFref")
+    await object_store.put(ref_key, ref_local)
 
     def fake_extract(video_path, out_path):
         Path(out_path).write_bytes(b"fake-audio-src")
@@ -35,7 +50,7 @@ async def test_vc_writes_wav_only_keeps_source(db_session_factory, monkeypatch, 
         patch("app.services.cosyvoice_client.voice_convert", new=AsyncMock(side_effect=fake_vc)),
         patch("worker.tasks.publish_event", new=AsyncMock()),
     ):
-        await _do_voice_convert_one(db_session_factory, MagicMock(), pid, 1, "/tmp/ref.wav")
+        await _do_voice_convert_one(db_session_factory, MagicMock(), pid, 1, ref_key)
 
     from sqlalchemy import select
     from app.models.project import Shot
@@ -47,38 +62,41 @@ async def test_vc_writes_wav_only_keeps_source(db_session_factory, monkeypatch, 
 
         assert shot.vc_status == "done"
         assert shot.vc_audio_path is not None
-        assert Path(shot.vc_audio_path).name.startswith("audio_vc_")
-        assert Path(shot.vc_audio_path).exists()
-        assert shot.video_path == str(source_mp4)   # video_path unchanged
+        assert shot.vc_audio_path.endswith("audio_vc.wav")
+        assert await object_store.exists(shot.vc_audio_path)
+        got = tmp_path / "got.wav"
+        await object_store.get(shot.vc_audio_path, got)
+        assert got.read_bytes() == b"RIFFfakewav"
+        assert shot.video_path == video_key   # video_path unchanged (non-destructive)
+        # pre-VC backup created as a side effect, idempotent server-side copy
+        assert shot.pre_vc_video_key is not None
+        assert await object_store.exists(shot.pre_vc_video_key)
 
     # Source video bytes are identical
-    assert _md5(source_mp4) == before_md5
-
-    # No vc_*.mp4 files created
-    shot_directory = source_mp4.parent
-    assert not list(shot_directory.glob("vc_*.mp4"))
-
-    # Temp audio_in_*.wav cleaned up
-    assert not list(shot_directory.glob("audio_in_*.wav"))
+    after = tmp_path / "after.mp4"
+    await object_store.get(video_key, after)
+    assert after.read_bytes() == before_bytes
 
 
-@pytest.mark.asyncio
-async def test_voice_revert_clears_audio(client, db_session_factory):
-    """voice-revert must delete vc_audio wav, clear vc metadata, leave source untouched."""
+async def test_voice_revert_clears_audio(client, db_session_factory, cos_prefix, tmp_path):
+    """voice-revert must delete the vc_audio object, clear vc metadata, leave source untouched."""
     from sqlalchemy import select
     from app.models.project import Shot
-    from app.services.storage import shot_dir, ts_uuid_name
+    from app.services.storage import shot_audio_vc_key
 
     pid = await _make_project(db_session_factory, status="completed")
     await _add_shot(db_session_factory, pid, 1)
-    source_mp4 = await seed_shot_with_source(db_session_factory, pid, 1)
-    before_md5 = _md5(source_mp4)
+    video_key = await seed_shot_with_source(db_session_factory, pid, 1)
 
-    # Create a real (fake) vc audio wav in the shot directory
-    s_dir = shot_dir(pid, 1)
-    wav_name = f"audio_vc_{ts_uuid_name('.wav')}"
-    wav_path = s_dir / wav_name
-    wav_path.write_bytes(b"RIFFfakewav")
+    before = tmp_path / "before.mp4"
+    await object_store.get(video_key, before)
+    before_bytes = before.read_bytes()
+
+    # Publish a real (fake) vc audio object at the fixed key
+    vc_key = shot_audio_vc_key(pid, 1)
+    wav_local = tmp_path / "vc.wav"
+    wav_local.write_bytes(b"RIFFfakewav")
+    await object_store.put(vc_key, wav_local)
 
     # Set shot to vc-done state
     async with db_session_factory() as s:
@@ -86,7 +104,7 @@ async def test_voice_revert_clears_audio(client, db_session_factory):
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
         )).scalar_one()
         shot.vc_status = "done"
-        shot.vc_audio_path = str(wav_path)
+        shot.vc_audio_path = vc_key
         await s.commit()
 
     r = await client.post(
@@ -98,5 +116,8 @@ async def test_voice_revert_clears_audio(client, db_session_factory):
     data = r.json()
     assert data["vc_status"] is None
     assert data["vc_audio_url"] is None
-    assert not wav_path.exists()
-    assert _md5(source_mp4) == before_md5
+    assert not await object_store.exists(vc_key)
+
+    after = tmp_path / "after.mp4"
+    await object_store.get(video_key, after)
+    assert after.read_bytes() == before_bytes

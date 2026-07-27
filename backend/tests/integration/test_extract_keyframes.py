@@ -66,54 +66,12 @@ def _write_source_file(tmp_path: Path, name: str = "source.png") -> Path:
 # extract-first-frame
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def test_extract_first_frame_200_distinct_ts_uuid(client, db_session_factory, tmp_path):
-    """200; returned URL basename is ts_uuid and DISTINCT from source path."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    src = _write_source_file(tmp_path, "first_frame.png")
-    await _seed_shot(db_session_factory, pid, custom_first_frame_path=str(src))
-
-    r = await client.post(
-        f"/api/projects/{pid}/shots/1/extract-first-frame",
-        headers=HEADERS,
-    )
-    assert r.status_code == 200, r.text
-    data = r.json()
-    url = data["custom_first_frame_path"]
-    assert TS_UUID_RE.search(url), f"URL {url!r} doesn't match ts_uuid pattern"
-    # Distinct from source
-    assert Path(url).name != src.name, "dest filename must differ from source filename"
-
-
-async def test_extract_first_frame_db_and_file_exist(client, db_session_factory, tmp_path):
-    """DB field set; new file exists on disk."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    src = _write_source_file(tmp_path, "first_frame.png")
-    await _seed_shot(db_session_factory, pid, custom_first_frame_path=str(src))
-
-    await client.post(
-        f"/api/projects/{pid}/shots/1/extract-first-frame",
-        headers=HEADERS,
-    )
-
-    shot = await _get_shot(db_session_factory, pid)
-    assert shot.custom_first_frame_path is not None
-    assert TS_UUID_RE.search(Path(shot.custom_first_frame_path).name), \
-        f"DB path basename {Path(shot.custom_first_frame_path).name!r} doesn't match ts_uuid"
-    assert Path(shot.custom_first_frame_path).exists(), "Dest file must exist on disk"
-
-
-async def test_extract_first_frame_source_still_exists(client, db_session_factory, tmp_path):
-    """Source frame must NOT be deleted (copy, not move)."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    src = _write_source_file(tmp_path, "first_frame.png")
-    await _seed_shot(db_session_factory, pid, custom_first_frame_path=str(src))
-
-    await client.post(
-        f"/api/projects/{pid}/shots/1/extract-first-frame",
-        headers=HEADERS,
-    )
-
-    assert src.exists(), "Source frame must remain after extract (copy, not move)"
+# test_extract_first_frame_200_distinct_ts_uuid / _db_and_file_exist /
+# _source_still_exists moved to the real-COS test
+# tests/integration/test_uploads_oss.py::test_extract_first_frame_copies_resolved_source_to_custom_frames
+# — custom_first_frame_path now holds a COS key (Task 10); pick_first_frame()
+# returns a Path WRAPPING a key, and the endpoint must object_store.copy() it,
+# not run a local .exists()/shutil.copy2 on a fabricated tmp_path file.
 
 
 async def test_extract_first_frame_400_when_field_none(client, db_session_factory, tmp_path):
@@ -128,17 +86,9 @@ async def test_extract_first_frame_400_when_field_none(client, db_session_factor
     assert r.status_code == 400, r.text
 
 
-async def test_extract_first_frame_400_when_file_absent(client, db_session_factory, tmp_path):
-    """400 when the resolved first frame file does not exist on disk."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    ghost_path = tmp_path / "ghost_first_frame.png"  # NOT created on disk
-    await _seed_shot(db_session_factory, pid, custom_first_frame_path=str(ghost_path))
-
-    r = await client.post(
-        f"/api/projects/{pid}/shots/1/extract-first-frame",
-        headers=HEADERS,
-    )
-    assert r.status_code == 400, r.text
+# test_extract_first_frame_400_when_file_absent moved to the real-COS test
+# tests/integration/test_uploads_oss.py::test_extract_first_frame_400_when_key_absent
+# — same reasoning as the last_frame variant above.
 
 
 async def test_extract_first_frame_404_shot_missing(client, db_session_factory):
@@ -156,55 +106,11 @@ async def test_extract_first_frame_404_shot_missing(client, db_session_factory):
 # extract-last-frame
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def test_extract_last_frame_200_distinct_ts_uuid(client, db_session_factory, tmp_path):
-    """200; returned URL basename is ts_uuid and DISTINCT from source path; tf_status=done."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    src = _write_source_file(tmp_path, "last_frame.png")
-    await _seed_shot(db_session_factory, pid, last_frame_path=str(src))
-
-    r = await client.post(
-        f"/api/projects/{pid}/shots/1/extract-last-frame",
-        headers=HEADERS,
-    )
-    assert r.status_code == 200, r.text
-    data = r.json()
-    url = data["target_last_frame_path"]
-    assert TS_UUID_RE.search(url), f"URL {url!r} doesn't match ts_uuid pattern"
-    assert Path(url).name != src.name, "dest filename must differ from source filename"
-    assert data["tf_status"] == "done"
-
-
-async def test_extract_last_frame_db_and_file_exist(client, db_session_factory, tmp_path):
-    """DB fields (target_last_frame_path, tf_status) set; new file exists on disk."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    src = _write_source_file(tmp_path, "last_frame.png")
-    await _seed_shot(db_session_factory, pid, last_frame_path=str(src))
-
-    await client.post(
-        f"/api/projects/{pid}/shots/1/extract-last-frame",
-        headers=HEADERS,
-    )
-
-    shot = await _get_shot(db_session_factory, pid)
-    assert shot.target_last_frame_path is not None
-    assert TS_UUID_RE.search(Path(shot.target_last_frame_path).name), \
-        f"DB path basename {Path(shot.target_last_frame_path).name!r} doesn't match ts_uuid"
-    assert Path(shot.target_last_frame_path).exists(), "Dest file must exist on disk"
-    assert shot.tf_status == "done"
-
-
-async def test_extract_last_frame_source_still_exists(client, db_session_factory, tmp_path):
-    """Source last_frame_path must NOT be deleted (copy, not move)."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    src = _write_source_file(tmp_path, "last_frame.png")
-    await _seed_shot(db_session_factory, pid, last_frame_path=str(src))
-
-    await client.post(
-        f"/api/projects/{pid}/shots/1/extract-last-frame",
-        headers=HEADERS,
-    )
-
-    assert src.exists(), "Source last_frame_path must remain after extract (copy, not move)"
+# test_extract_last_frame_200_distinct_ts_uuid / _db_and_file_exist /
+# _source_still_exists moved to the real-COS test
+# tests/integration/test_uploads_oss.py::test_extract_last_frame_copies_to_new_key
+# — same reasoning as the first_frame group above (last_frame_path is a COS key,
+# not a local path; the endpoint object_store.copy()s it).
 
 
 async def test_extract_last_frame_400_when_field_none(client, db_session_factory, tmp_path):
@@ -219,17 +125,10 @@ async def test_extract_last_frame_400_when_field_none(client, db_session_factory
     assert r.status_code == 400, r.text
 
 
-async def test_extract_last_frame_400_when_file_absent(client, db_session_factory, tmp_path):
-    """400 when last_frame_path is set but the file doesn't exist on disk."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    ghost_path = tmp_path / "ghost_last_frame.png"  # NOT created on disk
-    await _seed_shot(db_session_factory, pid, last_frame_path=str(ghost_path))
-
-    r = await client.post(
-        f"/api/projects/{pid}/shots/1/extract-last-frame",
-        headers=HEADERS,
-    )
-    assert r.status_code == 400, r.text
+# test_extract_last_frame_400_when_file_absent moved to the real-COS test
+# tests/integration/test_uploads_oss.py::test_extract_last_frame_400_when_key_absent
+# — last_frame_path now holds a COS key (Task 10), and "absent" must be checked
+# via object_store.exists(), not a local Path().exists() on a fabricated path.
 
 
 async def test_extract_last_frame_404_shot_missing(client, db_session_factory):
@@ -247,23 +146,9 @@ async def test_extract_last_frame_404_shot_missing(client, db_session_factory):
 # use-prev-last-frame  (提取上一镜末帧 → 本镜首帧)
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def test_use_prev_last_frame_copies_prev_tail(client, db_session_factory, tmp_path):
-    """200; shot 2's custom_first_frame_path = a fresh copy of shot 1's last frame."""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    prev_tail = _write_source_file(tmp_path, "prev_last_frame.png")
-    await _seed_shot(db_session_factory, pid, shot_id=1, last_frame_path=str(prev_tail))
-    await _seed_shot(db_session_factory, pid, shot_id=2)
-
-    r = await client.post(f"/api/projects/{pid}/shots/2/use-prev-last-frame", headers=HEADERS)
-    assert r.status_code == 200, r.text
-    url = r.json()["custom_first_frame_path"]
-    assert TS_UUID_RE.search(url), f"URL {url!r} not ts_uuid"
-
-    shot2 = await _get_shot(db_session_factory, pid, shot_id=2)
-    assert shot2.custom_first_frame_path and Path(shot2.custom_first_frame_path).exists()
-    # It's a distinct copy, and the previous shot's last frame is untouched.
-    assert Path(shot2.custom_first_frame_path) != prev_tail
-    assert prev_tail.exists()
+# test_use_prev_last_frame_copies_prev_tail moved to the real-COS test
+# tests/integration/test_uploads_oss.py::test_use_prev_last_frame_copies_to_new_key
+# — same reasoning: last_frame_path is a COS key, not a local path.
 
 
 async def test_use_prev_last_frame_first_shot_400(client, db_session_factory):

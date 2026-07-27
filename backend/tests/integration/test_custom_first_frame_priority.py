@@ -18,15 +18,38 @@ Three tests:
   3. Auto-continuity: connected shot WITHOUT custom_first_frame_path still
      auto-uses the previous shot's last frame.
 """
+from pathlib import Path
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from app.models.project import Project, Shot, ProjectStatus, ShotStatus
-from app.config import settings
 import worker.tasks as tasks
 
 PROJECT_ID = "proj-cfp-priority"
 MOTION = "Slow push-in."
+
+
+@pytest.fixture(autouse=True)
+def _stub_object_store_exists(monkeypatch):
+    """pick_first_frame/get_first_character_ref now ask object_store.exists()
+    instead of Path.exists() (COS keys, not local paths, in production). This
+    file seeds real local files under tmp_path and only cares about the pure
+    resolution/priority LOGIC (custom > prev-last-frame > character-ref,
+    re-upload honored, stale-pointer self-heal, user-override never touched)
+    — not actual COS I/O — so the object-store existence oracle is stubbed to
+    the equivalent local-filesystem check. This mirrors the existing
+    ``ws.fetch``/``object_store.get`` boundary stubs in
+    tests/unit/test_video_generator.py and tests/unit/test_tail_frame.py: the
+    real pick_first_frame/propagate_first_frame_to_next code still runs
+    unmodified, only the "does this key exist" dependency is substituted.
+    """
+    from app.services import object_store
+
+    async def _exists(key):
+        return Path(key).exists()
+
+    monkeypatch.setattr(object_store, "exists", _exists)
 
 
 def _mk_frame(tmp_path, name: str) -> str:
@@ -87,8 +110,7 @@ async def _seed_db(
 
 
 def _run_ctx(monkeypatch, tmp_path):
-    """Common monkeypatching: real storage root, mocked provider + billed model call."""
-    monkeypatch.setattr(settings, "storage_root", str(tmp_path))
+    """Common monkeypatching: mocked provider + billed model call."""
     fake_provider = MagicMock()
     fake_provider.client = None
     monkeypatch.setattr(tasks, "get_provider", lambda: fake_provider)

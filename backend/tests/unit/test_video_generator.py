@@ -8,6 +8,9 @@ Covers:
   with httpx fully mocked so no real API is hit.
 """
 
+import shutil
+from pathlib import Path
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,6 +23,28 @@ from app.agents.video_generator import (
     generate_video,
     get_video_provider,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fake_cos_fetch(monkeypatch):
+    """generate_video() now fetches first/last/reference frames from COS via
+    Workspace.fetch() before cropping. These are unit tests (no real bucket) —
+    patch the underlying object_store.get to copy the given path (tests here
+    pass real local files, or fake nonexistent ones that are never actually
+    read because the SDK call itself is mocked), so no real COS credential or
+    network call is ever needed.
+    """
+    async def _fake_get(key, dest):
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src = Path(key)
+        if src.exists():
+            shutil.copy(src, dest)
+        else:
+            dest.touch()
+        return dest
+
+    monkeypatch.setattr("app.services.object_store.get", _fake_get)
 
 
 # --------------------------------------------------------------------------- #

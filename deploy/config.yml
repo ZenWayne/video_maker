@@ -31,3 +31,10 @@ CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000
 # Host points at the self-hosted Langfuse running on the host machine.
 LANGFUSE_ENABLED: "true"
 LANGFUSE_HOST: "https://us.cloud.langfuse.com"
+
+# Tencent Cloud COS (object storage for shot media)
+cos_region: ap-guangzhou
+cos_bucket: video-maker-dev-1414782845
+cos_scheme: https
+cos_auth_mode: static
+cos_signed_url_ttl_sec: 7200

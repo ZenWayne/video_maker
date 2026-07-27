@@ -7,7 +7,6 @@ import { createSSEConnection, type SSEConnection } from '@/lib/sse'
 import { Progress } from '@/components/ui/progress'
 import { useStore } from '@/lib/state'
 import { api } from '@/lib/api'
-import { versionShotMedia } from '@/lib/media'
 import type {
   SSEEventType,
   StateSnapshotData,
@@ -52,7 +51,7 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
 
       try {
         const detail = await api.getProject(projectId)
-        setShots(detail.shots.map(versionShotMedia))
+        setShots(detail.shots)
         setLastEventTime(Date.now())
       } catch {
         // ignore fetch errors
@@ -78,7 +77,7 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       setLastEventTime(Date.now())
       const snapshot = data as StateSnapshotData
       setCurrentProject(snapshot.project)
-      setShots(snapshot.shots.map(versionShotMedia))
+      setShots(snapshot.shots)
       setProgress(calculateProgress(snapshot.shots))
       setStatus(`当前状态: ${snapshot.project.status}`)
     })
@@ -124,8 +123,8 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       const completedData = data as ShotCompletedData
       updateShot(completedData.shot_id, {
         status: 'completed',
-        video_path: `${completedData.video_path}?t=${Date.now()}`,
-        last_frame_path: `${completedData.last_frame_path}?t=${Date.now()}`,
+        video_path: completedData.video_path,
+        last_frame_path: completedData.last_frame_path,
       })
       // 重新计算进度
       const currentShots = useStore.getState().shots
@@ -208,7 +207,7 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       const d = data as { shot_id: number; target_last_frame_path: string; motion_prompt: string }
       updateShot(d.shot_id, {
         tf_status: 'done',
-        target_last_frame_path: `${d.target_last_frame_path}?t=${Date.now()}`,
+        target_last_frame_path: d.target_last_frame_path,
         motion_prompt: d.motion_prompt,
         tf_confirmed: false,
       } as Partial<{ tf_status: string; target_last_frame_path: string; motion_prompt: string; tf_confirmed: boolean }>)
@@ -281,9 +280,12 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
     // vc_completed - 音色转换完成
     const unsubscribeVcCompleted = sse.subscribe('vc_completed', (data) => {
       setLastEventTime(Date.now())
-      const d = data as { shot_id: number; video_path: string; version?: number }
-      const vp = d.version ? `${d.video_path}?v=${d.version}` : d.video_path
-      updateShot(d.shot_id, { vc_status: 'done', video_path: vp } as any)
+      // Backend (worker/tasks.py) emits {shot_id, vc_audio_url, version} — VC
+      // never touches video_path (it stays the source video). video_path was
+      // read here before but the backend never sends it, so it silently
+      // wrote the literal string "undefined?v=…" into the store.
+      const d = data as { shot_id: number; vc_audio_url: string; version?: number }
+      updateShot(d.shot_id, { vc_status: 'done', vc_audio_url: d.vc_audio_url } as any)
       setStatus(`分镜 #${d.shot_id} 音色转换完成`)
       onEvent?.('vc_completed', data)
     })
@@ -317,7 +319,7 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
     const unsubscribeCcCompleted = sse.subscribe('cc_completed', (data) => {
       setLastEventTime(Date.now())
       const d = data as { shot_id: number; last_frame_path: string }
-      updateShot(d.shot_id, { cc_status: 'done', last_frame_path: `${d.last_frame_path}?t=${Date.now()}` } as any)
+      updateShot(d.shot_id, { cc_status: 'done', last_frame_path: d.last_frame_path } as any)
       setStatus(`分镜 #${d.shot_id} 人物校准完成`)
       onEvent?.('cc_completed', data)
     })

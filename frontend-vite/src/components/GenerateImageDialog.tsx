@@ -22,11 +22,6 @@ interface Props {
 
 const SLOT_LABEL = { first_frame: '首帧', tail_frame: '尾帧' } as const
 
-// 参考图/候选图均通过 /api/media 静态挂载访问，后端返回的是原始 storage_path
-// （与 ReferenceAssetsPanel.tsx 的 refMediaUrl 约定一致）
-const refMediaUrl = (storagePath: string) =>
-  `/api/media/${storagePath.replace(/^\/?storage\//, '')}`
-
 export function GenerateImageDialog({ project, shot, slot: initialSlot, open, onOpenChange, onChanged }: Props) {
   const [slot, setSlot] = useState<'first_frame' | 'tail_frame'>(initialSlot)
   const [prompt, setPrompt] = useState('')
@@ -157,7 +152,7 @@ export function GenerateImageDialog({ project, shot, slot: initialSlot, open, on
                 }`}
                 title={`${r.kind} 参考图`}
               >
-                <img src={refMediaUrl(r.storage_path)} alt={`${r.kind} 参考图`} className="h-full w-full object-cover" />
+                <img src={api.referenceImageUrl(project.id, r.storage_path)} alt={`${r.kind} 参考图`} className="h-full w-full object-cover" />
                 {checkedRefIds.has(r.id) && (
                   <span className="absolute left-1 top-1 rounded bg-blue-600 p-0.5">
                     <Check className="h-3 w-3 text-white" />

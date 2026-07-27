@@ -1,7 +1,7 @@
 """Integration tests for first frame generation (generate-first-frame endpoint).
 
 Mirrors test_tail_frame_pipeline.py. Worker-level routing for the auto
-first_frame path is covered by test_run_image_candidate.py.
+first_frame path is covered by test_run_image_candidate_oss.py.
 """
 import pytest
 
@@ -97,39 +97,10 @@ async def test_delete_first_frame_blocked_while_generating(client, db_session_fa
     assert r.status_code == 409
 
 
-async def test_delete_first_frame_clears_ff_status(client, db_session_factory, tmp_path):
-    pid = await _make_project(db_session_factory, status="shot_review")
-    frame = tmp_path / "ff.png"
-    frame.write_bytes(b"\x89PNG")
-    async with db_session_factory() as s:
-        s.add(Shot(
-            project_id=pid,
-            shot_id=1,
-            text="Hello",
-            shot_type="Medium Shot",
-            visual_description="Test",
-            shot_duration=6,
-            status="pending",
-            align_with_previous=False,
-            ff_status="failed",
-            ff_error_message="boom",
-            custom_first_frame_path=str(frame),
-        ))
-        await s.commit()
-
-    r = await client.request(
-        "DELETE", f"/api/projects/{pid}/shots/1/first-frame", headers=HEADERS
-    )
-    assert r.status_code == 200
-
-    async with db_session_factory() as s:
-        shot = (await s.execute(
-            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
-        )).scalar_one()
-        assert shot.custom_first_frame_path is None
-        assert shot.ff_status is None
-        assert shot.ff_error_message is None
-    assert not frame.exists()
+# test_delete_first_frame_clears_ff_status moved to the real-COS test
+# tests/integration/test_uploads_oss.py::test_delete_first_frame_removes_from_oss
+# — custom_first_frame_path now holds a COS key (Task 10); deleting it goes
+# through object_store.delete(), which needs real COS credentials to test.
 
 
 # ── GET /projects/{id} — first frame fields in response ──────────────────────

@@ -1,6 +1,7 @@
 """Integration tests for project CRUD endpoints."""
 import pytest
 from tests.integration.conftest import HEADERS, _make_project, _add_shots
+from tests.integration.conftest_cos import requires_cos
 
 
 async def test_create_project_success(client):
@@ -95,7 +96,8 @@ async def test_list_projects_pagination(client, make_project):
     assert data["offset"] == 0
 
 
-async def test_delete_project_success(client, project_in_draft):
+@requires_cos
+async def test_delete_project_success(client, project_in_draft, cos_prefix):
     pid = project_in_draft["id"]
     r = await client.delete(f"/api/projects/{pid}")
     assert r.status_code == 204

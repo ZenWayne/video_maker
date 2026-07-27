@@ -6,6 +6,7 @@ from tests.integration.conftest import (
     HEADERS, USER,
     _make_project, _add_shots, _add_shot, _add_character_image,
 )
+from tests.integration.conftest_cos import requires_cos
 
 
 # ── POST /projects/{id}/start ──────────────────────────────────────────────────
@@ -119,7 +120,8 @@ async def test_approve_script_invalid_transition(client, db_session_factory):
 
 # ── POST /projects/{id}/regenerate-script ─────────────────────────────────────
 
-async def test_regenerate_script_success(client, project_in_script_review):
+@requires_cos
+async def test_regenerate_script_success(client, project_in_script_review, cos_prefix):
     pid = project_in_script_review
     r = await client.post(f"/api/projects/{pid}/regenerate-script", headers=HEADERS)
     assert r.status_code == 202
@@ -132,7 +134,8 @@ async def test_regenerate_script_success(client, project_in_script_review):
     )
 
 
-async def test_regenerate_script_invalid_transition(client, db_session_factory):
+@requires_cos
+async def test_regenerate_script_invalid_transition(client, db_session_factory, cos_prefix):
     # SHOT_GENERATING cannot transition to SCRIPTING
     pid = await _make_project(db_session_factory, status="shot_generating")
     r = await client.post(f"/api/projects/{pid}/regenerate-script", headers=HEADERS)
@@ -400,7 +403,8 @@ async def test_reset_to_script_invalid_transition(client, db_session_factory):
 
 # ── POST /projects/{id}/reset ─────────────────────────────────────────────────
 
-async def test_reset_project_success(client, db_session_factory):
+@requires_cos
+async def test_reset_project_success(client, db_session_factory, cos_prefix):
     # Only FAILED can transition to DRAFT
     pid = await _make_project(db_session_factory, status="failed")
     await _add_shots(db_session_factory, pid, count=2, status="pending")
@@ -412,7 +416,8 @@ async def test_reset_project_success(client, db_session_factory):
     assert p["shots"] == []
 
 
-async def test_reset_project_invalid_transition(client, db_session_factory):
+@requires_cos
+async def test_reset_project_invalid_transition(client, db_session_factory, cos_prefix):
     # SCRIPTING cannot transition to DRAFT
     pid = await _make_project(db_session_factory, status="scripting")
     r = await client.post(f"/api/projects/{pid}/reset", headers=HEADERS)
@@ -426,17 +431,18 @@ async def test_stream_project_not_found(client):
     assert r.status_code == 404
 
 
-async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis):
-    """state_snapshot must return /api/media/... URLs, not raw filesystem paths."""
+async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis, monkeypatch):
+    """state_snapshot must return signed COS URLs, never /api/media/... or a raw key."""
     import json
-    from app.config import settings
     from app.models.project import Shot
     from app.api.stream import event_generator
+    from tests.integration.conftest import install_fake_cos_credentials
+
+    install_fake_cos_credentials(monkeypatch)
 
     pid = await _make_project(db_session_factory, status="shot_review")
 
-    # Insert a shot with absolute filesystem paths (as the worker would)
-    storage = settings.storage_root
+    # Insert a shot with real COS keys (as worker.tasks.run_shot_pipeline would)
     async with db_session_factory() as s:
         s.add(Shot(
             project_id=pid,
@@ -446,8 +452,8 @@ async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis
             visual_description="visual",
             shot_duration=6,
             status="completed",
-            video_path=f"{storage}/projects/{pid}/shots/shot_1/output.mp4",
-            last_frame_path=f"{storage}/projects/{pid}/shots/shot_1/last_frame.png",
+            video_path=f"projects/{pid}/shots/shot_1/output.mp4",
+            last_frame_path=f"projects/{pid}/shots/shot_1/last_frame.png",
         ))
         await s.commit()
 
@@ -459,46 +465,73 @@ async def test_stream_snapshot_uses_media_urls(client, db_session_factory, redis
     event = json.loads(first_event_json)
     assert event["type"] == "state_snapshot"
     shot = event["data"]["shots"][0]
-    assert shot["video_path"].startswith("/api/media/"), \
-        f"video_path should be a media URL, got: {shot['video_path']}"
-    assert shot["last_frame_path"].startswith("/api/media/"), \
-        f"last_frame_path should be a media URL, got: {shot['last_frame_path']}"
+    assert shot["video_path"].startswith("http"), \
+        f"video_path should be a signed URL, got: {shot['video_path']}"
+    assert "/api/media/" not in shot["video_path"]
+    assert shot["last_frame_path"].startswith("http"), \
+        f"last_frame_path should be a signed URL, got: {shot['last_frame_path']}"
+    assert "/api/media/" not in shot["last_frame_path"]
 
 
 # ── GET /projects/{id}/final.mp4 ─────────────────────────────────────────────
 
-async def test_download_final_not_ready(client, project_in_draft):
+async def test_download_final_not_ready(client, project_in_draft, monkeypatch):
+    """素材本体在 COS——不存在时 assets.py 必须直接 404，不发出 302 到一个会
+    404 的签名 URL。用 mock 而非真实 COS：object_store.exists() 本身会发真实
+    网络请求，这个用例只关心「不存在 -> 404」这条分支，不需要真凭证/真网络，
+    因此不带 cos_prefix、也不用 @requires_cos——按项目 gating 约定它必须留在
+    无凭证环境的常规回归里。
+    """
+    from app.api import assets as assets_module
+
+    monkeypatch.setattr(
+        assets_module.object_store, "exists", AsyncMock(return_value=False)
+    )
+
     pid = project_in_draft["id"]
     r = await client.get(f"/api/projects/{pid}/final.mp4")
     assert r.status_code == 404
 
 
-async def test_download_final_success(client, db_session_factory, tmp_path):
-    from app.services.storage import final_video_path
-    from app.config import settings
+async def test_download_final_success(client, db_session_factory, monkeypatch):
+    """存在时 302 重定向到签名 URL；签名本身是纯本地 HMAC 计算，用
+    install_fake_cos_credentials 伪造凭证即可，不需要真实网络/凭证。真实可
+    下载 + 附件头的验证在 tests/integration/test_assets_redirect.py（真实
+    COS，@requires_cos）里做。
+    """
+    from app.api import assets as assets_module
+    from tests.integration.conftest import install_fake_cos_credentials
+
+    install_fake_cos_credentials(monkeypatch)
+    monkeypatch.setattr(
+        assets_module.object_store, "exists", AsyncMock(return_value=True)
+    )
 
     pid = await _make_project(db_session_factory, status="exported")
-    # Create the merged.mp4 file in the patched storage location
-    video_path = final_video_path(pid)
-    video_path.parent.mkdir(parents=True, exist_ok=True)
-    video_path.write_bytes(b"fake-video-content")
 
-    r = await client.get(f"/api/projects/{pid}/final.mp4")
-    assert r.status_code == 200
-    assert r.headers["content-type"] == "video/mp4"
+    r = await client.get(f"/api/projects/{pid}/final.mp4", follow_redirects=False)
+    assert r.status_code == 302
+    loc = r.headers["location"]
+    assert loc.startswith("http")
+    assert "merged.mp4" in loc
 
 
 # ── POST /projects/{id}/shots/{shot_id}/delete-tail-frame ──────────────────────
 
 async def _give_tail_frame(sf, pid, shot_id, *, tf_status="done", tf_confirmed=True):
-    """Give a shot a generated tail frame backed by a real file on disk."""
+    """Give a shot a generated tail frame backed by a real COS object."""
+    import tempfile
+    from pathlib import Path
     from sqlalchemy import select
     from app.models.project import Shot
-    from app.services.storage import shot_target_last_frame_path
+    from app.services.storage import shot_target_last_frame_key
+    from app.services import object_store
 
-    path = shot_target_last_frame_path(pid, shot_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"fake-png")
+    key = shot_target_last_frame_key(pid, shot_id)
+    with tempfile.TemporaryDirectory() as td:
+        local = Path(td) / "target.png"
+        local.write_bytes(b"\x89PNG\r\n\x1a\n fake-png")
+        await object_store.put(key, local)
     async with sf() as s:
         result = await s.execute(
             select(Shot).where(Shot.project_id == pid, Shot.shot_id == shot_id)
@@ -506,16 +539,19 @@ async def _give_tail_frame(sf, pid, shot_id, *, tf_status="done", tf_confirmed=T
         shot = result.scalar_one()
         shot.tf_status = tf_status
         shot.tf_confirmed = tf_confirmed
-        shot.target_last_frame_path = str(path)
+        shot.target_last_frame_path = key
         await s.commit()
-    return path
+    return key
 
 
+@requires_cos
 async def test_delete_tail_frame_clears_state_without_generating_video(
-    client, db_session_factory, project_in_shot_review
+    client, db_session_factory, project_in_shot_review, cos_prefix
 ):
+    from app.services import object_store
+
     pid = project_in_shot_review
-    path = await _give_tail_frame(db_session_factory, pid, 1)
+    key = await _give_tail_frame(db_session_factory, pid, 1)
     client.arq.enqueue_job.reset_mock()
 
     r = await client.post(
@@ -540,12 +576,13 @@ async def test_delete_tail_frame_clears_state_without_generating_video(
     assert shot["tf_confirmed"] is False
     assert shot["target_last_frame_path"] is None
 
-    # Physical tail-frame file removed
-    assert not path.exists()
+    # COS object removed
+    assert not await object_store.exists(key)
 
 
+@requires_cos
 async def test_delete_tail_frame_rejected_while_generating(
-    client, db_session_factory, project_in_shot_review
+    client, db_session_factory, project_in_shot_review, cos_prefix
 ):
     pid = project_in_shot_review
     await _give_tail_frame(
@@ -567,7 +604,8 @@ async def test_delete_tail_frame_shot_not_found(client, project_in_shot_review):
 
 # ── PUT /projects/{id}/storyboard (full replace) ──────────────────────────────
 
-async def test_put_storyboard_upsert_and_add(client, db_session_factory, project_in_script_review):
+@requires_cos
+async def test_put_storyboard_upsert_and_add(client, db_session_factory, project_in_script_review, cos_prefix):
     pid = project_in_script_review  # has shots 1,2,3
     r = await client.put(
         f"/api/projects/{pid}/storyboard",
@@ -595,7 +633,10 @@ async def test_put_storyboard_upsert_and_add(client, db_session_factory, project
     assert by_id[4].text == "brand new"
 
 
-async def test_put_storyboard_rewrites_json(client, db_session_factory, project_in_script_review, tmp_path):
+@requires_cos
+async def test_put_storyboard_rewrites_json(
+    client, db_session_factory, project_in_script_review, cos_prefix, tmp_path
+):
     pid = project_in_script_review
     r = await client.put(
         f"/api/projects/{pid}/storyboard",
@@ -607,8 +648,11 @@ async def test_put_storyboard_rewrites_json(client, db_session_factory, project_
     )
     assert r.status_code == 200, r.text
     import json
-    from app.services.storage import storyboard_path
-    data = json.loads(storyboard_path(pid).read_text(encoding="utf-8"))
+    from app.services import object_store
+    from app.services.storage import storyboard_key
+    local = tmp_path / "storyboard.json"
+    await object_store.get(storyboard_key(pid), local)
+    data = json.loads(local.read_text(encoding="utf-8"))
     assert data["scene_overview"] == "ov"
     assert [s["shot_id"] for s in data["shots"]] == [1]
     assert data["shots"][0]["text"] == "only"
@@ -661,13 +705,18 @@ async def test_put_storyboard_empty_shots(client, project_in_script_review):
     assert r.status_code == 422
 
 
-async def test_put_storyboard_deletes_shot_output_dir(client, db_session_factory, project_in_script_review):
+@requires_cos
+async def test_put_storyboard_deletes_shot_output_dir(
+    client, db_session_factory, project_in_script_review, cos_prefix, tmp_path
+):
     pid = project_in_script_review  # shots 1,2,3
-    from app.services.storage import shot_dir
-    leftover = shot_dir(pid, 3)
-    leftover.mkdir(parents=True, exist_ok=True)
-    (leftover / "output.mp4").write_bytes(b"stale")
-    assert leftover.exists()
+    from app.services import object_store
+    from app.services.storage import shot_prefix, shot_key
+    leftover_key = shot_key(pid, 3, "output.mp4")
+    local = tmp_path / "stale.mp4"
+    local.write_bytes(b"stale")
+    await object_store.put(leftover_key, local)
+    assert await object_store.exists(leftover_key)
 
     r = await client.put(
         f"/api/projects/{pid}/storyboard",
@@ -677,4 +726,5 @@ async def test_put_storyboard_deletes_shot_output_dir(client, db_session_factory
         headers=HEADERS,
     )
     assert r.status_code == 200, r.text
-    assert not leftover.exists()  # shot 3 dir removed
+    # DB row deleted + COS prefix cleared: shot 3's whole object prefix is gone.
+    assert await object_store.list_prefix(shot_prefix(pid, 3)) == []

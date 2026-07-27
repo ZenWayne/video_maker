@@ -12,6 +12,7 @@ Prints "ok" on success.
 import asyncio
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 # Running as `python /app/tests/e2e_seed/seed_shot_review.py` puts the script's
@@ -23,11 +24,13 @@ from sqlalchemy import select
 
 from app.db import AsyncSession, init_db
 from app.models.project import Project, Shot
-from app.services.storage import ensure_shot_dir, shot_dir
+from app.services import cos_client, object_store
+from app.services.storage import shot_key
 
 
 async def main(args: dict) -> None:
     await init_db()
+    await cos_client.warm_credentials()
     project_id = args["project_id"]
     shot_id = int(args.get("shot_id", 1))
 
@@ -43,12 +46,19 @@ async def main(args: dict) -> None:
         ).scalar_one_or_none()
 
         if existing is None:
-            ensure_shot_dir(project_id, shot_id)
-            s_dir = shot_dir(project_id, shot_id)
-            video_file = s_dir / "output.mp4"
-            last_frame_file = s_dir / "last_frame.png"
-            video_file.write_bytes(b"\x00" * 100)
-            last_frame_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
+            # COS is the only store now — publish real (if tiny) objects instead
+            # of writing local files (there is no local storage_root anymore).
+            with tempfile.TemporaryDirectory() as td:
+                local_video = Path(td) / "output.mp4"
+                local_frame = Path(td) / "last_frame.png"
+                local_video.write_bytes(b"\x00" * 100)
+                local_frame.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
+                video_key = await object_store.put(
+                    shot_key(project_id, shot_id, "output.mp4"), local_video
+                )
+                last_frame_key = await object_store.put(
+                    shot_key(project_id, shot_id, "last_frame.png"), local_frame
+                )
 
             shot = Shot(
                 project_id=project_id,
@@ -59,8 +69,8 @@ async def main(args: dict) -> None:
                 shot_duration=6,
                 align_with_previous=False,
                 status="completed",
-                video_path=str(video_file),
-                last_frame_path=str(last_frame_file),
+                video_path=video_key,
+                last_frame_path=last_frame_key,
             )
             session.add(shot)
 

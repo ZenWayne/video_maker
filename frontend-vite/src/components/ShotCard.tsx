@@ -54,6 +54,8 @@ interface ShotCardProps {
   onOpenGenerateImage?: (shotId: number, slot: 'first_frame' | 'tail_frame') => void
   onAdoptCandidate?: (shotId: number, candidateId: string) => void
   onDeleteCandidate?: (shotId: number, candidateId: string) => void
+  /** Forwarded to ShotPlayer — refetch the project on a stale signed video URL. */
+  onVideoError?: () => void | Promise<void>
 }
 
 interface KeyframeMenuItem {
@@ -207,6 +209,7 @@ export function ShotCard({
   onOpenGenerateImage,
   onAdoptCandidate,
   onDeleteCandidate,
+  onVideoError,
 }: ShotCardProps) {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isPromptDialogOpen, setIsPromptDialogOpen] = useState(false)
@@ -225,7 +228,6 @@ export function ShotCard({
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
   const setPreviewUrl = usePreview()  // 全局共享 lightbox（替代原本地预览模态）
   const [isTrimOpen, setIsTrimOpen] = useState(false)
-  const [videoVersion, setVideoVersion] = useState(0)
   const refUploadRef = useRef<HTMLInputElement>(null)
   const firstFrameInputRef = useRef<HTMLInputElement>(null)
   const tailFrameInputRef = useRef<HTMLInputElement>(null)
@@ -266,7 +268,7 @@ export function ShotCard({
     if (!projectId) return
     try {
       const r = await api.usePrevLastFrame(projectId, shot.shot_id)
-      onShotUpdated?.(shot.shot_id, { custom_first_frame_path: `${r.custom_first_frame_path}?v=${Date.now()}` })
+      onShotUpdated?.(shot.shot_id, { custom_first_frame_path: r.custom_first_frame_path })
     } catch { /* handled by parent */ }
   }
 
@@ -719,6 +721,7 @@ export function ShotCard({
                 audioUrl={shot.vc_audio_url ?? null}
                 headMuteSec={shot.audio_head_mute_sec ?? null}
                 poster={shot.last_frame_path || shot.custom_first_frame_path || null}
+                onVideoError={onVideoError}
               />
             </div>
           )}
@@ -1110,20 +1113,19 @@ export function ShotCard({
       {/* 裁剪弹窗 */}
       {projectId && (
         <TrimDialog
-          shot={{
-            ...shot,
-            video_path: videoVersion ? `${shot.video_path}?v=${videoVersion}` : shot.video_path,
-          }}
+          shot={shot}
           projectId={projectId}
           aspectRatio={aspectRatio}
           open={isTrimOpen}
           onOpenChange={setIsTrimOpen}
           onShotUpdated={onShotUpdated}
-          onTrimmed={({ video_path, last_frame_path, trim_frames, trim_end_sec, version, next_shot }) => {
-            setVideoVersion(version)
+          onTrimmed={({ video_path, last_frame_path, trim_frames, trim_end_sec, next_shot }) => {
+            // Each trim/revert publishes to a fresh COS key with a freshly
+            // signed URL (q-sign-time regenerates on every signing) — the URL
+            // is already unique per generation, no extra cache-busting needed.
             onShotUpdated?.(shot.shot_id, {
-              video_path: `${video_path}?v=${version}`,
-              last_frame_path: `${last_frame_path}?v=${version}`,
+              video_path,
+              last_frame_path,
               trim_frames,
               trim_end_sec,
             })
@@ -1131,7 +1133,7 @@ export function ShotCard({
             // shot's new trimmed last frame — reflect it without a full refetch.
             if (next_shot) {
               onShotUpdated?.(next_shot.shot_id, {
-                custom_first_frame_path: `${next_shot.custom_first_frame_path}?v=${version}`,
+                custom_first_frame_path: next_shot.custom_first_frame_path,
               })
             }
           }}

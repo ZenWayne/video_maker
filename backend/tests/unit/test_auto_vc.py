@@ -30,10 +30,12 @@ def patch_arq(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def patch_resolver(monkeypatch, tmp_path):
-    wav = tmp_path / "prompt.wav"
-    wav.write_bytes(b"x")
-    monkeypatch.setattr(auto_vc, "resolve_reference_prompt_wav",
-                        lambda pid, proj: wav if proj.reference_voice_path else None)
+    key = "projects/p1/reference_voice/prompt.wav"
+
+    async def _fake(pid, proj, session):
+        return key if proj.reference_voice_path else None
+
+    monkeypatch.setattr(auto_vc, "resolve_reference_prompt_wav", _fake)
 
 
 async def test_enqueues_when_enabled_and_file_source():

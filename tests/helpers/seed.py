@@ -7,6 +7,7 @@ Prints the project_id on the last line of stdout.
 
 import sys
 import json
+import tempfile
 import uuid
 import asyncio
 from datetime import datetime
@@ -17,10 +18,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'backend'))
 
 from app.db import AsyncSession, engine, init_db
 from app.models.project import Project, Shot, Base
-from app.services.storage import (
-    project_dir, reference_images_dir, shot_dir,
-    final_dir, storyboard_path, ensure_project_dirs, ensure_shot_dir
-)
+from app.services import cos_client, object_store
+from app.services.storage import final_video_key, shot_key
+from app.services.storyboard import write_storyboard
 from sqlalchemy import select
 import os
 
@@ -57,6 +57,11 @@ SAMPLE_SHOTS = [
 
 async def seed(state: str, title: str = "PW Test Project", aspect_ratio: str = "16:9") -> str:
     await init_db()
+    # COS is the only store now — nothing below writes to a local
+    # storage_root anymore, everything is object_store.put() to a real key.
+    # This script runs standalone (no FastAPI lifespan), so it has to warm
+    # credentials itself, same as tests/e2e_seed/*.py.
+    await cos_client.warm_credentials()
 
     project_id = str(uuid.uuid4())
     now = datetime.utcnow()
@@ -80,41 +85,40 @@ async def seed(state: str, title: str = "PW Test Project", aspect_ratio: str = "
 
         session.add(project)
 
-        # Ensure storage dirs
-        ensure_project_dirs(project_id)
-
         # Add shots for states that have them
         effective_state = "shot_review" if state == "shot_review_with_failures" else state
         if effective_state in ("script_review", "shot_generating", "shot_review", "exporting", "exported"):
             for shot_data in SAMPLE_SHOTS:
                 shot_status = "pending"
                 video_path = None
-                first_frame_path = None
                 last_frame_path = None
                 error_message = None
 
                 if effective_state in ("shot_review", "exporting", "exported"):
                     shot_status = "completed"
-                    # Create placeholder video files so the UI can reference them
-                    ensure_shot_dir(project_id, shot_data["shot_id"])
-                    shot_storage_dir = shot_dir(project_id, shot_data["shot_id"])
-                    video_file = shot_storage_dir / "output.mp4"
-                    first_frame_file = shot_storage_dir / "first_frame.png"
-                    last_frame_file = shot_storage_dir / "last_frame.png"
-                    # Write minimal placeholder files
-                    video_file.write_bytes(b'\x00' * 100)
-                    first_frame_file.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * 50)
-                    last_frame_file.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * 50)
-                    video_path = str(video_file)
-                    first_frame_path = str(first_frame_file)
-                    last_frame_path = str(last_frame_file)
+                    # Publish placeholder video/last-frame objects to COS so the
+                    # UI has real keys to sign URLs for (first_frame_path is no
+                    # longer a Shot column — first frame is derived, not stored
+                    # per-shot — so there is nothing to publish for it here).
+                    with tempfile.TemporaryDirectory() as td:
+                        local_video = Path(td) / "output.mp4"
+                        local_last_frame = Path(td) / "last_frame.png"
+                        local_video.write_bytes(b'\x00' * 100)
+                        local_last_frame.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * 50)
+                        video_path = await object_store.put(
+                            shot_key(project_id, shot_data["shot_id"], "output.mp4"),
+                            local_video,
+                        )
+                        last_frame_path = await object_store.put(
+                            shot_key(project_id, shot_data["shot_id"], "last_frame.png"),
+                            local_last_frame,
+                        )
 
                 # For shot_review_with_failures, make shot 3 failed
                 if state == "shot_review_with_failures" and shot_data["shot_id"] == 3:
                     shot_status = "failed"
                     error_message = "400 INVALID_ARGUMENT: Your use case is currently not supported."
                     video_path = None
-                    first_frame_path = None
                     last_frame_path = None
 
                 shot = Shot(
@@ -128,7 +132,6 @@ async def seed(state: str, title: str = "PW Test Project", aspect_ratio: str = "
                     reference_image_hint=shot_data.get("reference_image_hint"),
                     status=shot_status,
                     video_path=video_path,
-                    first_frame_path=first_frame_path,
                     last_frame_path=last_frame_path,
                     error_message=error_message,
                     word_count_warning=False,
@@ -138,33 +141,33 @@ async def seed(state: str, title: str = "PW Test Project", aspect_ratio: str = "
                 )
                 session.add(shot)
 
-            # Write storyboard.json
-            storyboard_data = {
-                "scene_overview": project.scene_overview,
-                "shots": [
-                    {
-                        "shot_id": s["shot_id"],
-                        "text": s["text"],
-                        "shot_type": s["shot_type"],
-                        "visual_description": s["visual_description"],
-                        "shot_duration": s["shot_duration"],
-                        "align_with_previous": s["align_with_previous"],
-                        "reference_image_hint": s.get("reference_image_hint"),
-                    }
-                    for s in SAMPLE_SHOTS
-                ],
-            }
-            sb_path = storyboard_path(project_id)
-            sb_path.write_text(json.dumps(storyboard_data, ensure_ascii=False))
-            project.storyboard_path = str(sb_path)
+            # Write storyboard.json to COS via the shared helper (same one
+            # worker.tasks / app.api.pipeline use) so the key format stays
+            # in lockstep with the rest of the app.
+            shots_payload = [
+                {
+                    "shot_id": s["shot_id"],
+                    "text": s["text"],
+                    "shot_type": s["shot_type"],
+                    "visual_description": s["visual_description"],
+                    "shot_duration": s["shot_duration"],
+                    "align_with_previous": s["align_with_previous"],
+                    "reference_image_hint": s.get("reference_image_hint"),
+                }
+                for s in SAMPLE_SHOTS
+            ]
+            project.storyboard_path = await write_storyboard(
+                project_id, project.scene_overview, shots_payload
+            )
 
         # For exported state, create a final video placeholder
         if state == "exported":
-            final_storage_dir = final_dir(project_id)
-            final_storage_dir.mkdir(parents=True, exist_ok=True)
-            final_video = final_storage_dir / "merged.mp4"
-            final_video.write_bytes(b'\x00' * 200)
-            project.final_video_path = str(final_video)
+            with tempfile.TemporaryDirectory() as td:
+                local_final = Path(td) / "merged.mp4"
+                local_final.write_bytes(b'\x00' * 200)
+                project.final_video_path = await object_store.put(
+                    final_video_key(project_id), local_final
+                )
 
         await session.commit()
 

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import redis.asyncio as aioredis
 
 from app.config import settings
+from app.services import cos_client
 from worker.tasks import run_voice_convert, run_voice_convert_batch
 
 _fmt = logging.Formatter(
@@ -25,6 +26,11 @@ for _name in ("worker", "app"):
 
 
 async def startup(ctx: dict) -> None:
+    # See arq_worker.startup: cos_client is a zero-app.api-dependency module —
+    # never import warm_credentials via app.main from a worker process.
+    await cos_client.warm_credentials()
+    await cos_client.start_credential_refresh()
+
     ctx["redis"] = await aioredis.from_url(
         settings.redis_url, encoding="utf-8", decode_responses=True
     )
@@ -40,6 +46,7 @@ async def shutdown(ctx: dict) -> None:
         await ctx["redis"].aclose()
     if "engine" in ctx:
         await ctx["engine"].dispose()
+    await cos_client.close_client()
 
 
 class VcWorkerSettings:

@@ -1,117 +1,103 @@
-"""裁剪弹窗只读端点必须以源片（output_*.mp4）为准，而非 video_path 指向的派生文件。
+"""裁剪弹窗只读端点必须以 shot.video_path（源片）为准跑 ffprobe/ffmpeg。
 
-场景：老 shot / VC 后 shot 的 video_path 指向物理剪过的 vc_*.mp4，
-若端点直接 ffprobe/提峰值/静音检测该文件，时间轴只剩剪后长度。
+背景：Task 8 起 trim/restore-trim/align-tail-frame 都是纯 metadata 操作——
+shot.video_path 指向的源对象在 COS 里永不被改写，VC 只写 vc_audio_path。
+所以这几个只读展示端点（video-info/waveform/detect-silence）不再需要在
+"源片 vs 派生文件" 之间做任何解析,直接对 shot.video_path 做
+workspace().fetch() 即可(见 app/api/pipeline.py 的 _fetch_dialog_source)。
+
+真实 COS + 真实 ffmpeg 合成视频(seed_shot_with_source),不 mock 视频探测函数。
 """
-from pathlib import Path
-
 import pytest
 
-import app.agents.video_trimmer as vt
-from tests.integration.conftest import HEADERS, _make_project
-from app.models.project import Shot
+from tests.integration.conftest_cos import requires_cos
+from tests.integration.conftest import HEADERS, _make_project, _add_shot, seed_shot_with_source
+
+# 注：不用文件级 pytestmark——只有真正 seed 真实 COS 视频的用例才需要
+# @requires_cos + cos_prefix。test_video_info_shot_or_video_not_found 只是一个
+# 404 路径检查，不碰 COS，文件级标记会让它在无凭证环境里被误 skip（审查发现的
+# 过度 gate 问题，本项目已因此丢过三次无凭证回归覆盖）。
 
 
-async def _seed_shot_with_derived_video(sf, tmp_path, pid):
-    """shot 目录里放 output_*.mp4（源片）+ vc_*.mp4（派生），video_path 指派生文件。"""
-    shot_dir = tmp_path / "projects" / pid / "shots" / "shot_1"
-    shot_dir.mkdir(parents=True)
-    source = shot_dir / "output_1700000000_deadbeef.mp4"
-    source.write_bytes(b"src")
-    derived = shot_dir / "vc_1700000001_cafebabe.mp4"
-    derived.write_bytes(b"vc")
-    async with sf() as s:
-        s.add(Shot(
-            project_id=pid, shot_id=1, text="t", shot_type="Medium Shot",
-            visual_description="v", shot_duration=6, status="completed",
-            align_with_previous=False, video_path=str(derived),
-        ))
-        await s.commit()
-    return str(source), str(derived)
-
-
-@pytest.fixture
-def probe_calls(monkeypatch):
-    """Mock 掉所有 ffmpeg 函数，记录每个函数收到的视频路径。"""
-    calls = {}
-
-    def _rec(key, ret):
-        def f(path, *args, **kwargs):
-            calls[key] = path
-            calls[key + "_kwargs"] = kwargs
-            return ret
-        return f
-
-    monkeypatch.setattr(vt, "get_video_info", _rec("info", {
-        # duration 故意设为错误值（容器时长/音频尾巴），验证端点会用
-        # total_frames/fps 归一化，而不是直接透传 ffprobe 的 duration
-        "fps": 24.0, "total_frames": 144, "duration": 7.5,
-    }))
-    monkeypatch.setattr(vt, "speech_end_info", _rec("speech", (5.0, 120)))
-    monkeypatch.setattr(vt, "extract_waveform_peaks", _rec("peaks", [0.5]))
-    monkeypatch.setattr(vt, "suggest_silence_trim", _rec("silence", None))
-    return calls
-
-
+@requires_cos
 async def test_video_info_probes_source_and_returns_source_url(
-    client, db_session_factory, tmp_path, probe_calls
+    client, db_session_factory, cos_prefix
 ):
     pid = await _make_project(db_session_factory, status="shot_review")
-    source, _derived = await _seed_shot_with_derived_video(db_session_factory, tmp_path, pid)
+    await _add_shot(db_session_factory, pid, 1, status="completed")
+    source_key = await seed_shot_with_source(db_session_factory, pid, 1, frames=48)
 
     r = await client.get(f"/api/projects/{pid}/shots/1/video-info")
     assert r.status_code == 200
-    assert probe_calls["info"] == source, "ffprobe 必须打在源片上"
-    assert probe_calls["speech"] == source, "静音检测必须打在源片上"
-    assert r.json()["source_video_url"] is not None
-    assert "output_1700000000_deadbeef.mp4" in r.json()["source_video_url"]
-    # duration 必须按视频流 (total_frames/fps = 144/24) 归一化，
-    # 而不是 mock 里故意设错的容器 duration (7.5)
-    assert r.json()["duration"] == pytest.approx(6.0)
+    body = r.json()
+    assert body["total_frames"] == 48
+    assert body["fps"] == pytest.approx(30.0, abs=0.01)
+    # duration must be normalized from total_frames/fps (video stream), not the
+    # (possibly longer, audio-tail-including) container duration
+    assert body["duration"] == pytest.approx(48 / 30.0, abs=0.05)
+    assert body["source_video_url"] is not None
+    assert body["source_video_url"].startswith("http")
+    assert "/api/media/" not in body["source_video_url"]
+    # No trim applied yet — nothing to restore
+    assert body["has_backup"] is False
 
 
-async def test_waveform_extracts_from_source(
-    client, db_session_factory, tmp_path, probe_calls
+@requires_cos
+async def test_video_info_has_backup_true_after_trim(
+    client, db_session_factory, cos_prefix
 ):
+    """Restore is possible whenever a trim is currently applied (path-as-truth:
+    the source object is never overwritten, so "backup" just means trim_frames
+    is set)."""
     pid = await _make_project(db_session_factory, status="shot_review")
-    source, _ = await _seed_shot_with_derived_video(db_session_factory, tmp_path, pid)
+    await _add_shot(db_session_factory, pid, 1, status="completed")
+    await seed_shot_with_source(db_session_factory, pid, 1, frames=60)
+
+    r = await client.post(
+        f"/api/projects/{pid}/shots/1/trim", json={"end_frame": 40}, headers=HEADERS,
+    )
+    assert r.status_code == 200
+
+    r = await client.get(f"/api/projects/{pid}/shots/1/video-info")
+    assert r.status_code == 200
+    assert r.json()["has_backup"] is True
+
+
+async def test_video_info_shot_or_video_not_found(client, db_session_factory):
+    """404 前就返回，从不碰 COS——不需要凭证。"""
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _add_shot(db_session_factory, pid, 1, status="pending")  # no video_path yet
+    r = await client.get(f"/api/projects/{pid}/shots/1/video-info")
+    assert r.status_code == 404
+
+
+@requires_cos
+async def test_waveform_extracts_from_source(client, db_session_factory, cos_prefix):
+    pid = await _make_project(db_session_factory, status="shot_review")
+    await _add_shot(db_session_factory, pid, 1, status="completed")
+    await seed_shot_with_source(db_session_factory, pid, 1, frames=48)
 
     r = await client.get(f"/api/projects/{pid}/shots/1/waveform")
     assert r.status_code == 200
-    assert probe_calls["peaks"] == source
-    # 端点必须把视频流时长 (total_frames/fps = 144/24) 作为 max_seconds
-    # 传给 extract_waveform_peaks，桶才能按视频时间轴对齐
-    assert probe_calls["peaks_kwargs"]["max_seconds"] == pytest.approx(144 / 24.0)
+    peaks = r.json()["peaks"]
+    assert isinstance(peaks, list)
+    assert len(peaks) > 0
 
 
-async def test_detect_silence_probes_source(
-    client, db_session_factory, tmp_path, probe_calls
-):
+@requires_cos
+async def test_detect_silence_probes_source(client, db_session_factory, cos_prefix):
     pid = await _make_project(db_session_factory, status="shot_review")
-    source, _ = await _seed_shot_with_derived_video(db_session_factory, tmp_path, pid)
+    await _add_shot(db_session_factory, pid, 1, status="completed")
+    await seed_shot_with_source(db_session_factory, pid, 1, frames=48)
 
-    r = await client.post(f"/api/projects/{pid}/shots/1/detect-silence", headers=HEADERS)
+    r = await client.post(
+        f"/api/projects/{pid}/shots/1/detect-silence", headers=HEADERS
+    )
     assert r.status_code == 200
-    assert probe_calls["silence"] == source
-
-
-async def test_video_info_falls_back_to_video_path_without_source(
-    client, db_session_factory, tmp_path, probe_calls
-):
-    """无 output_*.mp4（异常/极老数据）时回退 video_path，不 500。"""
-    pid = await _make_project(db_session_factory, status="shot_review")
-    shot_dir = tmp_path / "projects" / pid / "shots" / "shot_1"
-    shot_dir.mkdir(parents=True)
-    only = shot_dir / "vc_1700000001_cafebabe.mp4"
-    only.write_bytes(b"vc")
-    async with db_session_factory() as s:
-        s.add(Shot(
-            project_id=pid, shot_id=1, text="t", shot_type="Medium Shot",
-            visual_description="v", shot_duration=6, status="completed",
-            align_with_previous=False, video_path=str(only),
-        ))
-        await s.commit()
-
-    r = await client.get(f"/api/projects/{pid}/shots/1/video-info")
-    assert r.status_code == 200
-    assert probe_calls["info"] == str(only)
+    body = r.json()
+    # seed_shot_with_source synthesizes a constant 440Hz tone — no trailing
+    # silence to detect — but the fallback branch must still return real
+    # ffprobe'd video-info fields rather than erroring.
+    assert "has_silence" in body
+    if not body["has_silence"]:
+        assert body["total_frames"] == 48

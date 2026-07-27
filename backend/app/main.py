@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.db import init_db
+from app.services import cos_client
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Surface the active video provider (loud warning if not vertex)
     check_video_provider()
 
+    # Credentials must be warmed before serving: to_media_url() is a *sync*
+    # function (called from ~50 sync serializers) that only reads the cache —
+    # it never blocks to fetch. Without this, the first request touching any
+    # media field raises "COS 凭证缓存为空".
+    await cos_client.warm_credentials()
+    await cos_client.start_credential_refresh()
+
     # Initialize database tables
     await init_db()
 
@@ -70,6 +78,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if _redis_client:
         await _redis_client.aclose()
         _redis_client = None
+    await cos_client.close_client()
 
 
 # Create FastAPI app
@@ -132,18 +141,7 @@ app.include_router(stream.router, prefix="/api")
 app.include_router(debug.router, prefix="/api")
 app.include_router(image_candidates.router, prefix="/api")
 
-# Mount storage directory to serve generated media files (videos, frames)
-from pathlib import Path as _Path
-from fastapi.staticfiles import StaticFiles as _StaticFiles
-
-_storage_dir = _Path(settings.storage_root)
-_storage_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/api/media", _StaticFiles(directory=str(_storage_dir)), name="media")
-
-
-@app.middleware("http")
-async def no_cache_media(request, call_next):
-    response = await call_next(request)
-    if request.url.path.startswith("/api/media/"):
-        response.headers["Cache-Control"] = "no-cache, must-revalidate"
-    return response
+# 注:/api/media 静态挂载 + no-cache 中间件已删除(Task 12)。媒体一律走
+# to_media_url() 产出的 COS 预签名 URL——留着本地静态挂载等于留了一条绕过
+# 签名的后门,且 key 里内建的 ts_uuid 已经保证了唯一性,不再需要 no-cache
+# 中间件防止浏览器缓存过期文件。

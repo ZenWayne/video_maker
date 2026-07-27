@@ -1,6 +1,15 @@
 """Integration tests for upload-first-frame / upload-tail-frame endpoints (Task 5).
 
 TDD: write tests first (RED), then implement the handlers (GREEN).
+
+custom_first_frame_path / target_last_frame_path now hold COS keys, not local
+filesystem paths (Task 10) — "db path" / "file exists" checks go through
+object_store, and only the tests that actually reach the storage layer (i.e.
+take the cos_prefix fixture) are marked @requires_cos individually. The
+404-guard tests (shot/project not found) return before any object_store call
+and must stay unconditionally runnable so they keep providing regression
+coverage in credential-less dev/CI environments — a file-level pytestmark
+would silently strip that coverage.
 """
 import re
 import pytest
@@ -9,6 +18,8 @@ from sqlalchemy import select
 
 from tests.integration.conftest import HEADERS, _make_project
 from app.models.project import Shot
+from app.services import object_store
+from tests.integration.conftest_cos import requires_cos
 
 # Minimal valid PNG bytes (8-byte PNG signature, enough to be non-empty)
 PNG_BYTES = (
@@ -17,7 +28,7 @@ PNG_BYTES = (
     b"\x08\x02\x00\x00\x00\x90wS\xde"
 )
 
-TS_UUID_RE = re.compile(r"\d+_[0-9a-f]{8}\.png$")
+TS_UUID_RE = re.compile(r"\d+_[0-9a-f]{8}\.png")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -47,7 +58,8 @@ async def _get_shot(db_session_factory, project_id, shot_id=1):
 
 # ── upload-first-frame tests ──────────────────────────────────────────────────
 
-async def test_upload_first_frame_200(client, db_session_factory):
+@requires_cos
+async def test_upload_first_frame_200(client, db_session_factory, cos_prefix):
     """200 OK; returned URL ends in ts_uuid pattern."""
     pid = await _make_project(db_session_factory, status="shot_review")
     await _seed_shot(db_session_factory, pid)
@@ -63,8 +75,9 @@ async def test_upload_first_frame_200(client, db_session_factory):
     assert TS_UUID_RE.search(url), f"URL {url!r} doesn't match ts_uuid pattern"
 
 
-async def test_upload_first_frame_db_path(client, db_session_factory):
-    """DB column is set to an absolute path whose basename matches ts_uuid."""
+@requires_cos
+async def test_upload_first_frame_db_path(client, db_session_factory, cos_prefix):
+    """DB column is set to a COS key whose basename matches ts_uuid."""
     pid = await _make_project(db_session_factory, status="shot_review")
     await _seed_shot(db_session_factory, pid)
 
@@ -78,11 +91,13 @@ async def test_upload_first_frame_db_path(client, db_session_factory):
     assert shot.custom_first_frame_path is not None
     basename = Path(shot.custom_first_frame_path).name
     assert TS_UUID_RE.match(basename), f"basename {basename!r} doesn't match ts_uuid"
-    assert Path(shot.custom_first_frame_path).is_absolute()
+    # Keys are relative ("projects/...") — never a local absolute path.
+    assert not shot.custom_first_frame_path.startswith("/")
 
 
-async def test_upload_first_frame_file_exists(client, db_session_factory):
-    """The file actually lands on disk at the DB-stored path."""
+@requires_cos
+async def test_upload_first_frame_file_exists(client, db_session_factory, cos_prefix):
+    """The object actually lands in COS at the DB-stored key."""
     pid = await _make_project(db_session_factory, status="shot_review")
     await _seed_shot(db_session_factory, pid)
 
@@ -94,7 +109,7 @@ async def test_upload_first_frame_file_exists(client, db_session_factory):
 
     shot = await _get_shot(db_session_factory, pid)
     assert shot.custom_first_frame_path is not None
-    assert Path(shot.custom_first_frame_path).exists()
+    assert await object_store.exists(shot.custom_first_frame_path)
 
 
 async def test_upload_first_frame_shot_not_found(client, db_session_factory):
@@ -121,7 +136,8 @@ async def test_upload_first_frame_project_not_found(client):
 
 # ── upload-tail-frame tests ───────────────────────────────────────────────────
 
-async def test_upload_tail_frame_200(client, db_session_factory):
+@requires_cos
+async def test_upload_tail_frame_200(client, db_session_factory, cos_prefix):
     """200 OK; returned URL ends in ts_uuid pattern; tf_status is 'done'."""
     pid = await _make_project(db_session_factory, status="shot_review")
     await _seed_shot(db_session_factory, pid)
@@ -138,7 +154,8 @@ async def test_upload_tail_frame_200(client, db_session_factory):
     assert data["tf_status"] == "done"
 
 
-async def test_upload_tail_frame_db_path(client, db_session_factory):
+@requires_cos
+async def test_upload_tail_frame_db_path(client, db_session_factory, cos_prefix):
     """DB columns target_last_frame_path and tf_status are set correctly."""
     pid = await _make_project(db_session_factory, status="shot_review")
     await _seed_shot(db_session_factory, pid)
@@ -153,12 +170,14 @@ async def test_upload_tail_frame_db_path(client, db_session_factory):
     assert shot.target_last_frame_path is not None
     basename = Path(shot.target_last_frame_path).name
     assert TS_UUID_RE.match(basename), f"basename {basename!r} doesn't match ts_uuid"
-    assert Path(shot.target_last_frame_path).is_absolute()
+    # Keys are relative ("projects/...") — never a local absolute path.
+    assert not shot.target_last_frame_path.startswith("/")
     assert shot.tf_status == "done"
 
 
-async def test_upload_tail_frame_file_exists(client, db_session_factory):
-    """The file actually lands on disk at the DB-stored path."""
+@requires_cos
+async def test_upload_tail_frame_file_exists(client, db_session_factory, cos_prefix):
+    """The object actually lands in COS at the DB-stored key."""
     pid = await _make_project(db_session_factory, status="shot_review")
     await _seed_shot(db_session_factory, pid)
 
@@ -170,7 +189,7 @@ async def test_upload_tail_frame_file_exists(client, db_session_factory):
 
     shot = await _get_shot(db_session_factory, pid)
     assert shot.target_last_frame_path is not None
-    assert Path(shot.target_last_frame_path).exists()
+    assert await object_store.exists(shot.target_last_frame_path)
 
 
 async def test_upload_tail_frame_shot_not_found(client, db_session_factory):

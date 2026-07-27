@@ -1,6 +1,7 @@
 deploy/secrets.yml
 deploy/secrets/
 deploy/config.env
+deploy/*.csv          # 云厂商控制台下载的密钥文件（如 SecretKey.csv）
 backend/.venv/
 backend/data/
 backend/storage/

@@ -1,5 +1,7 @@
 """Application configuration using pydantic-settings."""
 
+from typing import Optional
+
 from pydantic_settings import BaseSettings
 
 
@@ -16,9 +18,6 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = "redis://redis:6379"
-
-    # Storage
-    storage_root: str = "./storage"
 
     # Database (3 slashes for relative path)
     database_url: str = "sqlite+aiosqlite:///./metadata.db"
@@ -65,6 +64,25 @@ class Settings(BaseSettings):
     # Retry once on transient upstream failure (successFlag=3, "upstream gen failed").
     kie_max_retries: int = 1
     kie_retry_backoff_seconds: int = 15
+
+    # ── 腾讯云 COS ──────────────────────────────────────────────────────────
+    # 存储权威副本所在 bucket。dev / prod 使用不同 bucket。
+    # 应与 CVM 同地域，后端↔COS 才走内网免流量费。
+    cos_region: str = ""
+    # 必须含 AppId，形如 video-maker-dev-1250000000
+    cos_bucket: str = ""
+    cos_scheme: str = "https"
+    # 自定义源站域名；留空则用默认域名 {bucket}.cos.{region}.myqcloud.com
+    cos_domain: Optional[str] = None
+    # "static"（开发，永久密钥）| "cvm_role"（生产，实例角色取 STS 临时密钥）
+    cos_auth_mode: str = "static"
+    # cvm_role 模式下绑定在 CVM 上的 CAM 角色名
+    cos_cvm_role: Optional[str] = None
+    # 预签名 URL 有效期，默认 2 小时
+    cos_signed_url_ttl_sec: int = 7200
+    # 仅 static 模式使用，由 /run/secrets/ 注入
+    cos_secret_id: Optional[str] = None
+    cos_secret_key: Optional[str] = None
 
     # Voice conversion (in-process vc2.VoiceConverter)
     model_dir: str = "/workspace/exported_vc2"

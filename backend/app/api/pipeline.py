@@ -3,7 +3,6 @@
 import hashlib
 import json
 import logging
-import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -30,12 +29,39 @@ from app.services.state_machine import (
     ProjectStatus, ShotStatus,
     transition_project_status, InvalidTransitionError
 )
+# 注：原来的本地路径 import 块一次性 import 了 10 个已被 Task 5 删除的函数
+# （storyboard_path/archived_storyboard_path/shot_custom_frames_dir/
+# shot_pre_vc_video_path/shot_audio_original_path/shot_audio_vc_path/
+# shot_pre_cc_last_frame_path/join_preview_path/shot_dir/shot_source_path），
+# 导致整个模块 ImportError。Task 8 负责 trim/restore-trim/align-tail-frame
+# （已重写为 workspace()+COS key，不再需要 shot_dir/shot_source_path/
+# shot_pre_cc_last_frame_path）。Task 10（上传链路）已修复全部
+# shot_custom_frames_dir/shot_dir 的上传/拷贝/删除端点调用点（upload-first-frame/
+# upload-tail-frame/reference-images/extract-first-frame/extract-last-frame/
+# extract-tail-frame/use-prev-last-frame/delete-tail-frame/first-frame）——全部
+# 改为 workspace()+COS key 或 object_store.copy/delete(_prefix)。Task 11（导出
+# 合并/连贯性预览/项目删除/storyboard）已修复：storyboard_path/
+# archived_storyboard_path（regenerate-script/put-storyboard/reset 三处归档+
+# 改写）改用 app.services.storyboard 的 write_storyboard/archive_storyboard/
+# read_storyboard；join_preview_path 改用 workspace()+join_preview_key；
+# put_storyboard 里残留的 shot_dir 清理改用
+# object_store.delete_prefix(shot_prefix(...))。Task 12（读路径）已修复最后一批
+# 只读展示端点（video-info/waveform/filmstrip/detect-silence/detect-speech-start）：
+# 这些端点以前靠 shot_source_path()/pristine_video_path() 在本地磁盘上区分「源片
+# vs 派生文件」，但 Task 8 起 trim/restore-trim/align-tail-frame 已经是纯 metadata
+# 操作（shot.video_path 指向的源对象永不改写，VC 只写 vc_audio_path）——也就是说
+# shot.video_path 本身恒为源片，不再需要任何解析函数；改为 workspace().fetch()
+# 直接下载 shot.video_path 到本地跑 ffprobe/ffmpeg（见 _fetch_dialog_source）。
+# filmstrip 的确定性缓存也从本地 shot_dir 迁到了 COS（fname 相同即复用，count
+# 变化时清理旧对象）。CC 还原读的是 pristine_last_frame_key 这一 DB 列，不是
+# 函数，不受影响。shot_pre_vc_video_path/shot_audio_original_path/
+# shot_audio_vc_path 是死 import，正文从未使用，也已随上面的 import 块清理。
 from app.services.storage import (
-    storyboard_path, archived_storyboard_path, shot_custom_frames_dir, to_media_url,
-    shot_pre_vc_video_path, shot_audio_original_path, shot_audio_vc_path,
-    shot_pre_cc_last_frame_path, join_preview_path, shot_dir, ts_uuid_name,
-    shot_source_path,
+    to_media_url, ts_uuid_name, shot_key, shot_prefix, join_preview_key,
 )
+from app.services import object_store
+from app.services.workspace import workspace, ensure_free_space
+from app.services.storyboard import write_storyboard, archive_storyboard, read_storyboard
 from app.services.events import publish_event
 
 router = APIRouter()
@@ -154,10 +180,8 @@ async def regenerate_script(
     project = await _get_project_or_404(project_id, session)
 
     # Archive current storyboard
-    sb_path = storyboard_path(project_id)
-    if sb_path.exists():
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-        sb_path.rename(archived_storyboard_path(project_id, ts))
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    await archive_storyboard(project_id, ts)
 
     # Clear shots
     result = await session.execute(
@@ -224,10 +248,10 @@ async def patch_storyboard(
 
     # Reload storyboard
     from app.models.schemas import Storyboard
+    sb_data = await read_storyboard(project.storyboard_path)
     storyboard = None
-    if project.storyboard_path:
+    if sb_data:
         try:
-            sb_data = json.loads(Path(project.storyboard_path).read_text())
             storyboard = Storyboard(**sb_data)
         except Exception:
             pass
@@ -273,13 +297,18 @@ async def put_storyboard(
     existing = {s.shot_id: s for s in result.scalars().all()}
     payload_ids = {item.shot_id for item in body.shots}
 
-    # Delete shots absent from the payload + remove any leftover output dir (CLAUDE.md audit).
-    for shot_id, shot in existing.items():
-        if shot_id not in payload_ids:
-            await session.delete(shot)
-            s_dir = shot_dir(project_id, shot_id)
-            if s_dir.exists():
-                shutil.rmtree(s_dir, ignore_errors=True)
+    # Delete shots absent from the payload + remove any leftover output objects
+    # (CLAUDE.md audit). Commit the DB deletion FIRST and only then clear COS —
+    # deleting the COS objects before the DB row is durably gone would leave a
+    # window where a crash/rollback resurrects a Shot row pointing at objects
+    # that no longer exist (the DB row must never outlive what it references).
+    removed_shot_ids = [sid for sid in existing if sid not in payload_ids]
+    for shot_id in removed_shot_ids:
+        await session.delete(existing[shot_id])
+    if removed_shot_ids:
+        await session.commit()
+        for shot_id in removed_shot_ids:
+            await object_store.delete_prefix(shot_prefix(project_id, shot_id))
 
     # Upsert shots present in the payload.
     for item in body.shots:
@@ -297,29 +326,20 @@ async def put_storyboard(
     project.scene_overview = body.scene_overview
 
     # Rewrite storyboard.json to match (DB is source of truth).
-    sb_path = storyboard_path(project_id)
-    sb_path.parent.mkdir(parents=True, exist_ok=True)
-    sb_path.write_text(
-        json.dumps(
-            {
-                "scene_overview": body.scene_overview,
-                "shots": [item.model_dump() for item in body.shots],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    sb_key = await write_storyboard(
+        project_id, body.scene_overview, [item.model_dump() for item in body.shots]
     )
-    project.storyboard_path = str(sb_path)
+    project.storyboard_path = sb_key
     project.updated_at = datetime.utcnow()
     session.add(project)
     await session.commit()
     await session.refresh(project)
 
     from app.models.schemas import Storyboard
+    sb_data = await read_storyboard(project.storyboard_path)
     storyboard = None
-    if project.storyboard_path:
+    if sb_data:
         try:
-            sb_data = json.loads(Path(project.storyboard_path).read_text())
             storyboard = Storyboard(**sb_data)
         except Exception:
             pass
@@ -694,15 +714,28 @@ async def rewrite_motion_prompt(
 
     try:
         async with observability.project_context(project_id, "api-rewrite-motion"):
-            new_prompt = await run_director_agent(
-                shot_id=shot_id,
-                shot_type=shot_type,
-                visual_description=visual_description,
-                text=text,
-                duration=duration,
-                llm_provider=provider,
-                reference_image_paths=object_ref_paths,
-            )
+            # object_ref_paths holds COS keys — director.run_director does
+            # Path(p).exists() (always False for a key), so they must be
+            # fetched into a local workspace before the LLM call (C2).
+            async with workspace() as ref_ws:
+                local_obj_refs: list[str] = []
+                for i, k in enumerate(object_ref_paths or []):
+                    if not k or not await object_store.exists(k):
+                        continue
+                    p = await ref_ws.fetch(
+                        k, name=f"objref_{i}{Path(k).suffix or '.png'}"
+                    )
+                    local_obj_refs.append(str(p))
+
+                new_prompt = await run_director_agent(
+                    shot_id=shot_id,
+                    shot_type=shot_type,
+                    visual_description=visual_description,
+                    text=text,
+                    duration=duration,
+                    llm_provider=provider,
+                    reference_image_paths=local_obj_refs or None,
+                )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Director agent failed: {e}")
 
@@ -754,6 +787,7 @@ async def join_preview(
 ):
     """临时把选中的 shot 纯拼接成一条预览视频，用于检测连贯性。同步执行。"""
     from app.agents.merger import merge_shots
+    from app.agents.effective_clip import ClipSpec, effective_clip_paths
 
     await _get_project_or_404(project_id, session)
 
@@ -779,7 +813,7 @@ async def join_preview(
             raise HTTPException(
                 status_code=400, detail=f"镜头 {sid} 尚未完成，无法预览"
             )
-        if not shot.video_path or not Path(shot.video_path).exists():
+        if not shot.video_path or not await object_store.exists(shot.video_path):
             raise HTTPException(
                 status_code=400, detail=f"镜头 {sid} 缺少视频文件"
             )
@@ -787,30 +821,46 @@ async def join_preview(
 
     # Apply the non-destructive EDL (trim + VC) before stitching, so the
     # continuity preview reflects the trimmed clips — not the full source.
-    import tempfile
-    import shutil as _shutil
-    from app.agents.effective_clip import effective_clip_paths
+    # Precheck real object sizes before fetching (same rationale as export
+    # merge): a handful of shots is usually small, but skipping the precheck
+    # still risks an opaque ffmpeg failure on a disk-constrained host.
+    keys = [s.video_path for s in ordered_shots]
+    keys += [s.vc_audio_path for s in ordered_shots if s.vc_audio_path]
+    total = sum([await object_store.size(k) for k in keys])
+    await ensure_free_space(int(total * 2.2))
 
-    # Unique filename per preview (+ clean old) so the browser never serves a
-    # stale cached preview from a fixed path.
-    previews_dir = join_preview_path(project_id).parent
-    for _old in list(previews_dir.glob("join_preview*.mp4")) + list(previews_dir.glob("join_preview*.txt")):
-        _old.unlink(missing_ok=True)
-    output_path = str(previews_dir / f"join_preview_{ts_uuid_name('.mp4')}")
-    tmp_dir = tempfile.mkdtemp(prefix=f"joinpreview_{project_id}_")
     try:
-        ordered_paths = effective_clip_paths(ordered_shots, tmp_dir)
-        merge_shots(ordered_paths, output_path)
+        async with workspace() as ws:
+            specs: list[ClipSpec] = []
+            for i, shot in enumerate(ordered_shots):
+                # Distinct name per shot: fetching several shots into ONE
+                # workspace needs it (ws.fetch raises on two different keys
+                # sharing a default local name — every shot's video is
+                # "output_<ts>_<uuid>.mp4"-shaped).
+                local_video = await ws.fetch(shot.video_path, name=f"part_{i:04d}.mp4")
+                local_vc = None
+                if shot.vc_audio_path:
+                    local_vc = str(await ws.fetch(shot.vc_audio_path, name=f"vc_{i:04d}.wav"))
+                specs.append(ClipSpec(
+                    local_video_path=str(local_video),
+                    trim_frames=shot.trim_frames,
+                    local_vc_audio_path=local_vc,
+                    audio_head_mute_frames=shot.audio_head_mute_frames,
+                ))
+
+            clip_paths = effective_clip_paths(specs, str(ws.root))
+            out = ws.path("join_preview.mp4")
+            merge_shots(clip_paths, str(out))
+            # cache-busting：用输出文件修改时间(纳秒)，避免浏览器/video 缓存旧预览。
+            # 必须在 workspace 退出（自动删除临时文件）前读取。
+            bust = out.stat().st_mtime_ns
+            key = await ws.publish(out, join_preview_key(project_id))
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"拼接失败: {e}")
-    finally:
-        _shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    media_url = to_media_url(output_path)
-    # cache-busting：用输出文件修改时间(纳秒)，避免浏览器/video 缓存旧预览
-    bust = Path(output_path).stat().st_mtime_ns
+    media_url = to_media_url(key)
     return {"preview_url": f"{media_url}?t={bust}"}
 
 
@@ -876,10 +926,8 @@ async def reset_project(
     project = await _get_project_or_404(project_id, session)
 
     # Archive storyboard
-    sb_path = storyboard_path(project_id)
-    if sb_path.exists():
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-        sb_path.rename(archived_storyboard_path(project_id, ts))
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    await archive_storyboard(project_id, ts)
 
     # Clear shots
     result = await session.execute(
@@ -1040,18 +1088,18 @@ async def delete_tail_frame(
             detail="Tail frame is currently being generated; wait for it to complete",
         )
 
-    # Capture the stored path BEFORE clearing — needed for unlink below
-    old_path = shot.target_last_frame_path
+    # Capture the stored key BEFORE clearing — needed for the COS delete below
+    old_key = shot.target_last_frame_path
 
     # Clear all tail-frame state (path-as-truth: empty path = no tail frame)
     _reset_tail_frame(shot)
     session.add(shot)
     await session.commit()
 
-    # Remove the physical file at the DB-stored path (covers both AI-generated
+    # Remove the COS object at the DB-stored key (covers both AI-generated
     # canonical names and ts_uuid filenames from uploaded/extracted frames)
-    if old_path:
-        Path(old_path).unlink(missing_ok=True)
+    if old_key:
+        await object_store.delete(old_key)
 
     return {
         "shot_id": shot_id,
@@ -1079,17 +1127,15 @@ async def extract_tail_frame(
     if not shot.last_frame_path:
         raise HTTPException(status_code=400, detail="Shot has no last frame")
 
-    src = Path(shot.last_frame_path)
-    if not src.exists():
+    src_key = shot.last_frame_path
+    if not await object_store.exists(src_key):
         raise HTTPException(status_code=400, detail="Last frame file not found")
 
-    # Copy last_frame.png → target_last_frame.png
-    from app.services.storage import shot_target_last_frame_path
-    dest = shot_target_last_frame_path(project_id, shot_id)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(src), str(dest))
+    # Copy last_frame → target_last_frame (server-side COS copy, unique name)
+    dest_key = shot_key(project_id, shot_id, ts_uuid_name(Path(src_key).suffix or ".png"))
+    await object_store.copy(src_key, dest_key)
 
-    shot.target_last_frame_path = str(dest)
+    shot.target_last_frame_path = dest_key
     shot.tf_status = "done"
     shot.tf_error_message = None
     shot.tf_confirmed = False
@@ -1098,7 +1144,7 @@ async def extract_tail_frame(
 
     return {
         "shot_id": shot_id,
-        "target_last_frame_path": to_media_url(str(dest)),
+        "target_last_frame_path": to_media_url(dest_key),
         "tf_status": "done",
     }
 
@@ -1129,23 +1175,24 @@ async def upload_shot_references(
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    # Create storage directory
-    dest_dir = shot_custom_frames_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    from app.services.storage import shot_custom_frames_prefix
 
-    # Collect existing paths
+    # Collect existing keys
     existing_paths: list[str] = []
     if shot.custom_reference_paths:
         existing_paths = json.loads(shot.custom_reference_paths)
 
-    # Save new files (append)
-    for upload in files:
-        content = await upload.read()
-        safe_name = Path(upload.filename).name if upload.filename else "image.png"
-        image_id = str(_uuid.uuid4())[:8]
-        dest_path = dest_dir / f"{image_id}_{safe_name}"
-        dest_path.write_bytes(content)
-        existing_paths.append(str(dest_path))
+    # Save new files (append) — stage locally then publish to COS.
+    prefix = shot_custom_frames_prefix(project_id, shot_id)
+    async with workspace() as ws:
+        for idx, upload in enumerate(files):
+            content = await upload.read()
+            safe_name = Path(upload.filename).name if upload.filename else "image.png"
+            image_id = str(_uuid.uuid4())[:8]
+            local = ws.path(f"ref_{idx}_{safe_name}")
+            local.write_bytes(content)
+            key = await ws.publish(local, f"{prefix}{image_id}_{safe_name}")
+            existing_paths.append(key)
 
     # Always store as reference_images so they are passed as object refs
     all_paths = existing_paths
@@ -1176,6 +1223,11 @@ async def delete_shot_references(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
+    from app.services.storage import shot_custom_frames_prefix
+
+    removed_key: Optional[str] = None
+    delete_all_prefix: Optional[str] = None
+
     if index is not None:
         # Delete single image by index
         all_paths: list[str] = []
@@ -1185,22 +1237,24 @@ async def delete_shot_references(
         if index < 0 or index >= len(all_paths):
             raise HTTPException(status_code=400, detail="Invalid index")
 
-        # Delete file
-        removed = Path(all_paths.pop(index))
-        removed.unlink(missing_ok=True)
+        # 素材审计（CLAUDE.md）：先改 DB 解除引用，再删 COS 对象。
+        removed_key = all_paths.pop(index)
 
         # Update DB
         shot.custom_first_frame_path = None
         shot.custom_reference_paths = json.dumps(all_paths) if all_paths else None
     else:
         # Delete all
-        dest_dir = shot_custom_frames_dir(project_id, shot_id)
-        if dest_dir.exists():
-            shutil.rmtree(dest_dir)
+        delete_all_prefix = shot_custom_frames_prefix(project_id, shot_id)
         shot.custom_first_frame_path = None
         shot.custom_reference_paths = None
 
     await session.commit()
+
+    if removed_key:
+        await object_store.delete(removed_key)
+    if delete_all_prefix:
+        await object_store.delete_prefix(delete_all_prefix)
 
     return _ref_images_response(shot)
 
@@ -1233,14 +1287,17 @@ async def upload_first_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
-    dest_dir = shot_custom_frames_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    from app.services.storage import shot_custom_frames_prefix
+
     ext = Path(file.filename or "x.png").suffix or ".png"
-    dest = dest_dir / ts_uuid_name(ext)
-    dest.write_bytes(await file.read())
-    shot.custom_first_frame_path = str(dest)
+    content = await file.read()
+    async with workspace() as ws:
+        local = ws.path(ts_uuid_name(ext))
+        local.write_bytes(content)
+        key = await ws.publish(local, f"{shot_custom_frames_prefix(project_id, shot_id)}{local.name}")
+    shot.custom_first_frame_path = key
     await session.commit()
-    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(key)}
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/upload-tail-frame")
@@ -1260,17 +1317,18 @@ async def upload_tail_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
-    dest_dir = shot_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
     ext = Path(file.filename or "x.png").suffix or ".png"
-    dest = dest_dir / ts_uuid_name(ext)
-    dest.write_bytes(await file.read())
-    shot.target_last_frame_path = str(dest)
+    content = await file.read()
+    async with workspace() as ws:
+        local = ws.path(ts_uuid_name(ext))
+        local.write_bytes(content)
+        key = await ws.publish(local, shot_key(project_id, shot_id, local.name))
+    shot.target_last_frame_path = key
     shot.tf_status = "done"
     await session.commit()
     return {
         "shot_id": shot_id,
-        "target_last_frame_path": to_media_url(str(dest)),
+        "target_last_frame_path": to_media_url(key),
         "tf_status": "done",
     }
 
@@ -1296,22 +1354,25 @@ async def extract_first_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
+    from app.services.storage import shot_custom_frames_prefix
+
     try:
         src = await pick_first_frame(project_id, shot, session)
     except ValueError:
         src = None
-    if src is None or not src.exists():
+    if src is None:
         raise HTTPException(status_code=400, detail="Shot has no first frame or file is missing")
-    src_str = str(src)
+    # pick_first_frame already validated object_store existence for every
+    # branch it can return — no extra local .exists() check needed (and it
+    # would be wrong: src is a Path wrapping a COS key, not a local file).
+    src_key = str(src)
 
-    dest_dir = shot_custom_frames_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
-    shutil.copy2(src_str, str(dest))
+    dest_key = f"{shot_custom_frames_prefix(project_id, shot_id)}{ts_uuid_name(Path(src_key).suffix or '.png')}"
+    await object_store.copy(src_key, dest_key)
 
-    shot.custom_first_frame_path = str(dest)
+    shot.custom_first_frame_path = dest_key
     await session.commit()
-    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(dest_key)}
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/use-prev-last-frame")
@@ -1338,22 +1399,22 @@ async def use_prev_last_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
+    from app.services.storage import shot_custom_frames_prefix
+
     prev_result = await session.execute(
         select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id - 1)
     )
     prev = prev_result.scalar_one_or_none()
-    src_str = prev.last_frame_path if prev else None
-    if not src_str or not Path(src_str).exists():
+    src_key = prev.last_frame_path if prev else None
+    if not src_key or not await object_store.exists(src_key):
         raise HTTPException(status_code=400, detail="Previous shot has no last frame")
 
-    dest_dir = shot_custom_frames_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
-    shutil.copy2(src_str, str(dest))
+    dest_key = f"{shot_custom_frames_prefix(project_id, shot_id)}{ts_uuid_name(Path(src_key).suffix or '.png')}"
+    await object_store.copy(src_key, dest_key)
 
-    shot.custom_first_frame_path = str(dest)
+    shot.custom_first_frame_path = dest_key
     await session.commit()
-    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(str(dest))}
+    return {"shot_id": shot_id, "custom_first_frame_path": to_media_url(dest_key)}
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/extract-last-frame")
@@ -1372,21 +1433,19 @@ async def extract_last_frame(
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
 
-    src_str = shot.last_frame_path
-    if not src_str or not Path(src_str).exists():
+    src_key = shot.last_frame_path
+    if not src_key or not await object_store.exists(src_key):
         raise HTTPException(status_code=400, detail="Shot has no last frame or file is missing")
 
-    dest_dir = shot_dir(project_id, shot_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / ts_uuid_name(Path(src_str).suffix or ".png")
-    shutil.copy2(src_str, str(dest))
+    dest_key = shot_key(project_id, shot_id, ts_uuid_name(Path(src_key).suffix or ".png"))
+    await object_store.copy(src_key, dest_key)
 
-    shot.target_last_frame_path = str(dest)
+    shot.target_last_frame_path = dest_key
     shot.tf_status = "done"
     await session.commit()
     return {
         "shot_id": shot_id,
-        "target_last_frame_path": to_media_url(str(dest)),
+        "target_last_frame_path": to_media_url(dest_key),
         "tf_status": "done",
     }
 
@@ -1422,7 +1481,7 @@ async def delete_first_frame(
         )
 
     # Capture the stored path BEFORE clearing — needed for unlink below
-    old_path = shot.custom_first_frame_path
+    old_key = shot.custom_first_frame_path
 
     # Clear the custom first frame path
     shot.custom_first_frame_path = None
@@ -1431,10 +1490,10 @@ async def delete_first_frame(
     session.add(shot)
     await session.commit()
 
-    # Remove the physical file at the DB-stored path (covers ts_uuid filenames
+    # Remove the COS object at the DB-stored key (covers ts_uuid filenames
     # from uploaded frames)
-    if old_path:
-        Path(old_path).unlink(missing_ok=True)
+    if old_key:
+        await object_store.delete(old_key)
 
     return {
         "shot_id": shot_id,
@@ -1475,15 +1534,18 @@ async def reorder_shot_references(
     return _ref_images_response(shot)
 
 
-def _dialog_source(project_id: str, shot_id: int, video_path: str) -> str:
-    """裁剪弹窗只读端点的统一「源片视角」。
+async def _fetch_dialog_source(ws, shot: Shot) -> Path:
+    """Fetch the shot's source video into a workspace for ffprobe/ffmpeg.
 
-    trim 端点按源片帧号裁剪（shot_source_path），弹窗展示的时间轴/波形/静音
-    检测必须基于同一文件，否则 VC 后（video_path 指向物理剪过的派生文件）
-    时间轴只剩剪后长度。找不到源片时回退 video_path。
+    shot.video_path is the immutable source key — /trim, /restore-trim and
+    /align-tail-frame only ever write trim_frames metadata, never overwrite
+    it (see their docstrings: "source in COS is never touched"), and VC only
+    ever sets vc_audio_path. So unlike the pre-Task-8 local-storage model
+    (where trimming/VC physically rewrote the file), there is no separate
+    "pristine vs derived" file to resolve here — the source is always just
+    shot.video_path.
     """
-    src = shot_source_path(project_id, shot_id)
-    return str(src) if src is not None else video_path
+    return await ws.fetch(shot.video_path, name="source.mp4")
 
 
 @router.get("/projects/{project_id}/shots/{shot_id}/video-info")
@@ -1503,23 +1565,25 @@ async def get_shot_video_info(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    source = _dialog_source(project_id, shot_id, shot.video_path)
-    info = get_video_info(source)
-    # 容器时长可能含超出视频的音频尾巴（老生成产物）——时间轴统一按视频流计
-    if info.get("fps"):
-        info["duration"] = round(info["total_frames"] / info["fps"], 3)
-    # Restore is possible when a pristine output_ exists and the current clip is a
-    # derived (trimmed_/vc_) file, i.e. not the pristine itself.
-    from app.services.storage import pristine_video_path
-    pristine = pristine_video_path(project_id, shot_id)
-    info["has_backup"] = pristine is not None and Path(shot.video_path) != pristine
-    try:
-        sec, frame = speech_end_info(source, info["fps"])
-    except Exception:  # 静音检测失败不应阻塞裁剪元数据返回
-        sec, frame = None, None
+    async with workspace() as ws:
+        local_source = await _fetch_dialog_source(ws, shot)
+        source = str(local_source)
+        info = get_video_info(source)
+        # 容器时长可能含超出视频的音频尾巴（老生成产物）——时间轴统一按视频流计
+        if info.get("fps"):
+            info["duration"] = round(info["total_frames"] / info["fps"], 3)
+        try:
+            sec, frame = speech_end_info(source, info["fps"])
+        except Exception:  # 静音检测失败不应阻塞裁剪元数据返回
+            sec, frame = None, None
+    # Restore is possible whenever a trim is currently applied — trim is
+    # metadata-only (the source object is never overwritten, see
+    # _fetch_dialog_source's docstring), so "has a backup" reduces to
+    # "trim_frames is set" (path-as-truth, mirrors tf/vc/cc conventions).
+    info["has_backup"] = shot.trim_frames is not None
     info["speech_end_sec"] = sec
     info["speech_end_frame"] = frame
-    info["source_video_url"] = to_media_url(source)
+    info["source_video_url"] = to_media_url(shot.video_path)
     return info
 
 
@@ -1540,10 +1604,12 @@ async def get_shot_waveform(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
     try:
-        source = _dialog_source(project_id, shot_id, shot.video_path)
-        info = get_video_info(source)
-        video_seconds = info["total_frames"] / info["fps"] if info.get("fps") else None
-        peaks = extract_waveform_peaks(source, max_seconds=video_seconds)
+        async with workspace() as ws:
+            local_source = await _fetch_dialog_source(ws, shot)
+            source = str(local_source)
+            info = get_video_info(source)
+            video_seconds = info["total_frames"] / info["fps"] if info.get("fps") else None
+            peaks = extract_waveform_peaks(source, max_seconds=video_seconds)
     except Exception:
         peaks = []
     return {"peaks": peaks}
@@ -1558,16 +1624,15 @@ async def get_shot_filmstrip(
 ):
     """Return a horizontal thumbnail sprite URL for the shot's source video.
 
-    Filename is deterministic (hash of the resolved source path + requested
-    count), so re-opening the trim dialog on the same source reuses the
-    cached sprite and skips the ffmpeg tile pass entirely — otherwise every
-    dialog-open would run ffmpeg again and leave a fresh PNG behind (accumulating
-    one orphan per open, forever). Any other stale filmstrip_*.png in the shot
-    dir (e.g. left over from before a re-trim/VC changed the source) is cleaned
-    up on each call, mirroring join_preview's glob+unlink cleanup pattern.
+    Cache key is deterministic (hash of the source key + requested count) and
+    lives in COS under the shot's own prefix, so re-opening the trim dialog on
+    the same shot reuses the cached sprite and skips the ffmpeg tile pass
+    entirely — otherwise every dialog-open would run ffmpeg again and leave a
+    fresh object behind (accumulating one orphan per open, forever). Any other
+    stale filmstrip_*.png under the shot prefix (e.g. from a previously
+    requested `count`) is cleaned up on each call.
     """
     from app.agents.video_trimmer import extract_filmstrip_sprite, get_video_info
-    from app.services.storage import shot_dir
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1576,36 +1641,42 @@ async def get_shot_filmstrip(
     shot = result.scalar_one_or_none()
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
-    source = _dialog_source(project_id, shot_id, shot.video_path)
     n = max(4, min(count, 24))
 
-    digest = hashlib.md5(str(Path(source).resolve()).encode()).hexdigest()[:12]
-    d = shot_dir(project_id, shot_id)
+    digest = hashlib.md5(shot.video_path.encode()).hexdigest()[:12]
     fname = f"filmstrip_{digest}_{n}.png"
-    out = d / fname
+    out_key = shot_key(project_id, shot_id, fname)
 
-    # Clean up sprites for a DIFFERENT source/count so a re-trim/VC that
-    # changes the underlying video doesn't leave orphaned PNGs behind.
-    if d.is_dir():
-        for stale in d.glob("filmstrip_*.png"):
-            if stale.name != fname:
-                stale.unlink(missing_ok=True)
+    async with workspace() as ws:
+        local_source = await _fetch_dialog_source(ws, shot)
 
-    if out.exists():
-        # Cache hit: same source already sprited — skip the ffmpeg tile pass.
-        # A cheap ffprobe (not the expensive tile ffmpeg call) recomputes the
-        # actual cell count in case the source is shorter than `count` frames.
-        try:
-            info = get_video_info(source)
-            actual = max(1, min(n, max(1, int(info["total_frames"]))))
-        except Exception:
-            actual = n
-    else:
-        try:
-            actual = extract_filmstrip_sprite(source, str(out), count=n)
-        except Exception:
-            raise HTTPException(status_code=500, detail="filmstrip 生成失败")
-    return {"url": to_media_url(str(out)), "count": actual, "cell_aspect": 16 / 9}
+        if await object_store.exists(out_key):
+            # Cache hit: same source+count already sprited — skip the ffmpeg
+            # tile pass. A cheap ffprobe recomputes the actual cell count in
+            # case the source is shorter than `count` frames.
+            try:
+                info = get_video_info(str(local_source))
+                actual = max(1, min(n, max(1, int(info["total_frames"]))))
+            except Exception:
+                actual = n
+        else:
+            local_out = ws.path(fname)
+            try:
+                actual = extract_filmstrip_sprite(str(local_source), str(local_out), count=n)
+            except Exception:
+                raise HTTPException(status_code=500, detail="filmstrip 生成失败")
+            await ws.publish(local_out, out_key)
+
+    # Clean up sprites for a DIFFERENT count so a re-request with a changed
+    # count doesn't leave orphaned objects behind under the shot prefix.
+    stale_keys = [
+        k for k in await object_store.list_prefix(shot_prefix(project_id, shot_id))
+        if k.rsplit("/", 1)[-1].startswith("filmstrip_") and k != out_key
+    ]
+    for k in stale_keys:
+        await object_store.delete(k)
+
+    return {"url": to_media_url(out_key), "count": actual, "cell_aspect": 16 / 9}
 
 
 async def _repoint_next_first_frame(
@@ -1640,32 +1711,33 @@ async def _repoint_next_first_frame(
     return None
 
 
-async def _commit_new_current_video(
-    project_id: str, shot: Shot, new_video: Path, session: AsyncSession
-) -> None:
-    """Point shot at a video (a freshly-written trimmed_/vc_ file, or the pristine
-    output_ on restore), refresh its unique last frame, and re-point the next shot.
+async def _reset_cc_and_clear_pre_cc_backup(shot: Shot) -> None:
+    """Last frame changed → reset CC; clear the pre-CC backup key + object.
 
-    Deletes the previous current ONLY if it is a derived file (trimmed_/vc_); the
-    pristine output_<ts>_<uuid>.mp4 is never deleted here so restore-trim can recover
-    it. Stale last_frame files are cleared (keeps the last_frame_pre_cc.png backup).
+    素材变更审计（CLAUDE.md）：顺序固定为「先改 DB 解除引用，再删 COS 对象」——
+    反过来在删除失败时会留下悬空引用（DB 指向一个可能已被删掉的对象）。
+    This only mutates the passed-in ORM object + issues the COS delete; the
+    caller is responsible for committing the session first.
     """
-    from app.agents.frame_porter import extract_last_frame
+    shot.cc_status = None
+    shot.cc_error_message = None
+    stale_pre_cc = shot.pre_cc_last_frame_key
+    shot.pre_cc_last_frame_key = None
+    return stale_pre_cc
 
-    s_dir = new_video.parent
-    old = Path(shot.video_path) if shot.video_path else None
-    if old and old != new_video and old.name.startswith(("trimmed_", "vc_")):
-        old.unlink(missing_ok=True)
-    shot.video_path = str(new_video)
 
-    for _old in s_dir.glob("last_frame*.png"):
-        if _old.name != "last_frame_pre_cc.png":
-            _old.unlink(missing_ok=True)
-    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
-    extract_last_frame(str(new_video), str(new_lf))
-    shot.last_frame_path = str(new_lf)
+async def _publish_new_last_frame(
+    ws, local_source: Path, frame_idx: int, project_id: str, shot_id: int
+) -> str:
+    """Extract *frame_idx* from the (already-fetched) local source video and
+    publish it to a fresh, uniquely-named COS key. Returns the new key."""
+    from app.agents.frame_porter import extract_frame_at
 
-    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+    local_lf = ws.path("new_last_frame.png")
+    extract_frame_at(str(local_source), frame_idx, str(local_lf))
+    return await ws.publish(
+        local_lf, shot_key(project_id, shot_id, f"last_frame_{ts_uuid_name('.png')}")
+    )
 
 
 @router.post("/projects/{project_id}/shots/{shot_id}/trim")
@@ -1678,13 +1750,13 @@ async def trim_shot_video(
 ):
     """Non-destructive trim: record trim_frames and refresh the last frame.
 
-    The source output_*.mp4 is never modified. Trimming changes the effective
-    last frame (index N-1 of the source) → re-extract it and reset CC. VC is
-    untouched (the vc audio is full-length and independent of trim length).
+    shot.video_path (the source video object in COS) is never modified — only
+    trim_frames metadata changes. Trimming changes the effective last frame
+    (index N-1 of the source) → re-extract it, publish it to a fresh key, and
+    reset CC. VC is untouched (the vc audio is full-length and independent of
+    trim length).
     """
     from app.agents.video_trimmer import get_video_info
-    from app.agents.frame_porter import extract_frame_at
-    from app.services.storage import shot_source_path
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1695,40 +1767,38 @@ async def trim_shot_video(
         raise HTTPException(status_code=404, detail="Shot or video not found")
     if shot.status != "completed":
         raise HTTPException(status_code=409, detail="Shot is not completed")
-
-    source = shot_source_path(project_id, shot_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="Source video not found")
-    info = get_video_info(str(source))
-    total = info["total_frames"]
-
     if body.end_frame < 24:
         raise HTTPException(status_code=400, detail="Must keep at least 24 frames")
-    n = min(body.end_frame, total)  # clamp; full length is a no-op trim
 
-    # 1. Metadata only — source file is never touched
+    source_key = shot.video_path
+
+    async with workspace() as ws:
+        local_source = await ws.fetch(source_key, name="source.mp4")
+        info = get_video_info(str(local_source))
+        total = info["total_frames"]
+        n = min(body.end_frame, total)  # clamp; full length is a no-op trim
+
+        frame_idx = (n - 1) if n < total else (total - 1)
+        new_lf_key = await _publish_new_last_frame(
+            ws, local_source, frame_idx, project_id, shot_id
+        )
+
+    # 1. Metadata only — source object in COS is never touched
     shot.trim_frames = n if n < total else None
-    shot.video_path = str(source)   # always the immutable source
     shot.source_fps = info["fps"]
     shot.source_frames = total
 
-    # 2. Refresh last frame = source frame N-1 (or full last frame when no trim)
-    s_dir = shot_dir(project_id, shot_id)
-    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
-        _old.unlink(missing_ok=True)
-    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
-    frame_idx = (n - 1) if n < total else (total - 1)
-    extract_frame_at(str(source), frame_idx, str(new_lf))
-    shot.last_frame_path = str(new_lf)
-    repointed = await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+    # 2. Point at the freshly-published last frame
+    shot.last_frame_path = new_lf_key
+    repointed = await _repoint_next_first_frame(project_id, shot.shot_id, new_lf_key, session)
 
-    # 3. Last frame changed → reset CC. VC is untouched.
-    # Note: last_frame_pre_cc.png is already removed by the glob above.
-    shot.cc_status = None
-    shot.cc_error_message = None
+    # 3. Last frame changed → reset CC + clear pre-CC backup (DB first, then COS delete)
+    stale_pre_cc = await _reset_cc_and_clear_pre_cc_backup(shot)
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
+    if stale_pre_cc:
+        await object_store.delete(stale_pre_cc)
 
     resp = {
         "video_path": to_media_url(shot.video_path),
@@ -1736,7 +1806,7 @@ async def trim_shot_video(
         "trim_frames": shot.trim_frames,
         "trim_end_sec": (shot.trim_frames / info["fps"]) if shot.trim_frames else None,
         "version": ts,
-        **get_video_info(str(source)),
+        **info,
     }
     # If the next (un-generated) shot's first frame was auto-repointed to the new
     # trimmed last frame, surface it so the UI updates without a full refetch.
@@ -1757,10 +1827,6 @@ async def restore_trim(
 ):
     """Clear the trim: trim_frames=None, refresh last frame to the source's final frame."""
     from app.agents.video_trimmer import get_video_info
-    from app.agents.frame_porter import extract_frame_at
-    from app.services.storage import (
-        shot_source_path, ts_uuid_name, shot_dir,
-    )
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1770,38 +1836,36 @@ async def restore_trim(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    source = shot_source_path(project_id, shot_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="Source video not found")
-    info = get_video_info(str(source))
-    total = info["total_frames"]
+    source_key = shot.video_path
+
+    async with workspace() as ws:
+        local_source = await ws.fetch(source_key, name="source.mp4")
+        info = get_video_info(str(local_source))
+        total = info["total_frames"]
+        new_lf_key = await _publish_new_last_frame(
+            ws, local_source, total - 1, project_id, shot_id
+        )
 
     shot.trim_frames = None
-    shot.video_path = str(source)
     shot.source_fps = info["fps"]
     shot.source_frames = total
+    shot.last_frame_path = new_lf_key
+    await _repoint_next_first_frame(project_id, shot.shot_id, new_lf_key, session)
 
-    s_dir = shot_dir(project_id, shot_id)
-    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
-        _old.unlink(missing_ok=True)
-    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
-    extract_frame_at(str(source), total - 1, str(new_lf))
-    shot.last_frame_path = str(new_lf)
-    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
-
-    # Note: last_frame_pre_cc.png is already removed by the glob above.
-    shot.cc_status = None
-    shot.cc_error_message = None
+    stale_pre_cc = await _reset_cc_and_clear_pre_cc_backup(shot)
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
+    if stale_pre_cc:
+        await object_store.delete(stale_pre_cc)
+
     return {
         "video_path": to_media_url(shot.video_path),
         "last_frame_path": to_media_url(shot.last_frame_path),
         "trim_frames": None,
         "trim_end_sec": None,
         "version": ts,
-        **get_video_info(str(source)),
+        **info,
     }
 
 
@@ -1813,10 +1877,8 @@ async def align_tail_frame(
     session: AsyncSession = Depends(get_session),
 ):
     """Non-destructive auto-trim: update trim_frames metadata to the frame that best
-    matches the target tail frame (SSIM). Source output_*.mp4 is never modified."""
+    matches the target tail frame (SSIM). shot.video_path (source) is never modified."""
     from app.agents.video_trimmer import find_best_tail_frame, get_video_info
-    from app.agents.frame_porter import extract_frame_at
-    from app.services.storage import shot_source_path
 
     await _get_project_or_404(project_id, session)
     result = await session.execute(
@@ -1828,40 +1890,39 @@ async def align_tail_frame(
     if not shot.target_last_frame_path:
         raise HTTPException(status_code=400, detail="No target tail frame for this shot")
 
-    source = shot_source_path(project_id, shot_id)
-    if source is None:
-        raise HTTPException(status_code=404, detail="Source video not found")
-    info = get_video_info(str(source))
-    total = info["total_frames"]
+    source_key = shot.video_path
+    target_key = shot.target_last_frame_path
 
-    best = find_best_tail_frame(str(source), shot.target_last_frame_path)
-    n = total if best is None else min(best, total)
+    async with workspace() as ws:
+        local_source = await ws.fetch(source_key, name="source.mp4")
+        local_target = await ws.fetch(target_key, name="target_last_frame.png")
+        info = get_video_info(str(local_source))
+        total = info["total_frames"]
 
-    # 1. Metadata only — source file is never touched
+        best = find_best_tail_frame(str(local_source), str(local_target))
+        n = total if best is None else min(best, total)
+
+        frame_idx = (n - 1) if n < total else (total - 1)
+        new_lf_key = await _publish_new_last_frame(
+            ws, local_source, frame_idx, project_id, shot_id
+        )
+
+    # 1. Metadata only — source object in COS is never touched
     shot.trim_frames = n if n < total else None
-    shot.video_path = str(source)
     shot.source_fps = info["fps"]
     shot.source_frames = total
 
-    # 2. Refresh last frame (same pattern as /trim)
-    s_dir = shot_dir(project_id, shot_id)
-    for _old in list(s_dir.glob("last_frame_*.png")) + list(s_dir.glob("cc_*.png")):
-        _old.unlink(missing_ok=True)
-    new_lf = s_dir / f"last_frame_{ts_uuid_name('.png')}"
-    frame_idx = (n - 1) if n < total else (total - 1)
-    extract_frame_at(str(source), frame_idx, str(new_lf))
-    shot.last_frame_path = str(new_lf)
-    await _repoint_next_first_frame(project_id, shot.shot_id, str(new_lf), session)
+    # 2. Point at the freshly-published last frame
+    shot.last_frame_path = new_lf_key
+    await _repoint_next_first_frame(project_id, shot.shot_id, new_lf_key, session)
 
     # 3. Last frame changed → reset CC. VC is untouched (consistent with /trim).
-    shot.cc_status = None
-    shot.cc_error_message = None
-    pre_cc = shot_pre_cc_last_frame_path(project_id, shot_id)
-    if pre_cc.exists():
-        pre_cc.unlink()
+    stale_pre_cc = await _reset_cc_and_clear_pre_cc_backup(shot)
 
     ts = int(datetime.utcnow().timestamp())
     await session.commit()
+    if stale_pre_cc:
+        await object_store.delete(stale_pre_cc)
 
     return {
         "video_path": to_media_url(shot.video_path),
@@ -1870,7 +1931,7 @@ async def align_tail_frame(
         "trim_end_sec": (shot.trim_frames / info["fps"]) if shot.trim_frames else None,
         "version": ts,
         "aligned_to_frame": n,
-        **get_video_info(str(source)),
+        **info,
     }
 
 
@@ -1896,14 +1957,17 @@ async def detect_silence(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    source = _dialog_source(project_id, shot_id, shot.video_path)
-    suggestion = suggest_silence_trim(source)
+    async with workspace() as ws:
+        local_source = await _fetch_dialog_source(ws, shot)
+        source = str(local_source)
+        suggestion = suggest_silence_trim(source)
+        no_silence_info = None if suggestion is not None else get_video_info(source)
     if suggestion is None:
         return {
             "has_silence": False,
             "suggested_end_frame": None,
             "silence_start_time": None,
-            **get_video_info(source),
+            **no_silence_info,
         }
     return {"has_silence": True, **suggestion}
 
@@ -1926,16 +1990,18 @@ async def detect_speech_start_ep(
     if not shot or not shot.video_path:
         raise HTTPException(status_code=404, detail="Shot or video not found")
 
-    source = _dialog_source(project_id, shot_id, shot.video_path)
-    info = get_video_info(source)
-    start_sec = detect_speech_start(source)
+    async with workspace() as ws:
+        local_source = await _fetch_dialog_source(ws, shot)
+        source = str(local_source)
+        info = get_video_info(source)
+        start_sec = detect_speech_start(source)
     if start_sec is None:
         return {"has_lead_silence": False, "suggested_start_frame": None, **info,
-                "source_video_url": to_media_url(source)}
+                "source_video_url": to_media_url(shot.video_path)}
     return {"has_lead_silence": True,
             "suggested_start_frame": int(round(start_sec * info["fps"])),
             "speech_start_sec": start_sec, **info,
-            "source_video_url": to_media_url(source)}
+            "source_video_url": to_media_url(shot.video_path)}
 
 
 @router.put("/projects/{project_id}/shots/{shot_id}/audio-head-mute")
@@ -2088,20 +2154,25 @@ async def character_calibrate_revert(
         raise HTTPException(status_code=400, detail="Shot has not been character-calibrated")
 
     # Revert by pointing last_frame_path back at the pristine (un-calibrated)
-    # last_frame_; drop the calibrated cc_ file. No fixed-name backup.
-    from app.services.storage import pristine_last_frame_path
-    pristine = pristine_last_frame_path(project_id, shot_id)
-    if pristine is not None and shot.last_frame_path != str(pristine):
-        old = Path(shot.last_frame_path) if shot.last_frame_path else None
-        if old and old.name.startswith("cc_"):
-            old.unlink(missing_ok=True)
-        shot.last_frame_path = str(pristine)
-        await _repoint_next_first_frame(project_id, shot_id, str(pristine), session)
+    # last_frame — pristine_last_frame_key is the single source of truth for
+    # this (never a directory scan): CC adopt never touches it (see
+    # adopt_candidate_to_last_frame in app/api/image_candidates.py).
+    pristine_key = shot.pristine_last_frame_key
+    stale_cc_key = None
+    if pristine_key and shot.last_frame_path != pristine_key:
+        old = shot.last_frame_path
+        if old and Path(old).name.startswith("cc_"):
+            stale_cc_key = old
+        shot.last_frame_path = pristine_key
+        await _repoint_next_first_frame(project_id, shot_id, pristine_key, session)
 
     shot.cc_status = None
     shot.cc_error_message = None
     session.add(shot)
     await session.commit()
+    # 素材审计（CLAUDE.md）：先提交 DB 解除引用，再删 COS 上的旧校准帧对象。
+    if stale_cc_key:
+        await object_store.delete(stale_cc_key)
 
     ts = int(datetime.utcnow().timestamp())
     return {

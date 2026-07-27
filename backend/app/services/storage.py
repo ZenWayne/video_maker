@@ -1,225 +1,136 @@
-"""Storage path utilities for project files."""
+"""项目素材的 COS key 工具。
 
-import os
-import shutil
+COS 是权威存储。本模块只负责拼 key 与生成浏览器可访问的签名 URL；
+任何本地文件都只存在于 workspace 的一次性临时目录中。
+
+key 布局与迁移前的 storage_root 相对路径逐字符一致，因此存量迁移是
+「本地相对路径 = key」的直接映射。
+"""
+
+import logging
 import time
 import uuid
-from pathlib import Path
 from typing import Optional
 
-from app.config import settings
+from app.services import object_store
+
+logger = logging.getLogger(__name__)
 
 
 def ts_uuid_name(ext: str = ".png") -> str:
-    """Timestamped unique filename: ``<unix_seconds>_<8hex>.<ext>``.
+    """带时间戳的唯一文件名：``<unix_seconds>_<8hex><ext>``。
 
-    Each call is unique, so user-uploaded/extracted keyframes get a fresh URL
-    and the browser never serves a cached stale frame.
+    保证 key 唯一，同时让浏览器/CDN 永远拿不到过期缓存。
     """
     return f"{int(time.time())}_{uuid.uuid4().hex[:8]}{ext}"
 
 
-def project_dir(project_id: str) -> Path:
-    """Get the project storage directory."""
-    return Path(settings.storage_root) / "projects" / project_id
+# ── 前缀 ──────────────────────────────────────────────────────────────────────
+
+def project_prefix(project_id: str) -> str:
+    return f"projects/{project_id}/"
 
 
-def reference_images_dir(project_id: str) -> Path:
-    """Get the reference images directory for a project."""
-    return project_dir(project_id) / "reference_images"
+def reference_images_prefix(project_id: str) -> str:
+    return f"{project_prefix(project_id)}reference_images/"
 
 
-def shots_dir(project_id: str) -> Path:
-    """Get the shots directory for a project."""
-    return project_dir(project_id) / "shots"
+def shots_prefix(project_id: str) -> str:
+    return f"{project_prefix(project_id)}shots/"
 
 
-def shot_dir(project_id: str, shot_id: int) -> Path:
-    """Get the directory for a specific shot."""
-    return shots_dir(project_id) / f"shot_{shot_id}"
+def shot_prefix(project_id: str, shot_id: int) -> str:
+    return f"{shots_prefix(project_id)}shot_{shot_id}/"
 
 
-def shot_custom_frames_dir(project_id: str, shot_id: int) -> Path:
-    """Get the custom reference frames directory for a shot."""
-    return shot_dir(project_id, shot_id) / "custom_frames"
+def shot_candidates_prefix(project_id: str, shot_id: int) -> str:
+    return f"{shot_prefix(project_id, shot_id)}candidates/"
 
 
-def shot_candidates_dir(project_id: str, shot_id: int) -> Path:
-    """Image-candidate gallery dir for a shot (generated candidates + temp ref uploads)."""
-    return shot_dir(project_id, shot_id) / "candidates"
+def shot_custom_frames_prefix(project_id: str, shot_id: int) -> str:
+    return f"{shot_prefix(project_id, shot_id)}custom_frames/"
 
 
-def shot_audio_original_path(project_id: str, shot_id: int) -> Path:
-    """Get the original audio WAV path for a shot (extracted from unmodified video)."""
-    return shot_dir(project_id, shot_id) / "audio_original.wav"
+# ── 分镜级 key ────────────────────────────────────────────────────────────────
+
+def shot_key(project_id: str, shot_id: int, filename: str) -> str:
+    """分镜目录下任意文件的 key。用于 ts_uuid_name 生成的唯一名文件。"""
+    return f"{shot_prefix(project_id, shot_id)}{filename}"
 
 
-def shot_audio_vc_path(project_id: str, shot_id: int) -> Path:
-    """Get the voice-converted audio WAV path for a shot."""
-    return shot_dir(project_id, shot_id) / "audio_vc.wav"
+def shot_audio_original_key(project_id: str, shot_id: int) -> str:
+    return shot_key(project_id, shot_id, "audio_original.wav")
 
 
-def shot_pre_vc_video_path(project_id: str, shot_id: int) -> Path:
-    """Get the pre-VC backup video path for a shot."""
-    return shot_dir(project_id, shot_id) / "output_pre_vc.mp4"
+def shot_audio_vc_key(project_id: str, shot_id: int) -> str:
+    return shot_key(project_id, shot_id, "audio_vc.wav")
 
 
-def shot_pre_cc_last_frame_path(project_id: str, shot_id: int) -> Path:
-    """Get the pre-character-calibration backup of last_frame.png for a shot."""
-    return shot_dir(project_id, shot_id) / "last_frame_pre_cc.png"
+def shot_target_last_frame_key(project_id: str, shot_id: int) -> str:
+    return shot_key(project_id, shot_id, "target_last_frame.png")
 
 
-def shot_target_last_frame_path(project_id: str, shot_id: int) -> Path:
-    """Get the AI-generated target tail frame path for a shot."""
-    return shot_dir(project_id, shot_id) / "target_last_frame.png"
+def motion_prompt_key(project_id: str, shot_id: int) -> str:
+    return shot_key(project_id, shot_id, "motion_prompt.txt")
 
 
-def pristine_video_path(project_id: str, shot_id: int) -> Optional[Path]:
-    """The full generated video (output_<ts>_<uuid>.mp4) — the restore-trim target.
+# ── 项目级 key ────────────────────────────────────────────────────────────────
 
-    No fixed-name backups exist anymore; every file is uniquely named with a role
-    prefix (output_ = pristine, trimmed_ = trimmed, vc_ = voice-converted) and a
-    regeneration wipes the whole shot dir, so the newest output_* is always current.
+def storyboard_key(project_id: str) -> str:
+    return f"{project_prefix(project_id)}storyboard.json"
+
+
+def archived_storyboard_key(project_id: str, timestamp: str) -> str:
+    return f"{project_prefix(project_id)}storyboard_{timestamp}.json"
+
+
+def final_video_key(project_id: str) -> str:
+    return f"{project_prefix(project_id)}final/merged.mp4"
+
+
+def join_preview_key(project_id: str) -> str:
+    return f"{project_prefix(project_id)}previews/join_preview.mp4"
+
+
+def reference_image_key(project_id: str, image_id: str, filename: str) -> str:
+    return f"{reference_images_prefix(project_id)}{image_id}_{filename}"
+
+
+def reference_voice_prompt_key(project_id: str) -> str:
+    """VC 音色克隆的基准 prompt wav（上传的项目级基准音色，与迁移前的
+    reference_voice/prompt.wav 相对路径逐字符一致）。"""
+    return f"{project_prefix(project_id)}reference_voice/prompt.wav"
+
+
+# ── 校验与 URL ────────────────────────────────────────────────────────────────
+
+def is_valid_key(key: str) -> bool:
+    """key 安全校验：必须在 projects/ 下，且不含路径穿越。
+
+    取代旧的 validate_safe_path()——后者用 str.startswith 判断路径包含关系，
+    会把 /storage-evil 误判为位于 /storage 内。key 化后该问题不复存在。
     """
-    s_dir = shot_dir(project_id, shot_id)
-    outs = sorted(s_dir.glob("output_*.mp4"), key=lambda p: p.stat().st_mtime)
-    return outs[-1] if outs else None
-
-
-def pristine_last_frame_path(project_id: str, shot_id: int) -> Optional[Path]:
-    """The un-calibrated extracted last frame (last_frame_<ts>_<uuid>.png).
-
-    Character-calibration writes a separate cc_<ts>_<uuid>.png and never overwrites
-    this, so it is the revert target (mirrors pristine_video_path for video).
-    """
-    s_dir = shot_dir(project_id, shot_id)
-    fs = [
-        p for p in s_dir.glob("last_frame_*.png")
-        if p.name != "last_frame_pre_cc.png"
-    ]
-    return max(fs, key=lambda p: p.stat().st_mtime) if fs else None
-
-
-def shot_source_path(project_id: str, shot_id: int) -> Optional[Path]:
-    """The immutable source video (output_<ts>_<uuid>.mp4).
-
-    In the non-destructive model this is the ONLY video file; trim/VC never
-    write trimmed_/vc_ files. Alias of pristine_video_path for intent clarity.
-    """
-    return pristine_video_path(project_id, shot_id)
-
-
-def get_original_video_for_audio(project_id: str, shot_id: int) -> Path:
-    """Return the immutable source video to extract VC input audio from.
-
-    Non-destructive model: there is exactly one video (output_*.mp4); VC reads
-    its full audio and never depends on trim length.
-    """
-    src = shot_source_path(project_id, shot_id)
-    if src is None:
-        raise FileNotFoundError(f"No source video in {shot_dir(project_id, shot_id)}")
-    return src
-
-
-def final_dir(project_id: str) -> Path:
-    """Get the final output directory for a project."""
-    return project_dir(project_id) / "final"
-
-
-def storyboard_path(project_id: str) -> Path:
-    """Get the storyboard.json path for a project."""
-    return project_dir(project_id) / "storyboard.json"
-
-
-def archived_storyboard_path(project_id: str, timestamp: str) -> Path:
-    """Get the archived storyboard path with timestamp."""
-    return project_dir(project_id) / f"storyboard_{timestamp}.json"
-
-
-def motion_prompt_path(project_id: str, shot_id: int) -> Path:
-    """Get the motion_prompt.txt path for a shot."""
-    return shot_dir(project_id, shot_id) / "motion_prompt.txt"
-
-
-def shot_output_path(project_id: str, shot_id: int) -> Path:
-    """Get the output.mp4 path for a shot."""
-    return shot_dir(project_id, shot_id) / "output.mp4"
-
-
-def shot_last_frame_path(project_id: str, shot_id: int) -> Path:
-    """Get the last_frame.png path for a shot."""
-    return shot_dir(project_id, shot_id) / "last_frame.png"
-
-
-def final_video_path(project_id: str) -> Path:
-    """Get the merged.mp4 path for a project."""
-    return final_dir(project_id) / "merged.mp4"
-
-
-def join_preview_path(project_id: str) -> Path:
-    """临时连贯性预览视频的固定输出路径（每次覆盖）。"""
-    previews_dir = project_dir(project_id) / "previews"
-    previews_dir.mkdir(parents=True, exist_ok=True)
-    return previews_dir / "join_preview.mp4"
-
-
-def reference_image_path(project_id: str, image_id: str, filename: str) -> Path:
-    """Get the storage path for a reference image."""
-    return reference_images_dir(project_id) / f"{image_id}_{filename}"
-
-
-def ensure_project_dirs(project_id: str) -> None:
-    """Create all necessary directories for a project."""
-    project_dir(project_id).mkdir(parents=True, exist_ok=True)
-    reference_images_dir(project_id).mkdir(exist_ok=True)
-    shots_dir(project_id).mkdir(exist_ok=True)
-    final_dir(project_id).mkdir(exist_ok=True)
-
-
-def ensure_shot_dir(project_id: str, shot_id: int) -> None:
-    """Create directory for a specific shot."""
-    shot_dir(project_id, shot_id).mkdir(parents=True, exist_ok=True)
-
-
-def delete_project_storage(project_id: str) -> None:
-    """Delete all storage for a project."""
-    proj_dir = project_dir(project_id)
-    if proj_dir.exists():
-        shutil.rmtree(proj_dir)
-
-
-def get_storage_relative_path(absolute_path: str) -> Optional[str]:
-    """Convert absolute path to storage-relative path."""
-    storage_root = Path(settings.storage_root)
-    try:
-        return str(Path(absolute_path).relative_to(storage_root))
-    except ValueError:
-        return None
-
-
-def to_media_url(absolute_path: Optional[str]) -> Optional[str]:
-    """Convert an absolute storage path to a /api/media/... URL for the browser."""
-    if not absolute_path:
-        return None
-    storage_root = Path(settings.storage_root).resolve()
-    try:
-        rel = Path(absolute_path).resolve().relative_to(storage_root)
-        return f"/api/media/{rel}"
-    except ValueError:
-        return None
-
-
-def validate_safe_path(path: str) -> bool:
-    """
-    Validate that a path is safe (no path traversal).
-    Returns True if safe, False otherwise.
-    """
-    try:
-        # Resolve to absolute path
-        resolved = Path(path).resolve()
-        storage_root = Path(settings.storage_root).resolve()
-
-        # Check if resolved path is within storage root
-        return str(resolved).startswith(str(storage_root))
-    except (ValueError, RuntimeError):
+    if not key or key.startswith("/"):
         return False
+    if ".." in key.split("/"):
+        return False
+    return key.startswith("projects/")
+
+
+def to_media_url(key: Optional[str]) -> Optional[str]:
+    """把 COS key 转成浏览器可直接访问的预签名 URL。
+
+    保持**同步**——projects.py 的 _shot_to_dict / _candidate_to_dict 是同步
+    序列化器且在列表推导中调用本函数，改 async 会连锁污染全部上游。
+    签名是纯本地 HMAC 计算，不发网络请求，同步调用不阻塞事件循环。
+    """
+    if not key:
+        return None
+    if not is_valid_key(key):
+        # 到了 Task 12,所有写路径都已产出 key;此时还拿到非 key 的值就是真
+        # bug。但不能抛异常:本函数在约 50 处同步序列化器里被调用,抛出会把
+        # 一行陈旧数据放大成整个项目详情接口 500——在 Spec B 的回填窗口期
+        # 尤其糟。优雅降级 + 可观测才是对的取舍。
+        logger.warning("to_media_url_invalid_key", extra={"value": key[:200]})
+        return None
+    return object_store.signed_url(key)

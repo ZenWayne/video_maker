@@ -21,6 +21,7 @@ dependencies = [
     "scikit-image>=0.24",
     "langfuse>=3.0",
     "fastmcp>=2.0",
+    "cos-python-sdk-v5>=1.9",
 ]
 
 [dependency-groups]

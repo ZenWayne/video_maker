@@ -1,7 +1,31 @@
 """Unit tests for tail frame generation and video generator last_frame support."""
 
+import shutil
+from pathlib import Path
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+
+@pytest.fixture(autouse=True)
+def _fake_cos_fetch(monkeypatch):
+    """generate_video() now fetches first/last frames from COS via
+    Workspace.fetch() before cropping. These are unit tests (no real bucket) —
+    patch the underlying object_store.get to copy the given path (tests here
+    pass fake nonexistent paths that are never actually read because the SDK
+    call itself is fully mocked), so no real COS credential/network is needed.
+    """
+    async def _fake_get(key, dest):
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src = Path(key)
+        if src.exists():
+            shutil.copy(src, dest)
+        else:
+            dest.touch()
+        return dest
+
+    monkeypatch.setattr("app.services.object_store.get", _fake_get)
 
 
 def test_generate_videos_config_last_frame_field():

@@ -1,18 +1,31 @@
 """Bake a shot's effective clip from the immutable source + EDL metadata.
 
-The single place ffmpeg applies trim / audio-substitution. Used by the merger
-at export time; preview compositing is done independently on the frontend from
-the same DB metadata (trim_frames, vc_audio_path).
+The single place ffmpeg applies trim / audio-substitution. Used by both the
+merger (export) and the connectivity join-preview endpoint.
+
+COS note: this module does no object-store I/O. `effective_clip_paths` only
+ever sees *local* paths — callers (worker.tasks.merge_project_shots,
+app.api.pipeline.join_preview) are responsible for fetching each shot's video
+(and vc_audio, if set) out of COS into a workspace first, via
+`workspace().fetch(key, name=...)` with an explicit per-shot name (fetching
+several shots into one workspace needs distinct names — see Workspace.fetch's
+docstring). This used to instead take raw `Shot` ORM objects and fall back to
+scanning a local shot directory (`shot_source_path`) when `video_path` was
+unset — a local-storage-root era concept that no longer exists once COS is the
+only store, so that fallback is gone; `video_path` (a COS key) is always the
+source of truth now.
 """
 
 import logging
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from ffmpeg import FFmpeg
 
 from app.agents.merger import CANONICAL_CHANNELS, CANONICAL_SAMPLE_RATE
-from app.services.storage import shot_source_path, ts_uuid_name
+from app.services.storage import ts_uuid_name
 
 logger = logging.getLogger(__name__)
 
@@ -94,46 +107,37 @@ def build_effective_clip(
     )
 
 
-def effective_clip_paths(shots: list, tmp_dir: str) -> list[str]:
-    """Return one playable path per shot: source passthrough if unedited, else a
-    freshly-baked temp clip under tmp_dir. Caller owns tmp_dir cleanup.
+@dataclass
+class ClipSpec:
+    """One shot's already-*local* inputs + EDL metadata, ready to bake.
 
-    Each shot must expose .project_id, .shot_id, .trim_frames, .vc_audio_path.
-    If vc_audio_path is set but the file does not exist on disk, the shot is
-    treated as no-vc (falls back to source audio) and a warning is logged.
+    Both `local_video_path` and `local_vc_audio_path` (if set) must already
+    exist on disk — this module performs no COS fetches; the caller fetches
+    via `workspace().fetch(...)` before building specs.
+    """
+    local_video_path: str
+    trim_frames: Optional[int]
+    local_vc_audio_path: Optional[str]
+    audio_head_mute_frames: Optional[int] = None
+
+
+def effective_clip_paths(specs: list[ClipSpec], tmp_dir: str) -> list[str]:
+    """Return one playable local path per spec: passthrough if unedited, else a
+    freshly-baked clip under tmp_dir. Caller owns tmp_dir cleanup (a workspace's
+    root works — it self-cleans on exit).
     """
     out: list[str] = []
-    for s in shots:
-        # The DB field is the source of truth (the immutable output_*.mp4); fall
-        # back to the prefix-glob only if it's unset.
-        source_path = s.video_path if (s.video_path and Path(s.video_path).exists()) else None
-        if source_path is None:
-            sp = shot_source_path(s.project_id, s.shot_id)
-            source_path = str(sp) if sp else None
-        if source_path is None:
-            raise FileNotFoundError(f"Shot {s.shot_id}: no source video")
-        source = source_path
-
-        vc_audio = s.vc_audio_path
-        if vc_audio and not Path(vc_audio).exists():
-            logger.warning(
-                "Shot %s: vc_audio_path %r does not exist on disk — falling back to source audio",
-                s.shot_id,
-                vc_audio,
-            )
-            vc_audio = None
-
-        head_mute = getattr(s, "audio_head_mute_frames", None)
-        if not s.trim_frames and not vc_audio and not head_mute:
-            out.append(str(source))
+    for i, spec in enumerate(specs):
+        if not spec.trim_frames and not spec.local_vc_audio_path and not spec.audio_head_mute_frames:
+            out.append(spec.local_video_path)
             continue
-        clip = str(Path(tmp_dir) / f"eff_{s.shot_id}_{ts_uuid_name('.mp4')}")
+        clip = str(Path(tmp_dir) / f"eff_{i:04d}_{ts_uuid_name('.mp4')}")
         build_effective_clip(
-            str(source),
-            trim_frames=s.trim_frames,
-            vc_audio_path=vc_audio,
+            spec.local_video_path,
+            trim_frames=spec.trim_frames,
+            vc_audio_path=spec.local_vc_audio_path,
             out_path=clip,
-            audio_head_mute_frames=head_mute,
+            audio_head_mute_frames=spec.audio_head_mute_frames,
         )
         out.append(clip)
     return out

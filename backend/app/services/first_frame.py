@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.project import Shot, ReferenceImage
+from app.services import object_store
 
 
 async def pick_first_frame(
@@ -31,12 +32,14 @@ async def pick_first_frame(
     fall into multi-image mode (return None → caller uses reference_images).
     For shot 1 without custom images: fall back to project character reference.
     For connected shots without a first frame: use previous shot's last frame.
+
+    All *_path fields hold COS keys (not local filesystem paths) — "existence"
+    is decided against the object store, not the local disk.
     """
     # Single custom first frame (the 首帧 slot) — authoritative; anchors identity.
     if shot.custom_first_frame_path:
-        custom = Path(shot.custom_first_frame_path)
-        if custom.exists():
-            return custom
+        if await object_store.exists(shot.custom_first_frame_path):
+            return Path(shot.custom_first_frame_path)
 
     # Multi-image reference mode → return None (caller uses reference_images).
     # Only when there is NO explicit first frame above.
@@ -52,9 +55,8 @@ async def pick_first_frame(
         )
         prev_shot = prev_result.scalar_one_or_none()
         if prev_shot and prev_shot.last_frame_path:
-            prev_path = Path(prev_shot.last_frame_path)
-            if prev_path.exists():
-                return prev_path
+            if await object_store.exists(prev_shot.last_frame_path):
+                return Path(prev_shot.last_frame_path)
 
     # Fallback to character reference
     return await get_first_character_ref(project_id, session)
@@ -75,11 +77,10 @@ async def get_first_character_ref(project_id: str, session: AsyncSession) -> Pat
     if not ref:
         raise ValueError("No character reference image found")
 
-    path = Path(ref.storage_path)
-    if not path.exists():
-        raise ValueError(f"Reference image not found: {path}")
+    if not await object_store.exists(ref.storage_path):
+        raise ValueError(f"Reference image not found: {ref.storage_path}")
 
-    return path
+    return Path(ref.storage_path)
 
 
 async def init_shot1_first_frame(

@@ -10,6 +10,7 @@ import {
 import { api } from '@/lib/api'
 import type { AspectRatio, Shot } from '@/lib/types'
 import { DualTrackTimeline } from './trim/DualTrackTimeline'
+import { useVideoErrorRetry } from '../hooks/useVideoErrorRetry'
 
 interface TrimDialogProps {
   shot: Shot
@@ -162,6 +163,24 @@ export function TrimDialog({
     api.getWaveform(projectId, shot.shot_id).then((r) => setPeaks(r.peaks)).catch(() => setPeaks([]))
     api.getFilmstrip(projectId, shot.shot_id).then((r) => setSpriteUrl(r.url)).catch(() => setSpriteUrl(null))
   }, [open, projectId, shot.shot_id])
+
+  // 签名 URL 过期兜底：只重拉 source_video_url 换新签名，不动其它已加载的
+  // 裁剪/静音编辑状态（headMuteFrame/endFrame/peaks 等）——用户可能正在编辑，
+  // 过期只是网络层的事，不该把编辑进度一起冲掉。
+  const refreshSourceUrl = useCallback(async () => {
+    if (!projectId) return
+    try {
+      const info = await api.getVideoInfo(projectId, shot.shot_id)
+      setSourceVideoUrl(info.source_video_url ?? null)
+    } catch {
+      // 静默失败——video 保持错误态，用户可关闭再重新打开裁剪弹窗重试
+    }
+  }, [projectId, shot.shot_id])
+
+  const { onError: handleVideoError, onLoad: handleVideoLoaded } = useVideoErrorRetry(
+    sourceVideoUrl ?? shot.video_path ?? null,
+    refreshSourceUrl
+  )
 
   const seekToFrame = (frame: number) => {
     if (videoRef.current && fps > 0) {
@@ -336,8 +355,12 @@ export function TrimDialog({
                 src={sourceVideoUrl ?? shot.video_path ?? undefined}
                 preload="auto"
                 className="max-w-full max-h-full object-contain"
-                onLoadedMetadata={() => seekToFrame(endFrame)}
+                onLoadedMetadata={() => {
+                  seekToFrame(endFrame)
+                  handleVideoLoaded()
+                }}
                 onEnded={stopPreview}
+                onError={handleVideoError}
               />
             </div>
 
