@@ -579,6 +579,15 @@ export const api = {
     return `${BASE}/api/projects/${projectId}/assets/${kind}/${file}`
   },
 
+  // 参考图 URL：后端 reference_images[].storage_path 是原始 COS key（非签名
+  // URL，与 shots/candidates 字段不同——见 test_uploads_oss.py 对该字段形状
+  // 的断言），取其 basename 经 /assets 302 端点换取签名 URL。
+  // 旧的 /api/media 静态挂载已删除（见 assets.py），不要再拼 /api/media/...。
+  referenceImageUrl: (projectId: string, storagePath: string): string => {
+    const file = storagePath.split('/').pop() ?? storagePath
+    return `${BASE}/api/projects/${projectId}/assets/reference_images/${file}`
+  },
+
   // 成片视频 URL
   finalVideoUrl: (id: string): string => {
     return `${BASE}/api/projects/${id}/final.mp4`

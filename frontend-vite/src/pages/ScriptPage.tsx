@@ -219,9 +219,9 @@ export default function ScriptPage() {
         </div>
 
         {/* Reference assets (images only on the script-review page) */}
-        {referenceImages.length > 0 && (
+        {referenceImages.length > 0 && projectId && (
           <div className="mb-6">
-            <ReferenceAssetsPanel images={referenceImages} />
+            <ReferenceAssetsPanel projectId={projectId} images={referenceImages} />
           </div>
         )}
 

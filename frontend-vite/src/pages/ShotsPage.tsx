@@ -806,9 +806,10 @@ export default function ShotsPage() {
         )}
 
         {/* Reference assets panel: 参考图 (always) + 音色校准 (shot_review only) */}
-        {(referenceImages.length > 0 || status === 'shot_review') && (
+        {(referenceImages.length > 0 || status === 'shot_review') && projectId && (
           <div className="mb-6">
             <ReferenceAssetsPanel
+              projectId={projectId}
               images={referenceImages}
               voice={
                 status === 'shot_review' ? (

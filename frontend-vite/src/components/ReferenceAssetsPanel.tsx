@@ -1,14 +1,10 @@
 import type { ReactNode } from 'react'
 import { Images } from 'lucide-react'
 import { PreviewableImage } from '@/components/ImagePreview'
+import { api } from '@/lib/api'
 import type { ReferenceImage } from '@/lib/types'
 
-// Reference images are served via the /api/media static mount from their
-// storage_path (the backend returns the raw storage path, not a media URL).
-const refMediaUrl = (storagePath: string) =>
-  `/api/media/${storagePath.replace(/^\/?storage\//, '')}`
-
-function ThumbGroup({ label, images }: { label: string; images: ReferenceImage[] }) {
+function ThumbGroup({ projectId, label, images }: { projectId: string; label: string; images: ReferenceImage[] }) {
   if (images.length === 0) return null
   return (
     <div className="space-y-1.5">
@@ -17,7 +13,7 @@ function ThumbGroup({ label, images }: { label: string; images: ReferenceImage[]
         {images.map((img) => (
           <div key={img.id} className="flex w-16 flex-col gap-1">
             <PreviewableImage
-              src={refMediaUrl(img.storage_path)}
+              src={api.referenceImageUrl(projectId, img.storage_path)}
               alt={img.filename}
               className="h-16 w-16 rounded border border-zinc-200 object-cover"
             />
@@ -32,6 +28,7 @@ function ThumbGroup({ label, images }: { label: string; images: ReferenceImage[]
 }
 
 export interface ReferenceAssetsPanelProps {
+  projectId: string
   images: ReferenceImage[]
   /** Voice-calibration row, rendered below a divider. Pass an embedded
    *  VoiceCalibrationPanel (shot_review only); omit on the script-review page. */
@@ -43,7 +40,7 @@ export interface ReferenceAssetsPanelProps {
  * pages. Row 1 = reference images (character/scene). Row 2 = voice calibration
  * (only when `voice` is provided).
  */
-export function ReferenceAssetsPanel({ images, voice }: ReferenceAssetsPanelProps) {
+export function ReferenceAssetsPanel({ projectId, images, voice }: ReferenceAssetsPanelProps) {
   if (images.length === 0 && !voice) return null
 
   const characters = images.filter((r) => r.kind === 'character')
@@ -63,8 +60,8 @@ export function ReferenceAssetsPanel({ images, voice }: ReferenceAssetsPanelProp
         </div>
         {images.length > 0 ? (
           <div className="space-y-3">
-            <ThumbGroup label="角色 · CHARACTER" images={characters} />
-            <ThumbGroup label="场景 · SCENE" images={scenes} />
+            <ThumbGroup projectId={projectId} label="角色 · CHARACTER" images={characters} />
+            <ThumbGroup projectId={projectId} label="场景 · SCENE" images={scenes} />
           </div>
         ) : (
           <div className="text-xs text-zinc-400">
