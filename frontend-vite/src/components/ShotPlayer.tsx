@@ -1,5 +1,5 @@
 // frontend-vite/src/components/ShotPlayer.tsx
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useShotSync } from '../hooks/useShotSync'
 import { useVideoErrorRetry } from '../hooks/useVideoErrorRetry'
 
@@ -9,9 +9,10 @@ export interface ShotPlayerProps {
   audioUrl: string | null
   headMuteSec?: number | null
   poster?: string | null
-  /** Called (at most once per videoUrl) when the <video> errors — typically a
-   *  stale signed COS URL. Should refetch the upstream data source (e.g. the
-   *  project) to obtain a freshly-signed videoUrl. */
+  /** Called (at most once per videoUrl/audioUrl) when the <video> OR the vc
+   *  <audio> errors — typically a stale signed COS URL (both are signed by
+   *  the same to_media_url() with the same TTL). Should refetch the upstream
+   *  data source (e.g. the project) to obtain freshly-signed URLs for both. */
   onVideoError?: () => void | Promise<void>
 }
 
@@ -32,6 +33,37 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null,
   const [useVc, setUseVc] = useState(true)
   const [audioError, setAudioError] = useState(false)
   const audioEnabled = hasVc && useVc && !audioError
+
+  // Signed URL expiry retry for the vc <audio> track — same to_media_url()/TTL
+  // as the video. `recoveringAudioRef` distinguishes "audioUrl changed because
+  // OUR retry landed" from "audioUrl changed because some unrelated refetch
+  // happened" (refetchProject fires for lots of reasons, e.g. SSE candidate
+  // events — every one of those re-signs vc_audio_url too). Only in the
+  // former case do we auto-restore useVc; otherwise we'd silently stomp a
+  // user's deliberate A/B toggle choice on every unrelated refetch.
+  const recoveringAudioRef = useRef(false)
+  const handleAudioErrorRetry = useVideoErrorRetry(audioUrl, useCallback(() => {
+    recoveringAudioRef.current = true
+    return onVideoError?.()
+  }, [onVideoError]))
+
+  useEffect(() => {
+    if (!recoveringAudioRef.current) return
+    recoveringAudioRef.current = false
+    // A freshly-signed audioUrl arrived from our own retry — clear the error
+    // state and give vc audio another shot instead of staying silently
+    // parked on the original track for the rest of the session.
+    setAudioError(false)
+    setUseVc(true)
+  }, [audioUrl])
+
+  const handleAudioError = useCallback(() => {
+    // Preserve existing behavior: fall back to the original track immediately
+    // so audio doesn't just go dead while a retry (if any) is in flight.
+    setAudioError(true)
+    setUseVc(false)
+    handleAudioErrorRetry()
+  }, [handleAudioErrorRetry])
 
   const [playing, setPlaying] = useState(false)
   const [current, setCurrent] = useState(0)
@@ -151,7 +183,7 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null,
             src={audioUrl!}
             muted={!useVc || audioError}
             preload="auto"
-            onError={() => { setAudioError(true); setUseVc(false) }}
+            onError={handleAudioError}
           />
           {audioError && (
             <p data-testid="audio-error-msg" className="text-xs text-red-500 mt-1">

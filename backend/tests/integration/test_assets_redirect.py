@@ -124,3 +124,74 @@ async def test_download_final_rejects_traversal_via_project_id(client):
     )
     assert r.status_code == 400, r.text
     assert r.json()["detail"] == "Invalid key"
+
+
+# ── 302 不可被浏览器缓存 —— 前端"重定向端点自愈、无需重试逻辑"的前提 ──────
+#
+# Task 14（前端签名 URL 过期兜底，见
+# .superpowers/sdd/2026-07-26-cos-storage-layer/task-14-report.md）里，
+# ExportPage/HomePage 的 <video src={api.finalVideoUrl(id)}> 之所以**不需要**
+# 前端重拉签名 URL 的兜底逻辑，前提是 assets.py 这两条路由的 302 永远不带
+# Cache-Control/Expires —— 浏览器因此会在每次新请求（包括长时间挂起后用户
+# 回来继续播放触发的新 range 请求）时重新走一遍这个端点，后端每次都重新
+# signed_url() 签发，天然不会读到过期签名。真实浏览器实测过（Playwright +
+# 真实 COS）：video.currentSrc 停留在这个后端端点，而非解析后的 COS URL；
+# 显式 video.load() 会对这个端点发起全新请求。
+#
+# 这个前提本身没有代码保证——如果将来有人为了 CDN 友好给这两个 RedirectResponse
+# 加上 Cache-Control/Expires，上述"自愈"就会静默失效：浏览器可能直接缓存
+# 302 的重定向目标（一个已签名、终将过期的 COS URL），ExportPage/HomePage 会
+# 重新变成 Task 14 修复的那类"页面开太久后 403"的过期签名 bug，且没有前端
+# 重试逻辑兜底。这两个测试就是这条不变量的回归哨兵：想加缓存头的人会先在
+# 这里撞墙，读到这段注释、理解后果后再决定要不要动。
+async def test_download_final_redirect_has_no_cache_headers(
+    client, db_session_factory, monkeypatch
+):
+    from app.api import assets as assets_module
+
+    monkeypatch.setattr(
+        assets_module.object_store, "exists", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        assets_module.object_store,
+        "signed_url",
+        lambda *a, **k: "https://cos.example.com/fake-signed-url",
+    )
+
+    pid = await _make_project(db_session_factory, status="shot_review")
+    r = await client.get(
+        f"/api/projects/{pid}/final.mp4", headers=HEADERS, follow_redirects=False
+    )
+    assert r.status_code == 302
+    header_names = {h.lower() for h in r.headers.keys()}
+    assert "cache-control" not in header_names, (
+        "download_final 的 302 不能带 Cache-Control —— 会让浏览器长期缓存"
+        "已签名、终将过期的 COS URL，破坏 ExportPage/HomePage 依赖的"
+        "'每次新请求都重新签发'自愈机制"
+    )
+    assert "expires" not in header_names
+
+
+async def test_serve_asset_redirect_has_no_cache_headers(
+    client, db_session_factory, monkeypatch
+):
+    from app.api import assets as assets_module
+
+    monkeypatch.setattr(
+        assets_module.object_store, "exists", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        assets_module.object_store,
+        "signed_url",
+        lambda *a, **k: "https://cos.example.com/fake-signed-url",
+    )
+
+    pid = await _make_project(db_session_factory, status="shot_review")
+    r = await client.get(
+        f"/api/projects/{pid}/assets/reference_images/ref.png",
+        headers=HEADERS, follow_redirects=False,
+    )
+    assert r.status_code == 302
+    header_names = {h.lower() for h in r.headers.keys()}
+    assert "cache-control" not in header_names
+    assert "expires" not in header_names
