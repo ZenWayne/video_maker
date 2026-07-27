@@ -33,6 +33,7 @@ import {
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/state'
 import { versionShotMedia } from '@/lib/media'
+import { useVideoErrorRetry } from '../hooks/useVideoErrorRetry'
 import type { ProjectDetail, ProjectStatus, ReferenceImage, Shot } from '@/lib/types'
 
 // 计算断层警告
@@ -92,6 +93,7 @@ export default function ShotsPage() {
   const [hasCharacterRefs, setHasCharacterRefs] = useState(false)
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([])
   const [joinPreviewUrl, setJoinPreviewUrl] = useState<string | null>(null)
+  const [joinPreviewShotIds, setJoinPreviewShotIds] = useState<number[] | null>(null)
   const [isJoining, setIsJoining] = useState(false)
   const [genDialog, setGenDialog] = useState<{ shotId: number; slot: 'first_frame' | 'tail_frame' } | null>(null)
 
@@ -208,6 +210,7 @@ export default function ShotsPage() {
       const ids = Array.from(selectedShotIds).sort((a, b) => a - b)
       const { preview_url } = await api.joinPreview(projectId, ids)
       setJoinPreviewUrl(preview_url)
+      setJoinPreviewShotIds(ids)
     } catch (e) {
       addToast({
         type: 'error',
@@ -217,6 +220,20 @@ export default function ShotsPage() {
       setIsJoining(false)
     }
   }
+
+  // 拼接预览的签名 URL 过期兜底：用上次拼接的同一批 shot ids 重新拼接换新 URL
+  // （拼接预览走 preview_url 直出，非 assets.py 重定向，会像 shot 视频一样过期）
+  const refreshJoinPreview = useCallback(async () => {
+    if (!projectId || !joinPreviewShotIds) return
+    try {
+      const { preview_url } = await api.joinPreview(projectId, joinPreviewShotIds)
+      setJoinPreviewUrl(preview_url)
+    } catch {
+      // 静默失败——用户可关闭 modal 后用「连贯性预览」按钮手动重试
+    }
+  }, [projectId, joinPreviewShotIds])
+
+  const handleJoinPreviewVideoError = useVideoErrorRetry(joinPreviewUrl, refreshJoinPreview)
 
   // 重新生成选中的 shots
   const handleRegenerate = async () => {
@@ -695,6 +712,7 @@ export default function ShotsPage() {
                   onOpenGenerateImage={(shotId, slot) => setGenDialog({ shotId, slot })}
                   onAdoptCandidate={handleAdoptCandidate}
                   onDeleteCandidate={handleDeleteCandidate}
+                  onVideoError={refetchProject}
                 />
               )
             })}
@@ -889,6 +907,7 @@ export default function ShotsPage() {
                 onOpenGenerateImage={(shotId, slot) => setGenDialog({ shotId, slot })}
                 onAdoptCandidate={handleAdoptCandidate}
                 onDeleteCandidate={handleDeleteCandidate}
+                onVideoError={refetchProject}
               />
             )
           })}
@@ -1074,6 +1093,7 @@ export default function ShotsPage() {
               src={joinPreviewUrl}
               controls
               autoPlay
+              onError={handleJoinPreviewVideoError}
               className="w-full rounded"
             />
           </div>

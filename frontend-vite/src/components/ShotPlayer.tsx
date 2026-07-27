@@ -1,6 +1,7 @@
 // frontend-vite/src/components/ShotPlayer.tsx
 import { useCallback, useEffect, useState } from 'react'
 import { useShotSync } from '../hooks/useShotSync'
+import { useVideoErrorRetry } from '../hooks/useVideoErrorRetry'
 
 export interface ShotPlayerProps {
   videoUrl: string
@@ -8,6 +9,10 @@ export interface ShotPlayerProps {
   audioUrl: string | null
   headMuteSec?: number | null
   poster?: string | null
+  /** Called (at most once per videoUrl) when the <video> errors — typically a
+   *  stale signed COS URL. Should refetch the upstream data source (e.g. the
+   *  project) to obtain a freshly-signed videoUrl. */
+  onVideoError?: () => void | Promise<void>
 }
 
 function fmt(t: number): string {
@@ -21,7 +26,8 @@ function fmt(t: number): string {
  *  present a CUSTOM timeline scaled to the trimmed range (trimEndSec): the
  *  progress bar, time label and seeking are all bounded to it, and playback stops
  *  at the trim point — native <video controls> would show the full source length. */
-export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null, poster }: ShotPlayerProps) {
+export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null, poster, onVideoError }: ShotPlayerProps) {
+  const handleVideoError = useVideoErrorRetry(videoUrl, onVideoError ?? (() => {}))
   const hasVc = !!audioUrl
   const [useVc, setUseVc] = useState(true)
   const [audioError, setAudioError] = useState(false)
@@ -94,6 +100,7 @@ export function ShotPlayer({ videoUrl, trimEndSec, audioUrl, headMuteSec = null,
           onSeeked={onSeeked}
           onTimeUpdate={handleTimeUpdate}
           onClick={togglePlay}
+          onError={handleVideoError}
           className="w-full block"
         />
         {/* prominent center play button while paused (matches the thumbnail) */}

@@ -54,6 +54,8 @@ interface ShotCardProps {
   onOpenGenerateImage?: (shotId: number, slot: 'first_frame' | 'tail_frame') => void
   onAdoptCandidate?: (shotId: number, candidateId: string) => void
   onDeleteCandidate?: (shotId: number, candidateId: string) => void
+  /** Forwarded to ShotPlayer — refetch the project on a stale signed video URL. */
+  onVideoError?: () => void | Promise<void>
 }
 
 interface KeyframeMenuItem {
@@ -207,6 +209,7 @@ export function ShotCard({
   onOpenGenerateImage,
   onAdoptCandidate,
   onDeleteCandidate,
+  onVideoError,
 }: ShotCardProps) {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isPromptDialogOpen, setIsPromptDialogOpen] = useState(false)
@@ -719,6 +722,7 @@ export function ShotCard({
                 audioUrl={shot.vc_audio_url ?? null}
                 headMuteSec={shot.audio_head_mute_sec ?? null}
                 poster={shot.last_frame_path || shot.custom_first_frame_path || null}
+                onVideoError={onVideoError}
               />
             </div>
           )}
