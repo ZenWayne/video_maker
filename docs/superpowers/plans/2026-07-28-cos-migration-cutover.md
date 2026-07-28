@@ -16,7 +16,18 @@
 
 - **绝不 mock**：除计费模型调用外一律不 mock。COS 打真实 dev bucket（`video-maker-dev-1414782845` / `ap-guangzhou`），DB 打真实 sqlite。禁止 fakeredis、禁止 `route.fulfill` 伪造被测数据。
 - **测试 gate 判据**（有结构性守卫 `backend/tests/unit/test_cos_gating_hygiene.py` 会拦）：**带 `cos_prefix` fixture 参数的测试函数才标 `@requires_cos`；不带的一律不标。绝不加文件级 `pytestmark`。**
-- **凭证隔离**：只在显式导出 `COS_SECRET_ID` / `COS_SECRET_KEY` 的 shell 里跑 `tests/integration/`。**绝不在该 shell 里跑 `tests/unit/test_cos_config.py`**——它会把凭证打进日志，本项目已因此泄露过一次 SecretId。
+- **凭证隔离**：只在显式导出 COS 环境变量的 shell 里跑 `tests/integration/`。**绝不在该 shell 里跑 `tests/unit/test_cos_config.py`**——它会把凭证打进日志，本项目已因此泄露过一次 SecretId。
+- **SKIP 不等于 PASS**：pytest 不读 `deploy/config.env`（那是 compose 的 `env_file`），所以**光导出两个密钥是不够的**——`cos_bucket` / `cos_region` 仍为空，`_cos_configured()` 返回 False，所有 `@requires_cos` 用例会**静默 SKIP 并显示为绿**。跑集成测试前必须四个变量齐全：
+
+  ```bash
+  cd backend
+  export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
+  export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+  export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+  export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
+  ```
+
+  每次跑完都要核对 COS 用例是 PASSED 而非 SKIPPED；报告里写「通过」却其实全被跳过，是本计划最容易产生的假绿。
 - **worker 侧禁止 `from app.api.*` 导入**：会在真实 vc-worker 进程里循环 import 崩溃，而测试因预先 import 了 `app.main` 完全看不见。迁移脚本同理——`app/scripts/**` 只依赖 `app.models` / `app.services` / `app.db`，**不 import 任何 `app.api.*` 或 `app.main`**。
 - **禁止硬编码绝对路径**：Python 用 `pathlib` 相对 `__file__`；storage 根目录一律由 `--storage-root` 显式传入。
 - **Python 工具链**：只用 `uv run --project backend`，绝不直接 `python` / `pip install`。
@@ -176,6 +187,8 @@ Expected: 无输出。
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run pytest tests/integration/test_shot_key_columns.py tests/integration/test_vc_cc_oss.py tests/integration/test_vc_nondestructive.py tests/unit/test_cos_gating_hygiene.py -v
 ```
 Expected: PASS（`test_pre_vc_video_key_column_is_gone` 绿）。
@@ -861,6 +874,8 @@ from app.scripts.cos_migration.runner import collect_db_refs, scan, upload
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run pytest tests/integration/test_cos_migration_flow.py -v
 ```
 Expected: FAIL —— `ImportError: cannot import name 'upload'`。
@@ -918,6 +933,8 @@ async def upload(storage_root: Path, key_prefix: str = "",
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run pytest tests/integration/test_cos_migration_flow.py -v
 ```
 Expected: PASS（4 个用例）。
@@ -1235,6 +1252,8 @@ from app.scripts.cos_migration.runner import (
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run pytest tests/integration/test_cos_migration_flow.py -k verify -v
 ```
 Expected: FAIL —— `ImportError: cannot import name 'verify'`。
@@ -1281,6 +1300,8 @@ async def verify(session_factory, key_prefix: str = "",
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run pytest tests/integration/test_cos_migration_flow.py -v
 ```
 Expected: PASS（9 个用例）。
@@ -1471,6 +1492,8 @@ async def test_seeded_shot_objects_are_cleaned_up(db_session_factory, cos_prefix
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run pytest tests/integration/test_cos_test_prefix_hygiene.py -v
 ```
 Expected: FAIL —— `ImportError: cannot import name 'cleanup_test_project_prefixes'`。
@@ -1536,6 +1559,8 @@ async def _cleanup_cos_project_prefixes():
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run pytest tests/integration/test_cos_test_prefix_hygiene.py tests/unit/test_cos_gating_hygiene.py -v
 ```
 Expected: PASS。
@@ -1546,6 +1571,8 @@ Expected: PASS。
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run pytest tests/integration -v 2>&1 | tail -20
 ```
 Expected: 与本任务前的通过/跳过数一致（本任务不改被测行为，只加 teardown）。随后用 Task 9 的巡检工具核对 bucket 对象数没有明显增长。
@@ -1651,6 +1678,8 @@ async def test_never_deletes_anything(db_session_factory, tmp_path, cos_prefix, 
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run pytest tests/integration/test_cos_orphan_report.py -v
 ```
 Expected: FAIL —— `ModuleNotFoundError: No module named 'app.scripts.cos_orphan_report'`。
@@ -1771,6 +1800,8 @@ if __name__ == "__main__":
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run pytest tests/integration/test_cos_orphan_report.py tests/unit/test_cos_gating_hygiene.py -v
 ```
 Expected: PASS。
@@ -1781,6 +1812,8 @@ Expected: PASS。
 cd backend
 export COS_SECRET_ID=$(cat ../deploy/secrets/cos_secret_id)
 export COS_SECRET_KEY=$(cat ../deploy/secrets/cos_secret_key)
+export COS_REGION=$(grep '^cos_region:' ../deploy/config.yml | awk '{print $2}')
+export COS_BUCKET=$(grep '^cos_bucket:' ../deploy/config.yml | awk '{print $2}')
 uv run python -m app.scripts.cos_orphan_report --older-than-days 0
 ```
 Expected: 孤儿数为个位数（清理后 bucket 只剩 2 个对象且都被引用）。若报出成百上千，说明 Task 8 的 teardown 没生效，回头查。
