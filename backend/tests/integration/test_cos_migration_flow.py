@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import sqlalchemy as sa
 
-from app.scripts.cos_migration.runner import collect_db_refs, scan
+from app.scripts.cos_migration.runner import collect_db_refs, scan, upload
 from tests.integration.conftest_cos import requires_cos
 
 
@@ -69,3 +69,46 @@ async def test_scan_reports_dangling_and_unreferenced(db_session_factory, tmp_pa
     assert dangling_keys == {f"projects/{pid}/shots/shot_1/last_frame.png"}
     assert report["unreferenced_local"]["files"] == 1
     assert report["local"]["files"] == 3   # output.mp4 + storyboard.json + leftover.png
+
+
+@requires_cos
+async def test_upload_is_idempotent_and_resumable(db_session_factory, tmp_path, cos_prefix):
+    """Spec B §2.1 的验收标准：连跑两次，第二次变更数必须为 0。
+    并且中断后重跑只补差量。"""
+    from app.services import object_store
+
+    pid, shot_dir = await _seed_legacy_rows(db_session_factory, tmp_path)
+
+    # 模拟「上传到一半中断」：先只传其中一个文件
+    first = await upload(tmp_path, key_prefix=cos_prefix,
+                         only=[f"projects/{pid}/shots/shot_1/output.mp4"])
+    assert first["uploaded"] == 1
+
+    # 补跑全量：只应补上剩下的两个，已传的那个被跳过
+    second = await upload(tmp_path, key_prefix=cos_prefix)
+    assert second["uploaded"] == 2
+    assert second["skipped"] == 1
+    assert second["failed"] == []
+
+    # 第三次：全部跳过，变更数为 0
+    third = await upload(tmp_path, key_prefix=cos_prefix)
+    assert third["uploaded"] == 0
+    assert third["skipped"] == 3
+
+    # 真实校验对象确实在 COS 上，且内容正确
+    assert await object_store.exists(f"{cos_prefix}projects/{pid}/shots/shot_1/output.mp4")
+    dest = tmp_path / "roundtrip.mp4"
+    await object_store.get(f"{cos_prefix}projects/{pid}/shots/shot_1/output.mp4", dest)
+    assert dest.read_bytes() == b"video-bytes"
+
+
+@requires_cos
+async def test_upload_reuploads_when_size_differs(db_session_factory, tmp_path, cos_prefix):
+    """大小不一致说明本地文件在停服前又被改过，必须重传而不是跳过。"""
+    pid, shot_dir = await _seed_legacy_rows(db_session_factory, tmp_path)
+    await upload(tmp_path, key_prefix=cos_prefix)
+
+    (shot_dir / "output.mp4").write_bytes(b"video-bytes-but-longer")
+    again = await upload(tmp_path, key_prefix=cos_prefix)
+    assert again["uploaded"] == 1
+    assert again["skipped"] == 2

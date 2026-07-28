@@ -19,6 +19,7 @@ from typing import Optional
 
 import sqlalchemy as sa
 
+from app.services import cos_client, object_store
 from app.scripts.cos_migration.fields import (
     ALREADY_KEY, LEGACY_ABS, LEGACY_REL, UNRECOGNIZED,
     FIELDS, classify, rewrite_json_dict_of_lists, rewrite_json_list, to_key,
@@ -129,6 +130,42 @@ async def scan(storage_root: Path, session_factory) -> dict:
         },
         "unrecognized": unrecognized,
     }
+
+
+async def upload(storage_root: Path, key_prefix: str = "",
+                 only: Optional[list[str]] = None) -> dict:
+    """把本地 storage 下的文件传到 COS。幂等：已存在且字节数一致则跳过。
+
+    ``only`` 限定只处理给定的 key 列表（用于按失败清单重试，以及测试里
+    模拟「传到一半中断」）。
+
+    可在线运行、不动 DB —— 这是切换窗口能压到极短的原因（Spec B §3.1
+    第 2 步在线消化掉大头）。
+    """
+    storage_root = Path(storage_root)
+    await cos_client.warm_credentials()
+    local = _walk_local(storage_root)
+    if only is not None:
+        wanted = set(only)
+        local = {k: v for k, v in local.items() if k in wanted}
+
+    uploaded = skipped = sent_bytes = 0
+    failed = []
+    for key in sorted(local):
+        n = local[key]
+        remote = f"{key_prefix}{key}"
+        try:
+            if await object_store.exists(remote) and await object_store.size(remote) == n:
+                skipped += 1
+                continue
+            await object_store.put(remote, storage_root / key)
+            uploaded += 1
+            sent_bytes += n
+        except Exception as e:  # 单个文件失败不中断整体，记进报告供重试
+            logger.error("migrate_upload_failed", extra={"key": remote, "error": repr(e)})
+            failed.append({"key": key, "error": repr(e)})
+    return {"phase": "upload", "uploaded": uploaded, "skipped": skipped,
+            "failed": failed, "bytes": sent_bytes}
 
 
 def write_report(report: dict, report_dir: Path, name: str) -> Path:
