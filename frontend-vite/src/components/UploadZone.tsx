@@ -3,17 +3,22 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { Upload, X } from 'lucide-react'
+import { Upload, X, Clapperboard } from 'lucide-react'
 
 interface UploadZoneProps {
-  kind: 'character' | 'scene'
+  kind: 'character' | 'scene' | 'video'
   maxFiles: number
   value: File[]
   onChange: (files: File[]) => void
+  /** 覆盖 input 的 accept 属性；默认按 kind 推导（视频模式为 video/*，否则 image/*） */
+  accept?: string
 }
 
-export function UploadZone({ kind, maxFiles, value, onChange }: UploadZoneProps) {
+export function UploadZone({ kind, maxFiles, value, onChange, accept }: UploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false)
+  const isVideo = kind === 'video'
+  const filePrefix = isVideo ? 'video/' : 'image/'
+  const inputAccept = accept ?? (isVideo ? 'video/*' : 'image/*')
 
   const handleDragEnter = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -39,7 +44,7 @@ export function UploadZone({ kind, maxFiles, value, onChange }: UploadZoneProps)
       setIsDragging(false)
 
       const droppedFiles = Array.from(e.dataTransfer.files).filter((file) =>
-        file.type.startsWith('image/')
+        file.type.startsWith(filePrefix)
       )
 
       if (droppedFiles.length === 0) return
@@ -48,16 +53,16 @@ export function UploadZone({ kind, maxFiles, value, onChange }: UploadZoneProps)
       onChange(newFiles)
 
       if (droppedFiles.length + value.length > maxFiles) {
-        alert(`最多只能上传 ${maxFiles} 张图片，已自动截取`)
+        alert(`最多只能上传 ${maxFiles} ${isVideo ? '个视频' : '张图片'}，已自动截取`)
       }
     },
-    [value, maxFiles, onChange]
+    [value, maxFiles, onChange, filePrefix, isVideo]
   )
 
   const handleFileSelect = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const selectedFiles = Array.from(e.target.files || []).filter((file) =>
-        file.type.startsWith('image/')
+        file.type.startsWith(filePrefix)
       )
 
       if (selectedFiles.length === 0) return
@@ -66,10 +71,10 @@ export function UploadZone({ kind, maxFiles, value, onChange }: UploadZoneProps)
       onChange(newFiles)
 
       if (selectedFiles.length + value.length > maxFiles) {
-        alert(`最多只能上传 ${maxFiles} 张图片，已自动截取`)
+        alert(`最多只能上传 ${maxFiles} ${isVideo ? '个视频' : '张图片'}，已自动截取`)
       }
     },
-    [value, maxFiles, onChange]
+    [value, maxFiles, onChange, filePrefix, isVideo]
   )
 
   const removeFile = useCallback(
@@ -80,15 +85,16 @@ export function UploadZone({ kind, maxFiles, value, onChange }: UploadZoneProps)
     [value, onChange]
   )
 
-  const label = kind === 'character' ? '角色参考图' : '场景参考图'
+  const label = kind === 'character' ? '角色参考图' : kind === 'scene' ? '场景参考图' : '视频'
   const required = kind === 'character'
+  const unit = isVideo ? '个' : '张'
 
   return (
     <div className="space-y-3">
       <label className="block text-sm font-medium text-zinc-700">
         {label}
         {required && <span className="text-red-500 ml-1">*</span>}
-        <span className="text-zinc-400 ml-2">(最多 {maxFiles} 张)</span>
+        <span className="text-zinc-400 ml-2">(最多 {maxFiles} {unit})</span>
       </label>
 
       <div
@@ -104,7 +110,7 @@ export function UploadZone({ kind, maxFiles, value, onChange }: UploadZoneProps)
       >
         <input
           type="file"
-          accept="image/*"
+          accept={inputAccept}
           multiple
           onChange={handleFileSelect}
           className="hidden"
@@ -114,11 +120,26 @@ export function UploadZone({ kind, maxFiles, value, onChange }: UploadZoneProps)
           htmlFor={`file-input-${kind}`}
           className="flex flex-col items-center gap-2 cursor-pointer w-full"
         >
-          <Upload className="w-8 h-8 text-zinc-400" />
-          <p className="text-sm text-zinc-500 text-center">
-            拖拽图片到此处，或<span className="text-blue-600">点击选择</span>
-          </p>
-          <p className="text-xs text-zinc-400">支持 JPG、PNG、WebP 格式</p>
+          {isVideo ? (
+            <Clapperboard className="w-8 h-8 text-zinc-400" />
+          ) : (
+            <Upload className="w-8 h-8 text-zinc-400" />
+          )}
+          {isVideo ? (
+            <>
+              <p className="text-sm text-zinc-500 text-center">
+                点击或拖拽上传视频
+              </p>
+              <p className="text-xs text-zinc-400">MP4 / MOV</p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-zinc-500 text-center">
+                拖拽图片到此处，或<span className="text-blue-600">点击选择</span>
+              </p>
+              <p className="text-xs text-zinc-400">支持 JPG、PNG、WebP 格式</p>
+            </>
+          )}
         </label>
       </div>
 
@@ -126,11 +147,20 @@ export function UploadZone({ kind, maxFiles, value, onChange }: UploadZoneProps)
         <div className="grid grid-cols-3 gap-3">
           {value.map((file, index) => (
             <div key={index} className="relative group">
-              <img
-                src={URL.createObjectURL(file)}
-                alt={`预览 ${index + 1}`}
-                className="w-full h-24 object-cover rounded-lg"
-              />
+              {isVideo ? (
+                <video
+                  src={URL.createObjectURL(file)}
+                  aria-label={`预览 ${index + 1}`}
+                  className="w-full h-24 object-cover rounded-lg"
+                  muted
+                />
+              ) : (
+                <img
+                  src={URL.createObjectURL(file)}
+                  alt={`预览 ${index + 1}`}
+                  className="w-full h-24 object-cover rounded-lg"
+                />
+              )}
               <button
                 onClick={() => removeFile(index)}
                 className="absolute -top-2 -right-2 w-6 h-6 bg-red-500 text-white rounded-full

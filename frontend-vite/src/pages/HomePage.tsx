@@ -118,6 +118,13 @@ export default function HomePage() {
           <h1 className="text-xl font-semibold text-zinc-900">视频制作工具</h1>
           <div className="flex items-center gap-4">
             <UserBadge />
+            <Button
+              variant="ghost"
+              data-testid="nav-analyses"
+              onClick={() => navigate('/analyses')}
+            >
+              内容分析
+            </Button>
             <Button data-testid="new-project-button" onClick={() => navigate('/projects/new')}>
               <Plus className="w-4 h-4 mr-2" />
               新建项目

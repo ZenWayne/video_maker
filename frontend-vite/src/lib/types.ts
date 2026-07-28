@@ -48,6 +48,8 @@ export interface Project {
   auto_voice_calibrate: boolean
   created_at: string
   updated_at: string
+  content_analysis_id?: string | null
+  attached_brief_json?: string | null
 }
 
 export type VcStatus = 'converting' | 'done' | 'failed'
@@ -123,6 +125,8 @@ export interface ReferenceImage {
 export interface ProjectDetail extends Project {
   shots: Shot[]
   reference_images: ReferenceImage[]
+  content_analysis_id?: string | null
+  attached_brief_json?: string | null
 }
 
 export type SSEEventType =
@@ -219,4 +223,44 @@ export interface Toast {
   id: string
   type: 'info' | 'success' | 'warning' | 'error'
   message: string
+}
+
+export type ContentAnalysisStatus = 'uploading' | 'transcribing' | 'analyzing' | 'completed' | 'failed'
+export type ReferenceSampleStatus = 'pending' | 'transcribing' | 'transcribed' | 'failed'
+
+export interface ReferenceSample {
+  id: number
+  analysis_id: string
+  order_index: number
+  video_path: string
+  has_speech: boolean | null
+  hook_text: string | null
+  full_transcript: string | null
+  language: string | null
+  status: ReferenceSampleStatus
+  error_message: string | null
+  created_at: string
+}
+
+export interface ContentAnalysis {
+  id: string
+  title: string
+  region_hint: string | null
+  status: ContentAnalysisStatus
+  brief_json: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+  samples: ReferenceSample[]
+}
+
+// 简报结构（brief_json 解析后）——镜像后端 CreationBrief
+export interface CreationBrief {
+  niche_summary: string
+  sample_stats: { sample_n: number; no_speech_pct: number; sample_warning: string | null }
+  hook_strategy: { common_hook_types: string[]; example_hooks: string[] }
+  script_structure: { pacing: string; emotion: string; info_gap: string; cta: string }
+  do: string[]
+  dont: string[]
+  screenwriter_directives: string
 }
