@@ -114,3 +114,54 @@ def test_json_fields_are_marked_with_right_kind():
     kinds = {(f.table, f.column): f.kind for f in FIELDS}
     assert kinds[("shots", "custom_reference_paths")] == "json_list"
     assert kinds[("image_candidates", "ref_paths")] == "json_dict_of_lists"
+
+
+def test_classify_rejects_malformed_double_slash():
+    """Double slash after storage/ prefix: result would be /projects/..., not a valid key."""
+    assert classify("storage//projects/x.png") == UNRECOGNIZED
+
+
+def test_classify_rejects_prefix_only():
+    """storage/ with no suffix → empty candidate after stripping."""
+    assert classify("storage/") == UNRECOGNIZED
+
+
+def test_classify_rejects_nested_storage_marker():
+    """Path with /storage/ appearing twice: first split yields storage/..., not a valid key."""
+    assert classify("/app/storage/storage/projects/x.png") == UNRECOGNIZED
+
+
+def test_to_key_idempotency_comprehensive():
+    """to_key(to_key(v)) converges for all valid inputs; consistently rejects invalid ones."""
+    # Valid inputs: legacy → key conversion
+    legacy_inputs = [
+        ("storage/projects/abc/shots/shot_1/output.mp4", "projects/abc/shots/shot_1/output.mp4"),
+        ("storage/analyses/xyz/samples/1/source.mp4", "analyses/xyz/samples/1/source.mp4"),
+        ("/app/storage/projects/abc/x.png", "projects/abc/x.png"),
+    ]
+    for input_val, expected_key in legacy_inputs:
+        once = to_key(input_val)
+        assert once == expected_key
+        twice = to_key(once)
+        assert twice == once == expected_key
+
+    # Already-key inputs: identity
+    key_inputs = [
+        "projects/abc/storyboard.json",
+        "analyses/xyz/samples/1/source.mp4",
+    ]
+    for key_val in key_inputs:
+        once = to_key(key_val)
+        twice = to_key(once)
+        assert once == twice == key_val
+
+    # Invalid/malformed inputs: must fail consistently
+    invalid_inputs = [
+        "storage//projects/x.png",  # double slash
+        "storage/",  # prefix only
+        "/app/storage/storage/projects/x.png",  # nested /storage/
+        "some/other/thing.png",  # unrecognized
+    ]
+    for input_val in invalid_inputs:
+        with pytest.raises(ValueError):
+            to_key(input_val)

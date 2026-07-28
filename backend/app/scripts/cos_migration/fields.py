@@ -32,15 +32,31 @@ UNRECOGNIZED = "unrecognized"
 
 
 def classify(value: str) -> str:
-    """判断一个 DB 路径值的形态。空值/认不出的返回 UNRECOGNIZED。"""
+    """判断一个 DB 路径值的形态。空值/认不出的返回 UNRECOGNIZED。
+
+    关键：只有当转换后确实得到合法 key（以 KEY_PREFIXES 开头）时，
+    才返回 LEGACY_REL/LEGACY_ABS，否则返回 UNRECOGNIZED。
+    这保证了 to_key 的幂等性：classify 返回的形态总是能成功转换。
+    """
     if not value:
         return UNRECOGNIZED
+
+    # 已经是 key
     if value.startswith(KEY_PREFIXES):
         return ALREADY_KEY
+
+    # 检查 LEGACY_REL：转换后必须是非空且以合法前缀开头
     if value.startswith(LEGACY_REL_PREFIX):
-        return LEGACY_REL
+        candidate = value[len(LEGACY_REL_PREFIX):]
+        if candidate and candidate.startswith(KEY_PREFIXES):
+            return LEGACY_REL
+
+    # 检查 LEGACY_ABS：转换后必须是非空且以合法前缀开头
     if value.startswith("/") and _ABS_MARKER in value:
-        return LEGACY_ABS
+        candidate = value.split(_ABS_MARKER, 1)[1]
+        if candidate and candidate.startswith(KEY_PREFIXES):
+            return LEGACY_ABS
+
     return UNRECOGNIZED
 
 
