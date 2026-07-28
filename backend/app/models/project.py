@@ -46,6 +46,21 @@ class ReferenceImageKind(str, Enum):
     SCENE = "scene"
 
 
+class ContentAnalysisStatus(str, Enum):
+    UPLOADING = "uploading"
+    TRANSCRIBING = "transcribing"
+    ANALYZING = "analyzing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ReferenceSampleStatus(str, Enum):
+    PENDING = "pending"
+    TRANSCRIBING = "transcribing"
+    TRANSCRIBED = "transcribed"
+    FAILED = "failed"
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -62,6 +77,8 @@ class Project(Base):
     reference_voice_shot_id = Column(Integer, nullable=True)  # shot_id of reference voice
     reference_voice_path = Column(Text, nullable=True)  # uploaded base-voice prompt.wav (file source)
     auto_voice_calibrate = Column(Boolean, nullable=False, default=False)  # auto-run VC after video gen
+    content_analysis_id = Column(String(36), nullable=True)  # 溯源：挂载的分析 id
+    attached_brief_json = Column(Text, nullable=True)         # brief 快照
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -213,6 +230,59 @@ class ImageCandidate(Base):
 
     __table_args__ = (
         Index("ix_image_candidates_shot", "project_id", "shot_id"),
+    )
+
+
+class ContentAnalysis(Base):
+    __tablename__ = "content_analyses"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    title = Column(Text, nullable=False)
+    region_hint = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, default=ContentAnalysisStatus.UPLOADING.value)
+    brief_json = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    samples = relationship(
+        "ReferenceSample",
+        back_populates="analysis",
+        cascade="all, delete-orphan",
+        order_by="ReferenceSample.order_index",
+        lazy="selectin",
+    )
+
+    __table_args__ = (
+        Index("ix_content_analyses_status", "status"),
+        Index("ix_content_analyses_created_at", "created_at"),
+    )
+
+
+class ReferenceSample(Base):
+    __tablename__ = "reference_samples"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    analysis_id = Column(
+        String(36),
+        ForeignKey("content_analyses.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    order_index = Column(Integer, nullable=False, default=0)
+    video_path = Column(Text, nullable=False)
+    audio_path = Column(Text, nullable=True)
+    has_speech = Column(Boolean, nullable=True)
+    hook_text = Column(Text, nullable=True)
+    full_transcript = Column(Text, nullable=True)
+    language = Column(String(10), nullable=True)
+    status = Column(String(20), nullable=False, default=ReferenceSampleStatus.PENDING.value)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    analysis = relationship("ContentAnalysis", back_populates="samples")
+
+    __table_args__ = (
+        Index("ix_reference_samples_analysis", "analysis_id"),
     )
 
 

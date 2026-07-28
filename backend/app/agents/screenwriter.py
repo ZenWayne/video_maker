@@ -91,11 +91,34 @@ For align_with_previous:
 Keep text concise and appropriate for the duration."""
 
 
+def render_brief_section(brief: Optional[Dict[str, Any]]) -> str:
+    """把 creation brief 渲染成一段可注入 screenwriter 的中文指令；None → 空串。"""
+    if not brief:
+        return ""
+    hook = brief.get("hook_strategy", {}) or {}
+    struct = brief.get("script_structure", {}) or {}
+    directives = (brief.get("screenwriter_directives") or "").strip()
+    hook_types = hook.get("common_hook_types") or []
+    pacing = struct.get("pacing") or ""
+    emotion = struct.get("emotion") or ""
+    info_gap = struct.get("info_gap") or ""
+    cta = struct.get("cta") or ""
+    lines = [
+        "【赛道爆款简报 — 务必据此创作】",
+        directives,
+        f"常见钩子类型：{'、'.join(hook_types)}",
+        f"节奏/情绪：{pacing} / {emotion}；"
+        f"信息缺口：{info_gap}；CTA：{cta}",
+    ]
+    return "\n".join(x for x in lines if x)
+
+
 async def run_screenwriter(
     theme_text: str,
     reference_images: List[Dict[str, Any]],
     llm_provider: GeminiProvider,
     aspect_ratio: str = "16:9",
+    creation_brief: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Generate storyboard from theme and reference images.
@@ -105,6 +128,7 @@ async def run_screenwriter(
         reference_images: List of reference image dicts with 'kind', 'path', 'filename'
         llm_provider: Gemini provider instance
         aspect_ratio: Video aspect ratio (e.g., "16:9", "9:16")
+        creation_brief: Optional creation brief dict snapshotted on the project
 
     Returns:
         Dictionary with storyboard data and word_count_warnings
@@ -125,6 +149,10 @@ async def run_screenwriter(
                 "mime_type": "image/png",
             }
         )
+
+    brief_text = render_brief_section(creation_brief)
+    if brief_text:
+        user_parts.append({"type": "text", "data": brief_text})
 
     # Add theme text and aspect ratio
     user_parts.append({"type": "text", "data": f"主题：{theme_text}"})

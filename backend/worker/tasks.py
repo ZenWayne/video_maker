@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import settings
 from app import observability
-from app.models.project import Project, Shot, ReferenceImage, ImageCandidate
+from app.models.project import (
+    Project, Shot, ReferenceImage, ImageCandidate,
+    ContentAnalysis, ReferenceSample,
+    ContentAnalysisStatus, ReferenceSampleStatus,
+)
 from app.services.state_machine import (
     ProjectStatus,
     ShotStatus,
@@ -33,7 +37,7 @@ from app.services.storage import (
 from app.services import object_store
 from app.services.workspace import workspace, ensure_free_space, Workspace
 from app.services.storyboard import write_storyboard
-from app.services.events import publish_event
+from app.services.events import publish_event, create_event
 from app.agents.llm import GeminiProvider
 from app.agents.screenwriter import run_screenwriter as run_screenwriter_agent
 from app.agents.director import run_director as run_director_agent
@@ -41,6 +45,9 @@ from app.agents.video_generator import generate_video
 from app.agents.frame_porter import extract_last_frame
 from app.agents.merger import merge_shots
 from app.agents.effective_clip import ClipSpec, effective_clip_paths
+from app.agents import asr
+from app.agents.audio_extractor import extract_audio_wav
+from app.agents.content_analyst import run_content_analysis_brief
 
 # 注：以下名称曾从 app.services.storage 导入，Task 5 删除本地路径函数后不再
 # 存在：shot_audio_original_path / shot_audio_vc_path / shot_pre_vc_video_path /
@@ -234,11 +241,26 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
             provider = get_provider()
 
             try:
+                creation_brief = (
+                    json.loads(project.attached_brief_json)
+                    if project.attached_brief_json else None
+                )
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid attached_brief_json for project {project_id}: {e}")
+                project.error_message = f"Invalid creation brief JSON: {e}"
+                session.add(project)
+                await transition_project_status(
+                    project, ProjectStatus.FAILED, "system:worker", session, redis
+                )
+                return
+
+            try:
                 storyboard_result = await run_screenwriter_agent(
                     theme_text=project.theme_text,
                     reference_images=reference_images_data,
                     llm_provider=provider,
                     aspect_ratio=project.aspect_ratio,
+                    creation_brief=creation_brief,
                 )
             except Exception as e:
                 logger.error(f"Screenwriter failed: {e}")
@@ -1366,3 +1388,157 @@ async def run_character_calibrate_batch(
         "Batch character calibration for project %s: %d calibrated, %d failed",
         project_id, calibrated, failed,
     )
+
+
+# ============== Content Analysis ==============
+
+
+async def run_content_analysis(ctx: Dict[str, Any], analysis_id: str, actor: str) -> None:
+    """三步管线：逐样本转写（本地 ASR）→ 归纳统计 → 一次 LLM 调用生成 creation brief。
+
+    逐样本转写失败不拖垮整体（仅记录该样本失败原因，继续其余样本）；仅当
+    可用样本为零时，本次分析才整体失败。每个样本在自己的一次性 workspace
+    中 fetch→抽音频→转写，退出即清（COS 是唯一权威存储，不持久化中间产
+    物，也没有 wav key 需要收尾）。
+    """
+    wc = WorkerContext(ctx)
+    session_factory = wc.session_factory
+    redis = wc.redis
+
+    async def _publish(analysis, sample=None):
+        # Envelope matches the rest of worker/tasks.py's events (e.g.
+        # shot_progress): {"type": ..., "data": {...}}. Per-sample identity/
+        # status is included so a consumer can tell WHICH sample moved,
+        # instead of every publish being byte-identical.
+        data = {"analysis_id": analysis_id, "status": analysis.status}
+        if sample is not None:
+            data["sample_id"] = sample.id
+            data["sample_status"] = sample.status
+        await publish_event(redis, analysis_id, create_event("analysis_progress", data=data))
+
+    async with session_factory() as session:
+        analysis = (await session.execute(
+            select(ContentAnalysis).where(ContentAnalysis.id == analysis_id)
+        )).scalar_one_or_none()
+        if analysis is None:
+            logger.error("ContentAnalysis %s not found", analysis_id)
+            return
+        if analysis.status == ContentAnalysisStatus.COMPLETED.value:
+            # Guard against re-entry for an analysis that already reached a
+            # terminal COMPLETED state (e.g. arq re-delivering/re-queuing a
+            # job for one that already finished) — without this it would
+            # silently re-run the whole pipeline, including the billed Gemini
+            # brief call.
+            #
+            # NOTE: this does NOT cover a worker restart mid-job. If the
+            # worker dies while status is still `transcribing`/`analyzing`,
+            # that status is non-terminal, this guard does not fire, and
+            # arq's redelivery re-runs the pipeline from scratch — including
+            # a second billed Gemini call — because the crash meant no prior
+            # result was ever committed to reuse. There is currently no
+            # protection against that case.
+            logger.info(
+                "ContentAnalysis %s already completed; skipping re-run", analysis_id,
+            )
+            return
+        samples = (await session.execute(
+            select(ReferenceSample).where(ReferenceSample.analysis_id == analysis_id)
+            .order_by(ReferenceSample.order_index)
+        )).scalars().all()
+
+        try:
+            # --- transcribing ---
+            analysis.status = ContentAnalysisStatus.TRANSCRIBING.value
+            await session.commit()
+            await _publish(analysis)
+
+            for smp in samples:
+                smp.status = ReferenceSampleStatus.TRANSCRIBING.value
+                await session.commit()
+                await _publish(analysis, smp)
+                try:
+                    async with workspace() as ws:
+                        local_video = await ws.fetch(smp.video_path, name=f"sample_{smp.id}.mp4")
+                        local_wav = ws.path("audio.wav")
+                        await asyncio.to_thread(extract_audio_wav, str(local_video), str(local_wav))
+                        res = await asyncio.to_thread(
+                            asr.transcribe, str(local_wav), analysis.region_hint or None)
+                    smp.has_speech = res.has_speech
+                    smp.full_transcript = res.full_transcript
+                    smp.hook_text = res.hook_text
+                    smp.language = res.language
+                    smp.status = ReferenceSampleStatus.TRANSCRIBED.value
+                except Exception as e:  # noqa: BLE001 — 逐样本失败不拖垮整体
+                    logger.error("Transcribing sample %s failed: %s", smp.id, e)
+                    smp.status = ReferenceSampleStatus.FAILED.value
+                    smp.error_message = str(e)
+                await session.commit()
+                await _publish(analysis, smp)
+
+            # --- analyzing ---
+            analyzable = [s for s in samples
+                          if s.status == ReferenceSampleStatus.TRANSCRIBED.value and s.has_speech]
+            if not analyzable:
+                analysis.status = ContentAnalysisStatus.FAILED.value
+                analysis.error_message = "无可用样本（全部无人声或转写失败）"
+                await session.commit()
+                await _publish(analysis)
+                return
+
+            analysis.status = ContentAnalysisStatus.ANALYZING.value
+            await session.commit()
+            await _publish(analysis)
+
+            total = len(samples)
+            no_speech = len([s for s in samples if s.has_speech is False])
+            stats = {
+                "sample_n": len(analyzable),
+                "no_speech_pct": round(no_speech / total, 3) if total else 0.0,
+                "sample_warning": "样本偏少，仅供参考" if len(analyzable) < 3 else None,
+            }
+            payload = [{"hook_text": s.hook_text or "", "full_transcript": s.full_transcript or ""}
+                       for s in analyzable]
+            provider = GeminiProvider(project=settings.gemini_project,
+                                      location=settings.gemini_location)
+            try:
+                brief = await run_content_analysis_brief(
+                    payload, provider, settings.content_analysis_model)
+                brief["sample_stats"] = stats  # 代码计算的 stats 为准，覆盖 LLM 返回的占位值
+                analysis.brief_json = json.dumps(brief, ensure_ascii=False)
+                analysis.status = ContentAnalysisStatus.COMPLETED.value
+            except Exception as e:  # noqa: BLE001
+                logger.error("Content analysis brief failed for %s: %s", analysis_id, e)
+                analysis.status = ContentAnalysisStatus.FAILED.value
+                analysis.error_message = f"brief 生成失败: {e}"
+            await session.commit()
+            await _publish(analysis)
+        except asyncio.CancelledError:
+            # arq enforces job_timeout by cancelling the task's coroutine.
+            # CancelledError is a BaseException (not Exception, since py3.8) —
+            # it would otherwise skip the safety net below entirely and leave
+            # the analysis wedged at transcribing/analyzing forever (no
+            # retry/delete endpoint). Mark it failed, then re-raise — arq
+            # still needs to observe the cancellation, we must not swallow it.
+            logger.error(
+                "Content analysis %s cancelled (job timeout or worker shutdown)",
+                analysis_id,
+            )
+            await session.rollback()
+            analysis.status = ContentAnalysisStatus.FAILED.value
+            analysis.error_message = "分析被取消（任务超时或 worker 重启）"
+            await session.commit()
+            await _publish(analysis)
+            raise
+        except Exception as e:  # noqa: BLE001 — 安全网：任何未预期异常都必须
+            # 把 analysis 推进到终态，绝不能卡在 transcribing/analyzing 不动。
+            logger.error(
+                "Content analysis %s failed unexpectedly: %s", analysis_id, e, exc_info=True,
+            )
+            # 大多数走到这里的路径是「上一次 commit 失败」——不先 rollback()
+            # 就再 commit 会在已损坏的 session 上抛 PendingRollbackError，
+            # 逃出本函数，让 analysis 卡死在非终态（无重试/删除端点可救）。
+            await session.rollback()
+            analysis.status = ContentAnalysisStatus.FAILED.value
+            analysis.error_message = f"分析失败: {e}"
+            await session.commit()
+            await _publish(analysis)

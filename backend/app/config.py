@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     # Worker settings (from config.yml / config.env)
     worker_pool_size: int = 4
 
+    # 内容分析（爆款归因）
+    asr_model: str = "large-v3"
+    asr_device: str = "cpu"          # cpu | cuda
+    asr_compute_type: str = "int8"   # int8 | float16
+    content_analysis_model: str = "gemini-2.5-pro"
+
     # Langfuse observability (LLM tracing)
     # Keys come from secrets (langfuse_public_key / langfuse_secret_key);
     # host + enabled flag come from config.yml. Tracing degrades to a no-op

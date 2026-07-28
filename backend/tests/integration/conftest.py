@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.models.project import Base, Project, Shot, ReferenceImage
+from app.models.project import Base, Project, Shot, ReferenceImage, ReferenceSample
 
 # conftest_cos.py defines the cos_prefix fixture used by COS integration tests;
 # it isn't named conftest.py so pytest won't auto-discover it on its own.
@@ -125,10 +125,12 @@ async def client(db_engine, db_session_factory, redis, monkeypatch):
     import app.api.stream as stream_module
     import app.api.pipeline as pipeline_module
     import app.api.voice as voice_module
+    import app.api.content_analysis as content_analysis_module
 
     # Override DB session factory everywhere
     monkeypatch.setattr(db_module, "AsyncSession", db_session_factory)
     monkeypatch.setattr(stream_module, "session_factory", db_session_factory)
+    monkeypatch.setattr(content_analysis_module, "session_factory", db_session_factory)
 
     # Mock ARQ to prevent actual job execution (would trigger LLM calls)
     arq = MagicMock()
@@ -143,6 +145,7 @@ async def client(db_engine, db_session_factory, redis, monkeypatch):
     monkeypatch.setattr(voice_module, "_get_arq_redis", _fake_get_arq)
     import app.api.image_candidates as image_candidates_module
     monkeypatch.setattr(image_candidates_module, "_get_arq_redis", _fake_get_arq)
+    monkeypatch.setattr(content_analysis_module, "_get_arq_redis", _fake_get_arq)
 
     # Override FastAPI DI
     async def override_session():
@@ -270,6 +273,46 @@ async def seed_shot_with_source(sf, project_id: str, shot_id: int, frames: int =
         shot.video_path = key
         shot.source_fps = info["fps"]
         shot.source_frames = info["total_frames"]
+        await s.commit()
+    return key
+
+
+async def seed_analysis_sample_video(sf, analysis_id: str, sample_id: int, frames: int = 10) -> str:
+    """Synthesize a real, tiny source video via ffmpeg, publish it to COS, and
+    update the already-inserted ``ReferenceSample`` row's ``video_path``.
+
+    Mirrors ``seed_shot_with_source`` for content-analysis samples: COS is the
+    only storage, so worker.run_content_analysis's per-sample
+    ``workspace().fetch(smp.video_path)`` needs a real object to download.
+
+    Requires COS credentials to be warmed — depend on the ``cos_prefix``
+    fixture (which warms them) and gate the test with ``requires_cos`` from
+    ``tests.integration.conftest_cos``.
+    """
+    from app.services.storage import sample_video_key
+    from app.services import object_store
+
+    with tempfile.TemporaryDirectory() as td:
+        local = Path(td) / "source.mp4"
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=10",
+                "-f", "lavfi", "-i", "sine=frequency=440",
+                "-frames:v", str(frames),
+                "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac",
+                "-shortest", str(local),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        key = await object_store.put(sample_video_key(analysis_id, sample_id, "source.mp4"), local)
+
+    async with sf() as s:
+        smp = (await s.execute(
+            select(ReferenceSample).where(ReferenceSample.id == sample_id)
+        )).scalar_one()
+        smp.video_path = key
         await s.commit()
     return key
 

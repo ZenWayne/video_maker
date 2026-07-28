@@ -14,6 +14,7 @@ from worker.tasks import (
     run_character_calibrate,
     run_character_calibrate_batch,
     run_image_candidate,
+    run_content_analysis,
 )
 
 # Configure app/worker loggers so INFO+ messages reach stderr
@@ -85,6 +86,7 @@ class WorkerSettings:
         run_character_calibrate,
         run_character_calibrate_batch,
         run_image_candidate,
+        run_content_analysis,
     ]
 
     # Worker settings

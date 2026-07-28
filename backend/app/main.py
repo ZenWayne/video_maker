@@ -130,7 +130,8 @@ async def health_check():
 
 
 # Import and include routers
-from app.api import projects, pipeline, uploads, assets, stream, debug, voice, image_candidates
+from app.api import (projects, pipeline, uploads, assets, stream, debug,
+                     voice, image_candidates, content_analysis)
 
 app.include_router(projects.router, prefix="/api")
 app.include_router(pipeline.router, prefix="/api")
@@ -140,6 +141,7 @@ app.include_router(assets.router, prefix="/api")
 app.include_router(stream.router, prefix="/api")
 app.include_router(debug.router, prefix="/api")
 app.include_router(image_candidates.router, prefix="/api")
+app.include_router(content_analysis.router, prefix="/api")
 
 # 注:/api/media 静态挂载 + no-cache 中间件已删除(Task 12)。媒体一律走
 # to_media_url() 产出的 COS 预签名 URL——留着本地静态挂载等于留了一条绕过
