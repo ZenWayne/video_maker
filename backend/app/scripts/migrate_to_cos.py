@@ -59,12 +59,46 @@ async def main(argv: list[str] | None = None) -> int:
         scan_path = args.report_dir / "scan.json"
         if scan_path.is_file():
             baseline = json.loads(scan_path.read_text(encoding="utf-8")).get("dangling")
+        else:
+            print(
+                "\n"
+                "!!! 警告：未找到悬空基线文件 "
+                f"{scan_path} !!!\n"
+                "!!! 没有基线，本次迁移之前就已存在的 ~212 条已知悬空媒体引用会被\n"
+                "!!! 误判为 missing_unexpected，--verify 会判失败，看起来像是一次\n"
+                "!!! 健康的迁移彻底崩了。请先对同一个 --report-dir 运行一次 --scan，\n"
+                "!!! 例如：\n"
+                "!!!     uv run --project backend python -m app.scripts.migrate_to_cos "
+                f"--scan --storage-root {args.storage_root} --report-dir {args.report_dir}\n",
+                file=sys.stderr,
+            )
         report = await verify(sf, key_prefix=args.key_prefix, baseline=baseline)
 
     path = write_report(report, args.report_dir, report["phase"])
     print(json.dumps(report, ensure_ascii=False, indent=2)[:4000])
     print(f"\n报告已写入 {path}")
-    return 0 if report.get("ok", True) else 1
+
+    trouble = None
+    if args.verify:
+        ok = report.get("ok", True)
+    elif args.upload:
+        failed = report.get("failed") or []
+        ok = not failed
+        if not ok:
+            trouble = f"--upload 有 {len(failed)} 个对象上传失败"
+    elif args.backfill:
+        unrecognized = report.get("unrecognized") or []
+        ok = not unrecognized
+        if not ok:
+            trouble = f"--backfill 有 {len(unrecognized)} 条值无法识别（unrecognized 非空）"
+    else:
+        ok = True  # --scan 纯信息性，永远返回 0
+
+    if not ok:
+        msg = trouble or "verify 校验未通过（missing_unexpected 非空）"
+        print(f"\n!!! {msg}，详见报告文件 {path}", file=sys.stderr)
+
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

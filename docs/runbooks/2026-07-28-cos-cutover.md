@@ -10,35 +10,104 @@
 
 ## 七步
 
+所有步骤共用同一个**绝对、固定**的 `--report-dir`：`/app/data/migration_report`。
+它落在 `app-data` 这个共享命名卷里（**特意不放进 `/app/storage`**——那是
+`--storage-root`，`--scan`/`--upload` 会递归遍历它当作媒体文件；报告写在
+里面会被当成本地对象误传/误报），因此不管是在运行中的容器里执行、还是
+第 5/7 步停服后用一次性 `podman run` 执行，看到的都是同一份磁盘、同一个目录
+——不会出现「`--scan` 和 `--verify` 用了不同 CWD、导致 `--report-dir` 默认值
+各自解析成不同目录」的问题。**下面每条命令都显式带上这个 `--report-dir`，不要
+省略、不要改成相对路径。**
+
 1. **备份 DB**：`cp` sqlite 文件到带时间戳的副本；确认 bucket 版本控制已开启
-2. **在线 `--upload`**（不停服，最耗时的一步在此消化）
+2. **在线 `--upload`**（不停服，最耗时的一步在此消化；容器仍在跑，用
+   `podman compose exec`）：
    ```bash
-   uv run --project backend python -m app.scripts.migrate_to_cos \
-       --upload --storage-root /app/storage
+   podman compose -f deploy/docker-compose.dev.yml exec backend \
+       uv run --project . python -m app.scripts.migrate_to_cos \
+       --upload --storage-root /app/storage --report-dir /app/data/migration_report
+   echo "exit=$?"
    ```
+   **退出码必须是 0 才能继续。** 非 0 表示 `failed` 列表非空——即有对象上传
+   失败，脚本会把失败详情打到 stderr 并指向报告文件；照着报告用
+   `--retry-failed` 重试，直到这一步干净地退出 0，再往下走。
 3. **停止服务**：`podman compose -f deploy/docker-compose.dev.yml down`
-4. **再次 `--upload` 补增量**（停服前最后写入的文件）
-5. **先 `--scan` 后 `--backfill`**——顺序不能反：
+4. **再次 `--upload` 补增量**（停服前最后写入的文件；容器已经停了，改用
+   一次性 `podman run`，挂载方式与 CLAUDE.md「Always Run Python via Podman
+   Compose」一节一致，另外显式挂上共享的 `app-data` / `app-storage` 命名卷）：
    ```bash
-   uv run --project backend python -m app.scripts.migrate_to_cos \
-       --scan --storage-root /app/storage --report-dir migration_report
-   uv run --project backend python -m app.scripts.migrate_to_cos \
-       --backfill --storage-root /app/storage --report-dir migration_report
+   podman run --rm --network host \
+       -v deploy_app-data:/app/data \
+       -v deploy_app-storage:/app/storage \
+       -v $(pwd)/backend:/app:z -w /app \
+       -e DATABASE_URL=sqlite+aiosqlite:////app/data/dev.db \
+       ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
+       uv run --project . python -m app.scripts.migrate_to_cos \
+       --upload --storage-root /app/storage --report-dir /app/data/migration_report
+   echo "exit=$?"
    ```
+   同样：**退出码必须是 0 才能继续**，否则先排查 `failed` 列表再往下走。
+5. **先 `--scan` 后 `--backfill`**——顺序不能反，两条命令都用同一个
+   `/app/data/migration_report`：
+   ```bash
+   podman run --rm --network host \
+       -v deploy_app-data:/app/data \
+       -v deploy_app-storage:/app/storage \
+       -v $(pwd)/backend:/app:z -w /app \
+       -e DATABASE_URL=sqlite+aiosqlite:////app/data/dev.db \
+       ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
+       uv run --project . python -m app.scripts.migrate_to_cos \
+       --scan --storage-root /app/storage --report-dir /app/data/migration_report
+
+   podman run --rm --network host \
+       -v deploy_app-data:/app/data \
+       -v deploy_app-storage:/app/storage \
+       -v $(pwd)/backend:/app:z -w /app \
+       -e DATABASE_URL=sqlite+aiosqlite:////app/data/dev.db \
+       ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
+       uv run --project . python -m app.scripts.migrate_to_cos \
+       --backfill --storage-root /app/storage --report-dir /app/data/migration_report
+   echo "exit=$?"
+   ```
+   **`--backfill` 的退出码必须是 0 才能继续部署（第 6 步）。** 非 0 表示
+   `unrecognized` 非空——有值没能识别、没被回填，脚本会把条数打到 stderr；
+   在部署新代码之前必须先人工核实这些值，不要带着未回填的字段往下走。
+
    > **顺序陷阱一（Spec B §9.2，建列）**：两个 key 列由 `app/db.py` 的幂等
-   > `ALTER TABLE` 在应用启动时创建，而本步骤早于第 6 步部署后的首次启动。
-   > `--backfill` 已在内部先调 `init_db()` 建列，**不要**跳过或替换该步骤。
+   > `ALTER TABLE` 创建，但 `backfill()`（`runner.py`）**不会**调用
+   > `init_db()`——`init_db()` 写死操作 `app.db` 模块级、指向真实共享
+   > `dev.db` 的 engine，测试里用它会绕过传入的 `session_factory` 直接打
+   > 共享库，这正是本项目明令禁止的事。`backfill()` 改为直接对调用方传入
+   > 的 `conn` 调用幂等的 `_ensure_columns(conn)` 来建列，因此永远作用在
+   > 正确的引擎上；该例程幂等，重复执行无害，但**建列这一步确实是
+   > `--backfill` 内部自动做的，不需要、也不应该额外手动跑一次 `init_db()`
+   > 或替换性的建列脚本**。
    >
    > **顺序陷阱二（第 7 步的悬空基线）**：`--verify` 从 `--report-dir` 下的
-   > `scan.json` 读取悬空基线；若该文件不存在，`--verify` 会静默地在无基线的
-   > 情况下运行，届时全部约 212 条已知悬空引用都会被计入 `missing_unexpected`，
-   > 一次完全健康的迁移会看起来像是彻底失败，且没有任何解释。**所以 `--scan`
-   > 必须先于 `--verify` 运行，并且两者要用同一个 `--report-dir`。**
+   > `scan.json` 读取悬空基线；若该文件不存在，`--verify` 现在会在 stderr
+   > 打出显眼警告（报告仍会跑完），但没有基线的话，届时全部约 212 条已知
+   > 悬空引用都会被计入 `missing_unexpected` 并让退出码变成 1，一次完全
+   > 健康的迁移会看起来像是彻底失败。**所以 `--scan` 必须先于 `--verify`
+   > 运行，并且两者要用上面这同一个 `/app/data/migration_report`。**
 6. **部署新代码**
-7. **启动 + `--verify`**：退出码 0 即全绿
+7. **启动 + `--verify`**：退出码 0 即全绿。启动步骤本身会拉起容器，但
+   `--verify` 需要 COS 凭证，用一次性 `podman run` 时要把 `cos_secret_id` /
+   `cos_secret_key` 这两个 secret 文件读进环境变量（做法与
+   `docker-compose.dev.yml` 里 backend 服务的 `command:` 一致）：
    ```bash
-   uv run --project backend python -m app.scripts.migrate_to_cos \
-       --verify --storage-root /app/storage --report-dir migration_report
+   podman run --rm --network host \
+       -v deploy_app-data:/app/data \
+       -v deploy_app-storage:/app/storage \
+       -v $(pwd)/backend:/app:z -w /app \
+       -v $(pwd)/deploy/secrets:/run/secrets:ro,z \
+       --env-file deploy/config.env \
+       -e DATABASE_URL=sqlite+aiosqlite:////app/data/dev.db \
+       ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
+       sh -c 'export COS_SECRET_ID=$(cat /run/secrets/cos_secret_id) &&
+              export COS_SECRET_KEY=$(cat /run/secrets/cos_secret_key) &&
+              uv run --project . python -m app.scripts.migrate_to_cos \
+              --verify --storage-root /app/storage --report-dir /app/data/migration_report'
+   echo "exit=$?"
    ```
 
 ## 验收

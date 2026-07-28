@@ -226,6 +226,147 @@ async def test_verify_tolerates_baseline_dangling_but_fails_on_new_gaps(
         f"projects/{pid}/shots/shot_1/output.mp4"]
 
 
+async def test_cli_verify_warns_loudly_when_scan_json_missing(
+        db_session_factory, tmp_path, monkeypatch, capsys):
+    """终审 Important #1：--report-dir 下没有 scan.json 时，--verify 必须在
+    stderr 打出显眼警告（点名它找的路径），而不是静默地拿 baseline=None 跑。
+    真正的 verify() 阶段会打 COS（此环境无凭证），所以这里把 CLI 模块里
+    绑定的 `verify` 换成一个记录调用参数的桩函数——测的是 main() 里「发现
+    scan.json 缺失该怎么办」这段 CLI 级判断逻辑，不是 verify() 本身。"""
+    import app.db as db_module
+    import app.scripts.migrate_to_cos as cli_module
+
+    monkeypatch.setattr(db_module, "AsyncSession", db_session_factory)
+
+    calls = []
+
+    async def fake_verify(sf, key_prefix="", baseline=None):
+        calls.append(baseline)
+        return {"phase": "verify", "checked": 0, "present": 0,
+                "missing_expected": 0, "missing_unexpected": [], "ok": True}
+
+    monkeypatch.setattr(cli_module, "verify", fake_verify)
+
+    report_dir = tmp_path / "reports"  # 特意不预先写 scan.json
+    code = await cli_module.main(["--verify", "--storage-root", str(tmp_path),
+                                  "--report-dir", str(report_dir)])
+
+    assert code == 0
+    assert calls == [None]  # 没有基线，真的传了 baseline=None 下去
+
+    err = capsys.readouterr().err
+    assert "警告" in err
+    assert str(report_dir / "scan.json") in err
+    assert "--scan" in err  # 必须指路怎么修
+
+
+async def test_cli_verify_no_warning_when_scan_json_present(
+        db_session_factory, tmp_path, monkeypatch, capsys):
+    """有基线文件时不该报警，且 baseline 要被正确读出并传下去。"""
+    import app.db as db_module
+    import app.scripts.migrate_to_cos as cli_module
+
+    monkeypatch.setattr(db_module, "AsyncSession", db_session_factory)
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True)
+    dangling = [{"table": "shots", "column": "video_path", "pk": "1",
+                "raw": "x", "key": "projects/p/shots/shot_1/output.mp4", "kind": "legacy_relative"}]
+    (report_dir / "scan.json").write_text(json.dumps({"phase": "scan", "dangling": dangling}))
+
+    calls = []
+
+    async def fake_verify(sf, key_prefix="", baseline=None):
+        calls.append(baseline)
+        return {"phase": "verify", "checked": 0, "present": 0,
+                "missing_expected": 0, "missing_unexpected": [], "ok": True}
+
+    monkeypatch.setattr(cli_module, "verify", fake_verify)
+
+    code = await cli_module.main(["--verify", "--storage-root", str(tmp_path),
+                                  "--report-dir", str(report_dir)])
+
+    assert code == 0
+    assert calls == [dangling]
+    assert "警告" not in capsys.readouterr().err
+
+
+async def test_cli_upload_exits_nonzero_when_failed_list_nonempty(
+        db_session_factory, tmp_path, monkeypatch, capsys):
+    """终审 Important #2：--upload 报告里 failed 非空时，CLI 必须退出非 0。
+    真正的 upload() 一上来就 warm_credentials()（此环境无凭证），所以同样
+    在 CLI 模块层面换成桩函数——测的是「main() 怎么解读 upload() 返回的
+    dict」这段纯 CLI 逻辑，不重新验证 upload() 本身（那是
+    test_upload_is_idempotent_and_resumable 等 @requires_cos 用例的职责）。"""
+    import app.db as db_module
+    import app.scripts.migrate_to_cos as cli_module
+
+    monkeypatch.setattr(db_module, "AsyncSession", db_session_factory)
+
+    async def fake_upload(storage_root, key_prefix="", only=None):
+        return {"phase": "upload", "uploaded": 3, "skipped": 1,
+                "failed": [{"key": "projects/p/shots/shot_1/output.mp4", "error": "boom"}],
+                "bytes": 123}
+
+    monkeypatch.setattr(cli_module, "upload", fake_upload)
+
+    report_dir = tmp_path / "reports"
+    code = await cli_module.main(["--upload", "--storage-root", str(tmp_path),
+                                  "--report-dir", str(report_dir)])
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "1 个对象上传失败" in err
+    assert str(report_dir / "upload.json") in err
+    written = json.loads((report_dir / "upload.json").read_text())
+    assert written["failed"]
+
+
+async def test_cli_upload_exits_zero_when_nothing_failed(
+        db_session_factory, tmp_path, monkeypatch):
+    """对照组：failed 为空时仍应退出 0，不能矫枉过正。"""
+    import app.db as db_module
+    import app.scripts.migrate_to_cos as cli_module
+
+    monkeypatch.setattr(db_module, "AsyncSession", db_session_factory)
+
+    async def fake_upload(storage_root, key_prefix="", only=None):
+        return {"phase": "upload", "uploaded": 3, "skipped": 1, "failed": [], "bytes": 123}
+
+    monkeypatch.setattr(cli_module, "upload", fake_upload)
+
+    code = await cli_module.main(["--upload", "--storage-root", str(tmp_path),
+                                  "--report-dir", str(tmp_path / "reports")])
+    assert code == 0
+
+
+async def test_cli_backfill_exits_nonzero_when_unrecognized_nonempty(
+        db_session_factory, tmp_path, monkeypatch, capsys):
+    """终审 Important #2 的另一半：--backfill 不碰 COS，这里跑真正的
+    backfill()（不需要桩），验证 unrecognized 非空时 CLI 退出非 0。"""
+    import app.db as db_module
+    from app.scripts.migrate_to_cos import main
+
+    monkeypatch.setattr(db_module, "AsyncSession", db_session_factory)
+
+    pid, _ = await _seed_legacy_rows(db_session_factory, tmp_path)
+    async with db_session_factory() as s:
+        await s.execute(sa.text(
+            "UPDATE projects SET final_video_path = 'weird/thing.mp4' WHERE id = :p"),
+            {"p": pid})
+        await s.commit()
+
+    report_dir = tmp_path / "reports"
+    code = await main(["--backfill", "--storage-root", str(tmp_path),
+                       "--report-dir", str(report_dir)])
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "1 条值无法识别" in err
+    written = json.loads((report_dir / "backfill.json").read_text())
+    assert written["unrecognized"]
+
+
 async def test_cli_scan_writes_report_file(db_session_factory, tmp_path, monkeypatch):
     """CLI 必须把报告落盘——切换手册要人工核对它。
 
