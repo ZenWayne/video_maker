@@ -7,6 +7,7 @@
 # Gemini model selection
 GEMINI_SCRIPT_MODEL: gemini-3.1-pro-preview
 GEMINI_DIRECTOR_MODEL: gemini-3.1-pro-preview
+CONTENT_ANALYSIS_MODEL: gemini-3.1-pro-preview
 
 # Veo video generation (via Vertex AI)
 # Provider: "vertex" (Veo via Vertex AI / Google) or "kie" (kie.ai REST). Default vertex.
@@ -21,6 +22,11 @@ WORKER_POOL_SIZE: "4"
 # Voice conversion (in-process vc2.VoiceConverter)
 MODEL_DIR: "/workspace/exported_vc2"
 VC_NUM_THREADS: "4"
+
+# ASR (local speech-to-text via faster-whisper)
+ASR_MODEL: "large-v3"
+ASR_DEVICE: "cpu"
+ASR_COMPUTE_TYPE: "int8"
 
 # CORS — include both Vite dev and production origins
 CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000,http://127.0.0.1:4000"

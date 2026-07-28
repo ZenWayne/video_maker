@@ -73,10 +73,11 @@ services:
     volumes:
       - ../backend:/app:z
       - uv-cache:/root/.cache/uv
-      - backend-venv:/app/.venv
+      - worker-venv:/app/.venv      # isolated from backend/mcp's backend-venv — this one gets the `asr` group
       - app-data:/app/data          # shared DB across worktrees (compose project "deploy")
       - app-storage:/app/storage     # shared media storage across worktrees
       - ./secrets/gcp-sa.json:/run/secrets/gcp-sa.json:ro,z
+      - whisper-cache:/root/.cache/huggingface   # persists faster-whisper model weights (~3GB for large-v3)
     secrets:
       - gemini_api_key
       - veo_api_key
@@ -100,6 +101,7 @@ services:
       https_proxy: http://host.containers.internal:10809
       NO_PROXY: localhost,127.0.0.1,host.containers.internal,.myqcloud.com
       no_proxy: localhost,127.0.0.1,host.containers.internal,.myqcloud.com
+      HF_HOME: /root/.cache/huggingface
     command: >
       sh -c "export GEMINI_API_KEY=$(cat /run/secrets/gemini_api_key) &&
              export VEO_API_KEY=$(cat /run/secrets/veo_api_key) &&
@@ -109,7 +111,7 @@ services:
              export LANGFUSE_SECRET_KEY=$(cat /run/secrets/langfuse_secret_key) &&
              export COS_SECRET_ID=$(cat /run/secrets/cos_secret_id) &&
              export COS_SECRET_KEY=$(cat /run/secrets/cos_secret_key) &&
-             uv run --project . python -m arq worker.arq_worker.WorkerSettings"
+             uv run --project . --group asr python -m arq worker.arq_worker.WorkerSettings"
     depends_on:
       - redis
     restart: unless-stopped
@@ -209,8 +211,10 @@ services:
 volumes:
   uv-cache:
   backend-venv:  # isolated venv for containers (avoids conflict with host uv)
+  worker-venv:   # separate venv for worker — has the `asr` group installed, unlike backend/mcp
   app-data:      # shared sqlite DB — same volume for every worktree's stack (project "deploy")
   app-storage:   # shared shot media — same volume for every worktree's stack
+  whisper-cache: # faster-whisper model weights (HF_HOME) — avoids re-downloading ~3GB on container recreate
 
 secrets:
   gemini_api_key:
