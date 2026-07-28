@@ -1,4 +1,4 @@
-"""VC/CC 链路：备份用服务端 copy，pristine 尾帧不被 CC 覆盖。"""
+"""VC/CC 链路：VC 固定 key 发布、video_path 不变；CC 时 pristine 尾帧不被覆盖。"""
 # 这道护栏只为 adopt_candidate_to_last_frame（app.api.image_candidates）和
 # character_calibrate_revert（app.api.pipeline，经 client fixture 走 HTTP）
 # 而设，且它模拟的是**真实生产行为**、不掩盖任何 bug：这两者只在 FastAPI
@@ -9,11 +9,6 @@
 # 撞上"正在加载中"的半成品模块 → AttributeError（同款坑 test_stream_
 # snapshot_candidates.py 已踩过一次）。
 #
-# 反例对照：本文件里 ensure_pre_vc_backup（app.services.vc_backup）的测试
-# 完全不依赖这道护栏——它跑在 vc-worker 进程，那个进程从不 import app.main，
-# 所以"先加载 app.main 再测"反而会掩盖真实入口的循环 import bug（Task 9
-# 审查发现的 Critical 缺陷正是这样被测试掩盖过一次）。该函数的"不依赖
-# app.main"结论改为在独立、未加载 app.main 的进程里验证，见 Task 9 报告。
 import app.main  # noqa: F401
 
 from sqlalchemy import select
@@ -115,37 +110,6 @@ async def test_character_calibrate_revert_uses_pristine_key_and_deletes_old_cc(
     assert await object_store.exists(pristine_key)          # pristine 本体不受影响
 
 
-async def test_vc_backup_uses_server_side_copy(db_session_factory, cos_prefix):
-    """VC 首次执行时备份原视频，用服务端 copy 不产生本地流量。
-
-    ensure_pre_vc_backup 特意放在 app.services.vc_backup（纯 service 模块，
-    不依赖 app.main）——vc-worker 进程只 import worker.tasks，从不 import
-    app.main；若从 app.api.pipeline 导入会在该进程处理第一个 run_voice_convert
-    任务时崩溃（ImportError: 循环 import）。这个测试直接从新位置导入，不依赖
-    本文件顶部的 `import app.main` 护栏——它就是用来确认"不先加载 app.main
-    也能正常工作"这件事本身。
-    """
-    from app.services.vc_backup import ensure_pre_vc_backup
-
-    pid = await _make_project(db_session_factory, status="shot_review")
-    await _add_shot(db_session_factory, pid, 1)
-    video_key = await seed_shot_with_source(db_session_factory, pid, 1)
-
-    backup_key = await ensure_pre_vc_backup(db_session_factory, pid, 1)
-    assert await object_store.exists(backup_key)
-    assert await object_store.size(backup_key) == await object_store.size(video_key)
-
-    async with db_session_factory() as s:
-        shot = (await s.execute(
-            select(Shot).where(Shot.project_id == pid, Shot.shot_id == 1)
-        )).scalar_one()
-    assert shot.pre_vc_video_key == backup_key
-
-    # 幂等：已备份则返回原备份，不重复拷贝
-    again = await ensure_pre_vc_backup(db_session_factory, pid, 1)
-    assert again == backup_key
-
-
 async def test_resolve_tail_frame_used_when_object_exists(cos_prefix, tmp_path):
     """(B) resolve_tail_frame 对真实存在的 COS key 必须返回该 key（不是恒 False）。"""
     from worker.tasks import resolve_tail_frame
@@ -208,6 +172,3 @@ async def test_vc_convert_publishes_fixed_key_and_backs_up_video(
     assert (tmp_path / "got.wav").read_bytes() == b"RIFFfakewav"
     # video_path untouched (non-destructive)
     assert shot.video_path == video_key
-    # pre-VC backup was created as a side effect
-    assert shot.pre_vc_video_key is not None
-    assert await object_store.exists(shot.pre_vc_video_key)

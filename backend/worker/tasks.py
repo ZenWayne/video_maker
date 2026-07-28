@@ -1058,18 +1058,6 @@ async def _do_voice_convert_one(
     from app.agents.audio_extractor import extract_audio_wav
     from app.services.cosyvoice_client import voice_convert
     from app.services.storage import shot_audio_vc_key
-    # ensure_pre_vc_backup lives in app.services.vc_backup — a plain service
-    # module with zero app.main/FastAPI dependency. This worker function runs
-    # inside the vc-worker process (worker.vc_arq_worker), which only imports
-    # worker.tasks and NEVER app.main. Importing from app.api.pipeline here
-    # would pull in app.main (pipeline.py does `from app.main import
-    # get_redis` at module level) the first time this runs — verified to
-    # crash for real with ImportError: cannot import name '_require_user'
-    # from partially initialized module 'app.api.pipeline' (circular import,
-    # since app.main's router loading tries to re-import the
-    # still-initializing app.api.pipeline). See app/services/vc_backup.py's
-    # module docstring for the full trace.
-    from app.services.vc_backup import ensure_pre_vc_backup
 
     async with session_factory() as session:
         result = await session.execute(
@@ -1087,14 +1075,9 @@ async def _do_voice_convert_one(
         )
 
         try:
-            # Idempotent server-side backup of the pre-VC video (zero local
-            # traffic). ensure_pre_vc_backup opens its OWN session/transaction,
-            # so refresh `shot` afterwards or the later commit on THIS session
-            # would flush its stale in-memory pre_vc_video_key (None) back
-            # over the just-committed value.
-            await ensure_pre_vc_backup(session_factory, project_id, shot_id)
-            await session.refresh(shot)
-
+            # VC 是非破坏式的：video_path 指向不可变源，只另写 vc_audio_path，
+            # voice-revert 清空该指针即可还原。因此不需要备份 VC 前的整片
+            # ——旧的 ensure_pre_vc_backup 备份从来没有任何读取方。
             vc_key = shot_audio_vc_key(project_id, shot_id)
             async with workspace() as ws:
                 local_video = await ws.fetch(shot.video_path, name="source.mp4")

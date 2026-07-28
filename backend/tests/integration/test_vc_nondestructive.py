@@ -3,10 +3,9 @@
 # runs for real in the vc-worker process (worker.vc_arq_worker), which never imports
 # app.main — so this file's first test calls it exactly the way production does, as a
 # regression guard against the app.api.pipeline circular-import crash that this class of
-# "add an app.main guard to the test" masking previously caused (see
-# app/services/vc_backup.py's module docstring and the Task 9 report's Critical-fix
-# section for the full trace). Do not add an `import app.main` guard here — that would
-# hide exactly the bug this file exists to catch.
+# "add an app.main guard to the test" masking previously caused (see the Task 9 report's
+# Critical-fix section for the full trace). Do not add an `import app.main` guard here —
+# that would hide exactly the bug this file exists to catch.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,7 +22,7 @@ async def test_vc_writes_wav_only_keeps_source_and_backs_up(
     db_session_factory, cos_prefix, tmp_path
 ):
     """VC worker must publish a fixed audio_vc.wav key and leave the source video
-    byte-for-byte untouched; a pre-VC backup is created as a side effect."""
+    byte-for-byte untouched."""
     from pathlib import Path
 
     pid = await _make_project(db_session_factory, status="completed")
@@ -68,9 +67,6 @@ async def test_vc_writes_wav_only_keeps_source_and_backs_up(
         await object_store.get(shot.vc_audio_path, got)
         assert got.read_bytes() == b"RIFFfakewav"
         assert shot.video_path == video_key   # video_path unchanged (non-destructive)
-        # pre-VC backup created as a side effect, idempotent server-side copy
-        assert shot.pre_vc_video_key is not None
-        assert await object_store.exists(shot.pre_vc_video_key)
 
     # Source video bytes are identical
     after = tmp_path / "after.mp4"

@@ -6,8 +6,10 @@ serialization) so all three stay in lockstep on the key format and the
 write-then-DB-field-update ordering.
 
 Depends only on app.services.* — safe for worker to import (never import
-app.api.* from worker; see CLAUDE.md's "Shot 素材文件变更审计" section and the
-vc_backup.py precedent for why).
+app.api.* from worker: the vc-worker process only imports worker.tasks and
+never app.main, so an app.api.* import pulled in at module load time can hit
+a circular-import ImportError the first time that worker handles a job; see
+CLAUDE.md's "Shot 素材文件变更审计" section).
 """
 
 import json
