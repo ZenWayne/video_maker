@@ -224,3 +224,25 @@ async def test_verify_tolerates_baseline_dangling_but_fails_on_new_gaps(
     assert bad["ok"] is False
     assert [m["key"] for m in bad["missing_unexpected"]] == [
         f"projects/{pid}/shots/shot_1/output.mp4"]
+
+
+async def test_cli_scan_writes_report_file(db_session_factory, tmp_path, monkeypatch):
+    """CLI 必须把报告落盘——切换手册要人工核对它。
+
+    ``main()`` 内部用 ``app.db.AsyncSession`` 当 session_factory（绝不新建
+    engine，见 runner.py 与 CLAUDE.md 的强制约定），所以这里必须把它
+    monkeypatch 成本测试自己的 db_session_factory，否则会打到真实共享库。
+    """
+    import app.db as db_module
+    from app.scripts.migrate_to_cos import main
+
+    monkeypatch.setattr(db_module, "AsyncSession", db_session_factory)
+
+    pid, _ = await _seed_legacy_rows(db_session_factory, tmp_path)
+    report_dir = tmp_path / "reports"
+    code = await main(["--scan", "--storage-root", str(tmp_path),
+                       "--report-dir", str(report_dir)])
+    assert code == 0
+    written = json.loads((report_dir / "scan.json").read_text())
+    assert written["phase"] == "scan"
+    assert written["db"]["legacy_relative"] == 3
