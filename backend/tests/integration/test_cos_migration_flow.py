@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import sqlalchemy as sa
 
-from app.scripts.cos_migration.runner import collect_db_refs, scan, upload
+from app.scripts.cos_migration.runner import backfill, collect_db_refs, scan, upload
 from tests.integration.conftest_cos import requires_cos
 
 
@@ -112,3 +112,71 @@ async def test_upload_reuploads_when_size_differs(db_session_factory, tmp_path, 
     again = await upload(tmp_path, key_prefix=cos_prefix)
     assert again["uploaded"] == 1
     assert again["skipped"] == 2
+
+
+async def test_backfill_converts_scalar_and_json_fields_idempotently(db_session_factory, tmp_path):
+    pid, _ = await _seed_legacy_rows(db_session_factory, tmp_path)
+    # JSON 数组字段：Spec B 点名最容易遗漏的地方
+    async with db_session_factory() as s:
+        await s.execute(sa.text(
+            "UPDATE shots SET custom_reference_paths = :v WHERE project_id = :p"),
+            {"p": pid, "v": json.dumps([
+                f"storage/projects/{pid}/shots/shot_1/custom_frames/a.jpg",
+                f"storage/projects/{pid}/shots/shot_1/custom_frames/b.jpg"])})
+        await s.commit()
+
+    first = await backfill(tmp_path, db_session_factory)
+    assert first["changed"] > 0
+
+    async with db_session_factory() as s:
+        row = (await s.execute(sa.text(
+            "SELECT video_path, custom_reference_paths FROM shots WHERE project_id = :p"),
+            {"p": pid})).first()
+    assert row[0] == f"projects/{pid}/shots/shot_1/output.mp4"
+    assert json.loads(row[1]) == [
+        f"projects/{pid}/shots/shot_1/custom_frames/a.jpg",
+        f"projects/{pid}/shots/shot_1/custom_frames/b.jpg"]
+
+    # Spec B §2.1 验收标准：第二次变更数必须为 0
+    second = await backfill(tmp_path, db_session_factory)
+    assert second["changed"] == 0
+
+
+async def test_backfill_derives_new_key_columns(db_session_factory, tmp_path):
+    """两个新列的初值只能在本地文件尚存时推导，事后无法补做（Spec B §2.3）。
+    pristine 取 last_frame_*.png 中排除固定名备份后 mtime 最新的那个。"""
+    import os, time
+    pid, shot_dir = await _seed_legacy_rows(db_session_factory, tmp_path)
+    (shot_dir / "last_frame_pre_cc.png").write_bytes(b"pre-cc")
+    (shot_dir / "last_frame_1700000000_aaaa.png").write_bytes(b"older")
+    (shot_dir / "last_frame_1800000000_bbbb.png").write_bytes(b"newest")
+    now = time.time()
+    os.utime(shot_dir / "last_frame_1700000000_aaaa.png", (now - 500, now - 500))
+    os.utime(shot_dir / "last_frame_1800000000_bbbb.png", (now, now))
+
+    await backfill(tmp_path, db_session_factory)
+
+    async with db_session_factory() as s:
+        row = (await s.execute(sa.text(
+            "SELECT pre_cc_last_frame_key, pristine_last_frame_key FROM shots "
+            "WHERE project_id = :p"), {"p": pid})).first()
+    assert row[0] == f"projects/{pid}/shots/shot_1/last_frame_pre_cc.png"
+    assert row[1] == f"projects/{pid}/shots/shot_1/last_frame_1800000000_bbbb.png"
+
+
+async def test_backfill_leaves_unrecognized_values_untouched(db_session_factory, tmp_path):
+    """认不出形态的值绝不猜着改，只记进报告。"""
+    pid, _ = await _seed_legacy_rows(db_session_factory, tmp_path)
+    async with db_session_factory() as s:
+        await s.execute(sa.text(
+            "UPDATE projects SET final_video_path = 'weird/thing.mp4' WHERE id = :p"),
+            {"p": pid})
+        await s.commit()
+
+    report = await backfill(tmp_path, db_session_factory)
+
+    async with db_session_factory() as s:
+        v = (await s.execute(sa.text(
+            "SELECT final_video_path FROM projects WHERE id = :p"), {"p": pid})).scalar_one()
+    assert v == "weird/thing.mp4"
+    assert any(u["raw"] == "weird/thing.mp4" for u in report["unrecognized"])

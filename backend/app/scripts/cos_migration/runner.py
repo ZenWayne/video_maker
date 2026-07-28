@@ -168,6 +168,111 @@ async def upload(storage_root: Path, key_prefix: str = "",
             "failed": failed, "bytes": sent_bytes}
 
 
+async def _derive_key_columns(storage_root: Path, session_factory) -> dict:
+    """推导 pre_cc_last_frame_key / pristine_last_frame_key 的初值。
+
+    只在本地文件尚存时能扫出来，**事后永远无法补做**（Spec B §2.3）：
+    本地目录是这些信息的唯一来源，填错的后果是 CC 还原链路对存量分镜失效。
+
+    这里自行实现目录扫描，不 import 旧的 pristine_last_frame_path() ——
+    Spec A 阶段 5 已把那些本地路径函数删掉了，且脚本只在切换窗口跑一次，
+    自包含反而更清晰。
+
+    只填当前为 NULL 的行，因此重跑变更数为 0。
+    """
+    storage_root = Path(storage_root)
+    derived = {"pre_cc_last_frame_key": 0, "pristine_last_frame_key": 0}
+    async with session_factory() as s:
+        rows = (await s.execute(sa.text(
+            "SELECT id, project_id, shot_id FROM shots"))).fetchall()
+        for sid, pid, shot_id in rows:
+            rel = f"projects/{pid}/shots/shot_{shot_id}"
+            shot_dir = storage_root / rel
+            if not shot_dir.is_dir():
+                continue
+
+            pre_cc = shot_dir / "last_frame_pre_cc.png"
+            if pre_cc.is_file():
+                n = (await s.execute(sa.text(
+                    "UPDATE shots SET pre_cc_last_frame_key = :k WHERE id = :i "
+                    "AND (pre_cc_last_frame_key IS NULL OR pre_cc_last_frame_key = '')"),
+                    {"k": f"{rel}/last_frame_pre_cc.png", "i": sid})).rowcount
+                derived["pre_cc_last_frame_key"] += n or 0
+
+            # pristine：last_frame*.png 里排除固定名备份，取 mtime 最新
+            cands = [p for p in shot_dir.glob("last_frame*.png")
+                     if p.name != "last_frame_pre_cc.png"]
+            if cands:
+                newest = max(cands, key=lambda p: p.stat().st_mtime)
+                n = (await s.execute(sa.text(
+                    "UPDATE shots SET pristine_last_frame_key = :k WHERE id = :i "
+                    "AND (pristine_last_frame_key IS NULL OR pristine_last_frame_key = '')"),
+                    {"k": f"{rel}/{newest.name}", "i": sid})).rowcount
+                derived["pristine_last_frame_key"] += n or 0
+        await s.commit()
+    return derived
+
+
+async def backfill(storage_root: Path, session_factory) -> dict:
+    """把 DB 里的路径值回填成 COS key，并推导两个新列的初值。
+
+    需要停写窗口。开始前先跑一次幂等建列 —— 切换顺序里本步骤(第 5 步)早于
+    部署新代码后的首次启动(第 6 步)，而两个 key 列正是在启动时由幂等
+    ALTER TABLE 创建的；不先建列这一步会直接失败（Spec B §9.2）。
+
+    注意这里用 ``_ensure_columns(conn)`` 而**不是** ``init_db()``：后者写死
+    操作 app.db 模块级的 engine（指向真实 dev.db），在测试里会绕过传进来的
+    session_factory 去动共享库 —— 那正是本计划明令禁止的事。``_ensure_columns``
+    接收调用方的 conn，因此永远作用在正确的引擎上（Spec A 写它时就预留了
+    这个用法，见其 docstring）。该例程幂等，重复执行无害。
+    """
+    from app.db import _ensure_columns
+
+    async with session_factory() as s:
+        conn = await s.connection()
+        await _ensure_columns(conn)
+        await s.commit()
+
+    changed = skipped = 0
+    unrecognized = []
+    async with session_factory() as s:
+        conn = await s.connection()
+        for spec in FIELDS:
+            if spec.optional_table and not await _table_exists(conn, spec.table):
+                logger.info("skip_missing_table", extra={"table": spec.table})
+                continue
+            rows = (await s.execute(sa.text(
+                f"SELECT {spec.pk}, {spec.column} FROM {spec.table} "
+                f"WHERE {spec.column} IS NOT NULL AND {spec.column} <> ''"))).fetchall()
+            for pk, raw in rows:
+                if spec.kind == "scalar":
+                    kind = classify(raw)
+                    if kind == ALREADY_KEY:
+                        skipped += 1
+                        continue
+                    if kind == UNRECOGNIZED:
+                        unrecognized.append({"table": spec.table, "column": spec.column,
+                                             "pk": str(pk), "raw": raw})
+                        continue
+                    new = to_key(raw)
+                else:
+                    fn = (rewrite_json_list if spec.kind == "json_list"
+                          else rewrite_json_dict_of_lists)
+                    new = fn(raw)
+                    if new is None:
+                        skipped += 1
+                        continue
+                await s.execute(sa.text(
+                    f"UPDATE {spec.table} SET {spec.column} = :v WHERE {spec.pk} = :k"),
+                    {"v": new, "k": pk})
+                changed += 1
+        await s.commit()
+
+    derived = await _derive_key_columns(storage_root, session_factory)
+    return {"phase": "backfill", "changed": changed, "skipped": skipped,
+            "unrecognized": unrecognized, "derived": derived}
+
+
 def write_report(report: dict, report_dir: Path, name: str) -> Path:
     report_dir = Path(report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
