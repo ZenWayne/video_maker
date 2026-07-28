@@ -273,6 +273,39 @@ async def backfill(storage_root: Path, session_factory) -> dict:
             "unrecognized": unrecognized, "derived": derived}
 
 
+async def verify(session_factory, key_prefix: str = "",
+                 baseline: Optional[list[dict]] = None) -> dict:
+    """校验 DB 中每个 key 在 COS 真实存在。
+
+    ``baseline`` 是 --scan 产出的悬空清单：那些引用的本地文件在迁移**之前**
+    就已不存在（实测 349 条里有 212 条），迁移无从修复。把它们列为「预期缺失」
+    单独计数，只对基线之外的缺口判失败——否则 --verify 会永远飘红，
+    也就再没人拿它当红绿灯看了。
+    """
+    await cos_client.warm_credentials()
+    expected_missing = {b["key"] for b in (baseline or []) if b.get("key")}
+
+    refs = await collect_db_refs(session_factory)
+    checked = present = missing_expected = 0
+    missing_unexpected = []
+    seen = set()
+    for r in refs:
+        if r.key is None or r.key in seen:
+            continue
+        seen.add(r.key)
+        checked += 1
+        if await object_store.exists(f"{key_prefix}{r.key}"):
+            present += 1
+        elif r.key in expected_missing:
+            missing_expected += 1
+        else:
+            missing_unexpected.append(asdict(r))
+    return {"phase": "verify", "checked": checked, "present": present,
+            "missing_expected": missing_expected,
+            "missing_unexpected": missing_unexpected,
+            "ok": not missing_unexpected}
+
+
 def write_report(report: dict, report_dir: Path, name: str) -> Path:
     report_dir = Path(report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)

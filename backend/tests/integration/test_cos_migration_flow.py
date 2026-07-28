@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 import sqlalchemy as sa
 
-from app.scripts.cos_migration.runner import backfill, collect_db_refs, scan, upload
+from app.scripts.cos_migration.runner import (
+    backfill, collect_db_refs, scan, upload, verify,
+)
 from tests.integration.conftest_cos import requires_cos
 
 
@@ -180,3 +182,45 @@ async def test_backfill_leaves_unrecognized_values_untouched(db_session_factory,
             "SELECT final_video_path FROM projects WHERE id = :p"), {"p": pid})).scalar_one()
     assert v == "weird/thing.mp4"
     assert any(u["raw"] == "weird/thing.mp4" for u in report["unrecognized"])
+
+
+@requires_cos
+async def test_verify_passes_when_every_key_exists(db_session_factory, tmp_path, cos_prefix):
+    pid, _ = await _seed_legacy_rows(db_session_factory, tmp_path)
+    await upload(tmp_path, key_prefix=cos_prefix)
+    await backfill(tmp_path, db_session_factory)
+
+    report = await verify(db_session_factory, key_prefix=cos_prefix)
+    assert report["ok"] is True
+    assert report["missing_unexpected"] == []
+    assert report["present"] == report["checked"]
+
+
+@requires_cos
+async def test_verify_tolerates_baseline_dangling_but_fails_on_new_gaps(
+        db_session_factory, tmp_path, cos_prefix):
+    """迁移前就已破损的引用进基线、不判失败；基线之外的缺失必须判失败，
+    否则 --verify 这盏红绿灯就没有意义了。"""
+    pid, shot_dir = await _seed_legacy_rows(db_session_factory, tmp_path)
+    # last_frame 本地就没有 → 迁移前既有破损，进基线
+    (shot_dir / "last_frame.png").unlink()
+
+    scan_report = await scan(tmp_path, db_session_factory)
+    await upload(tmp_path, key_prefix=cos_prefix)
+    await backfill(tmp_path, db_session_factory)
+
+    ok = await verify(db_session_factory, key_prefix=cos_prefix,
+                      baseline=scan_report["dangling"])
+    assert ok["ok"] is True
+    assert ok["missing_expected"] == 1
+    assert ok["missing_unexpected"] == []
+
+    # 现在人为制造一个基线之外的缺口：删掉已上传的 output.mp4
+    from app.services import object_store
+    await object_store.delete(f"{cos_prefix}projects/{pid}/shots/shot_1/output.mp4")
+
+    bad = await verify(db_session_factory, key_prefix=cos_prefix,
+                       baseline=scan_report["dangling"])
+    assert bad["ok"] is False
+    assert [m["key"] for m in bad["missing_unexpected"]] == [
+        f"projects/{pid}/shots/shot_1/output.mp4"]
