@@ -35,15 +35,24 @@
 4. **再次 `--upload` 补增量**（停服前最后写入的文件；容器已经停了，改用
    一次性 `podman run`，挂载方式与 CLAUDE.md「Always Run Python via Podman
    Compose」一节一致，另外显式挂上共享的 `app-data` / `app-storage` 命名卷）：
+   > **`--upload` 需要 COS 凭证**（它要 `warm_credentials` + `put`），所以和
+   > 第 7 步的 `--verify` 一样，必须挂上 `deploy/secrets` 并加载
+   > `deploy/config.env`（后者提供 `cos_region` / `cos_bucket`）。只有
+   > `--scan` 和 `--backfill` 不碰 COS，可以省掉这两样。
+
    ```bash
    podman run --rm --network host \
        -v deploy_app-data:/app/data \
        -v deploy_app-storage:/app/storage \
        -v $(pwd)/backend:/app:z -w /app \
+       -v $(pwd)/deploy/secrets:/run/secrets:ro,z \
+       --env-file deploy/config.env \
        -e DATABASE_URL=sqlite+aiosqlite:////app/data/dev.db \
        ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
-       uv run --project . python -m app.scripts.migrate_to_cos \
-       --upload --storage-root /app/storage --report-dir /app/data/migration_report
+       sh -c 'export COS_SECRET_ID=$(cat /run/secrets/cos_secret_id) &&
+              export COS_SECRET_KEY=$(cat /run/secrets/cos_secret_key) &&
+              uv run --project . python -m app.scripts.migrate_to_cos \
+              --upload --storage-root /app/storage --report-dir /app/data/migration_report'
    echo "exit=$?"
    ```
    同样：**退出码必须是 0 才能继续**，否则先排查 `failed` 列表再往下走。
