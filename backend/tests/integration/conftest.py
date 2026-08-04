@@ -21,6 +21,41 @@ from tests.integration.conftest_cos import cos_prefix  # noqa: F401
 USER = "test-user"
 HEADERS = {"X-User-Name": USER}
 
+# 集成测试创建的 project id 注册表。seed_shot_with_source 等 helper 会把
+# 素材发布到真实的 projects/<id>/ 前缀（不是 cos_prefix 的 test/ 前缀），
+# 不清理就会在 dev bucket 里永久堆积——历史上攒出过 2893 个孤儿对象，
+# 直接把孤儿巡检报告淹没。
+_test_project_ids: list[str] = []
+
+
+def register_test_project(project_id: str) -> str:
+    _test_project_ids.append(project_id)
+    return project_id
+
+
+async def cleanup_test_project_prefixes() -> int:
+    """删掉本次测试创建的所有 projects/<id>/ 前缀。返回删除的对象数。"""
+    if not _test_project_ids:
+        return 0
+    from tests.integration.conftest_cos import _cos_configured
+    if not _cos_configured():
+        _test_project_ids.clear()
+        return 0
+    from app.services import cos_client, object_store
+    await cos_client.warm_credentials()
+    n = 0
+    for pid in _test_project_ids:
+        n += await object_store.delete_prefix(f"projects/{pid}/")
+    _test_project_ids.clear()
+    return n
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_cos_project_prefixes():
+    _test_project_ids.clear()
+    yield
+    await cleanup_test_project_prefixes()
+
 
 def install_fake_cos_credentials(monkeypatch):
     """Fake COS credentials so ``to_media_url()``/``object_store.signed_url()``
@@ -141,7 +176,7 @@ async def _make_project(sf, status="draft", scene_overview=None):
         s.add(p)
         await s.commit()
         await s.refresh(p)
-        return p.id
+        return register_test_project(p.id)
 
 
 async def _add_shots(sf, project_id, count=3, status="completed"):
@@ -250,7 +285,9 @@ async def make_project(client):
             headers=HEADERS,
         )
         assert r.status_code == 201
-        return r.json()
+        data = r.json()
+        register_test_project(data["id"])
+        return data
     return _make
 
 

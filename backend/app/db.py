@@ -130,9 +130,14 @@ async def _ensure_columns(conn) -> None:
             await conn.execute(sa.text(f"ALTER TABLE shots ADD COLUMN {col} {typ}"))
 
     for col, typ in [
-        ("pre_vc_video_key", "TEXT"),
         ("pre_cc_last_frame_key", "TEXT"),
         ("pristine_last_frame_key", "TEXT"),
     ]:
         if not await _has_column("shots", col):
             await conn.execute(sa.text(f"ALTER TABLE shots ADD COLUMN {col} {typ}"))
+
+    # pre_vc_video_key 是非破坏式 VC 改造后的死功能：写入方 ensure_pre_vc_backup
+    # 已删除，且从来没有任何还原路径读它（voice-revert 只清 vc_audio_path）。
+    # 存量库里可能已建出该列，这里幂等删掉。
+    if await _has_column("shots", "pre_vc_video_key"):
+        await conn.execute(sa.text("ALTER TABLE shots DROP COLUMN pre_vc_video_key"))
