@@ -1,0 +1,34 @@
+# Both PVCs use the default StorageClass `local-path` (rancher.io/local-path,
+# WaitForFirstConsumer) — node-local, fine here because every pod that mounts
+# them is pinned to vm-0-8-ubuntu via nodeSelector.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: video-maker-data
+  namespace: video-maker
+  labels:
+    app: video-maker
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+# faster-whisper model cache (HF_HOME) — worker only. Without this PVC the
+# worker re-downloads ~3GB of large-v3 weights on every pod restart.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: video-maker-whisper-cache
+  namespace: video-maker
+  labels:
+    app: video-maker
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi

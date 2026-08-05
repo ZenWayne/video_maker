@@ -1,0 +1,62 @@
+# Non-secret application config. Mirrors deploy/config.yml (the source of
+# truth for local dev — see `make config`), plus a few keys that only make
+# sense inside the cluster (service DNS names, mount paths). Keep this in
+# sync by hand whenever deploy/config.yml changes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: video-maker-config
+  namespace: video-maker
+  labels:
+    app: video-maker
+data:
+  # ---- Cluster-internal wiring (not in deploy/config.yml) ----
+  # Service name `redis` (see 30-redis.yaml) / `backend` (see 40-backend.yaml,
+  # named `backend` specifically so frontend-vite/nginx.conf's hardcoded
+  # `proxy_pass http://backend:8000/` resolves without editing that file).
+  REDIS_URL: "redis://redis:6379"
+  # PVC video-maker-data mounted at /app/data in both backend + worker (25-pvc.yaml).
+  DATABASE_URL: "sqlite+aiosqlite:////app/data/dev.db"
+  # GCP service-account key mounted from secret `video-maker-gcp-sa` (see README) —
+  # used by google-genai's Vertex AI client (vertexai=True, ADC).
+  GOOGLE_APPLICATION_CREDENTIALS: "/var/secrets/gcp/sa.json"
+
+  # ---- Everything below mirrors deploy/config.yml verbatim ----
+
+  # Gemini model selection
+  GEMINI_SCRIPT_MODEL: "gemini-3.1-pro-preview"
+  GEMINI_DIRECTOR_MODEL: "gemini-3.1-pro-preview"
+  CONTENT_ANALYSIS_MODEL: "gemini-3.1-pro-preview"
+
+  # Veo video generation (via Vertex AI)
+  VIDEO_PROVIDER: "vertex"
+  VEO_MODEL: "veo-3.1-fast-generate-001"
+  VEO_POLL_INTERVAL_SECONDS: "10"
+  VEO_MAX_WAIT_SECONDS: "300"
+
+  # Worker
+  WORKER_POOL_SIZE: "4"
+
+  # Voice conversion (in-process vc2.VoiceConverter) — unused by this deployment
+  # (vc-worker is intentionally not deployed here) but kept for config parity.
+  MODEL_DIR: "/workspace/exported_vc2"
+  VC_NUM_THREADS: "4"
+
+  # ASR (local speech-to-text via faster-whisper, worker only)
+  ASR_MODEL: "large-v3"
+  ASR_DEVICE: "cpu"
+  ASR_COMPUTE_TYPE: "int8"
+
+  # CORS — replace with the real frontend origin(s) once DNS/ingress host is known.
+  CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000,http://127.0.0.1:4000"
+
+  # Langfuse (LLM observability)
+  LANGFUSE_ENABLED: "true"
+  LANGFUSE_HOST: "https://us.cloud.langfuse.com"
+
+  # Tencent Cloud COS (object storage for shot media)
+  cos_region: "ap-guangzhou"
+  cos_bucket: "video-maker-dev-1414782845"
+  cos_scheme: "https"
+  cos_auth_mode: "static"
+  cos_signed_url_ttl_sec: "7200"

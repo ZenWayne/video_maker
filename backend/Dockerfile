@@ -1,48 +1,56 @@
-# Video Maker Backend Dockerfile - Single stage with pip
-FROM python:3.12-slim-bookworm
+# FastAPI backend image.
+#
+# Build context is `backend/`:
+#     podman build -t <tag> -f backend/Dockerfile backend/
+#
+# Dependencies come from pyproject.toml + uv.lock (the single source of truth)
+# rather than a hand-maintained pip list — the old hardcoded list had drifted
+# and was missing openai / httpx / scikit-image / langfuse / fastmcp /
+# cos-python-sdk-v5, all imported by current app code.
+#
+# WORKDIR is /app (not /workspace) so the shared sqlite PVC that
+# deploy/k8s/40-backend.yaml mounts at /app/data lines up with
+# DATABASE_URL=sqlite+aiosqlite:////app/data/dev.db — and with the worker,
+# which mounts the same PVC at the same path.
 
-# Configure Aliyun APT mirror
-RUN rm -f /etc/apt/sources.list.d/* && \
-    echo "deb http://mirrors.aliyun.com/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
-    echo "deb http://mirrors.aliyun.com/debian-security/ bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
-    echo "deb http://mirrors.aliyun.com/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-# Install runtime dependencies (ffmpeg for video processing)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    echo "deb https://mirrors.aliyun.com/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
+    echo "deb https://mirrors.aliyun.com/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    apt-get update -qq \
+    && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Set pip to use Tsinghua mirror
-ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
-    PYTHONDONTWRITEBYTECODE=1 \
+ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/workspace \
-    APP_ENV=production
+    PYTHONPATH=/app \
+    APP_ENV=production \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH=/app/.venv/bin:$PATH
 
-# Set working directory
-WORKDIR /workspace
+WORKDIR /app
 
-# Copy and install dependencies first (for layer caching)
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir \
-    fastapi uvicorn sqlalchemy aiosqlite arq redis pydantic pydantic-settings \
-    google-genai ffmpeg-python python-multipart sse-starlette python-json-logger
+# Dependencies first, for layer caching. No `asr` group — faster-whisper is
+# worker-only (see deploy/Dockerfile.worker).
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
 
-# Copy application code
+# Application source.
 COPY app/ ./app/
 COPY worker/ ./worker/
 COPY prompts/ ./prompts/
+COPY mcp_server/ ./mcp_server/
 
-# Create directories
-RUN mkdir -p /workspace/storage /workspace/logs
+RUN mkdir -p /app/data /app/storage /app/logs
 
-# Expose port
 EXPOSE 8000
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-# Start application
+# `uvicorn` resolves to /app/.venv/bin/uvicorn via PATH above.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

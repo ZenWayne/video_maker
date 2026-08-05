@@ -1,0 +1,25 @@
+# Traefik IngressRoute — HTTP only, no domain/TLS was specified for this
+# deployment. Traefik itself runs on the other two cluster nodes (racknerd,
+# cool-cube-1: `kubectl get svc -n kube-system traefik` shows external IPs
+# 107.174.159.18 / 64.64.246.87) — that's fine, it still reaches the
+# `video-maker-frontend` ClusterIP Service across nodes via the cluster CNI.
+#
+# REPLACE `video-maker.example.com` with the real hostname once DNS is
+# decided, then (optionally) add TLS the same way the `tarot` project does:
+# see /home/wayne/ZenWayne/tarot/ai_tarot_backend/deploy/k8s/50-tls-secret.example.yaml
+# and 60-ingressroute.yaml for the Cloudflare-origin-cert + websecure pattern.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: video-maker-frontend
+  namespace: video-maker
+spec:
+  entryPoints:
+    - web
+  routes:
+    - kind: Rule
+      match: Host(`video-maker.example.com`)
+      priority: 10
+      services:
+        - name: video-maker-frontend
+          port: 80

@@ -1,3 +1,15 @@
+# arq worker image — shot generation + content-analysis ASR (faster-whisper).
+#
+# Build context is `backend/` (NOT `deploy/`):
+#     podman build -t <tag> -f deploy/Dockerfile.worker backend/
+#
+# deploy/docker-compose.dev.yml builds from the same context and additionally
+# bind-mounts ../backend over /app, so in dev the COPY layers below are
+# shadowed by the live source and `uv run` re-syncs against the mounted
+# pyproject.toml. The COPY + `uv sync` steps exist so the image is
+# self-contained when there is NO bind mount (i.e. Kubernetes) — without them
+# the pod crash-loops on a missing /app/pyproject.toml.
+
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 RUN rm -f /etc/apt/sources.list.d/debian.sources && \
@@ -7,3 +19,34 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     apt-get update -qq \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    APP_ENV=production \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH=/app/.venv/bin:$PATH
+
+WORKDIR /app
+
+# Dependencies first, so the (slow) install layer stays cached until the lock
+# moves. `--group asr` pulls faster-whisper + ctranslate2 for content-analysis
+# transcription; the worker is the only service that needs it.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --group asr
+
+# Application source.
+COPY app/ ./app/
+COPY worker/ ./worker/
+COPY prompts/ ./prompts/
+COPY mcp_server/ ./mcp_server/
+
+# Mount points for the data PVC / scratch space (real content comes from the
+# volume mounts; these just guarantee the dirs exist when nothing is mounted).
+RUN mkdir -p /app/data /app/storage
+
+# `python` resolves to /app/.venv/bin/python via PATH above — no `uv run` at
+# runtime, so the container never needs the network in order to start.
+CMD ["python", "-m", "arq", "worker.arq_worker.WorkerSettings"]

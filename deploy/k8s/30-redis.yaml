@@ -1,0 +1,69 @@
+# In-cluster Redis for arq (backend enqueues jobs, worker consumes them).
+# No persistence needed — job queue state is fine to lose on restart.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-maker-redis
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: redis
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # single node, no PVC — avoid two pods fighting over the port
+  selector:
+    matchLabels:
+      app: video-maker
+      component: redis
+  template:
+    metadata:
+      labels:
+        app: video-maker
+        component: redis
+    spec:
+      restartPolicy: Always
+      nodeSelector:
+        kubernetes.io/hostname: vm-0-8-ubuntu
+      containers:
+        - name: redis
+          image: mirror.ccs.tencentyun.com/library/redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: video-maker
+    component: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis

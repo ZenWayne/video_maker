@@ -1,0 +1,17 @@
+# Build context is this directory (see backend/Dockerfile and
+# deploy/Dockerfile.worker). Keep it small — only pyproject.toml, uv.lock and
+# the app/worker/prompts/mcp_server source are COPY'd.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+tests/
+data/
+storage/
+logs/
+*.log
+*.db
+*.db-shm
+*.db-wal
