@@ -198,6 +198,76 @@ kubectl -n video-maker run curl-test --rm -it --image=curlimages/curl --restart=
 curl -sS --resolve video-maker.example.com:80:107.174.159.18 http://video-maker.example.com/
 ```
 
+## BLOCKER: pods on `vm-0-8-ubuntu` have no internet egress
+
+Found while running the real end-to-end check after deploying. All four pods
+run fine, but `POST /api/analyses` fails at the COS upload:
+
+```
+Errno 101 Network is unreachable
+-> video-maker-dev-1414782845.cos.ap-guangzhou.myqcloud.com:443
+```
+
+DNS resolves; every outbound TCP connect fails — including `www.qq.com`, so
+this is not a GFW/Google issue.
+
+### Measured
+
+| From | www.qq.com | COS ap-guangzhou | Google (aiplatform) |
+|---|---|---|---|
+| pod netns on `vm-0-8-ubuntu` | ENETUNREACH | ENETUNREACH | ENETUNREACH |
+| node netns (`hostNetwork`) on `vm-0-8-ubuntu` | 501 | 403 | **000 (unreachable)** |
+| pod on `racknerd-b9d6fff` | 501 | 403 | 404 (reachable) |
+
+### Root cause
+
+The node uses Tailscale-style policy routing. `ip rule`:
+
+```
+11000: from all iif lo lookup 1002
+17000: from all iif lo lookup 1002
+31000: from all fwmark 0/0xffff iif lo lookup 1002
+32000: from all lookup unspec unreachable      <- catch-all
+```
+
+Table `1002` holds the only real `default via 10.1.0.1 dev eth0`, but **every
+rule that reaches it is qualified `iif lo`** — locally-originated traffic only.
+Pod packets arrive `iif cni0`, match none of those rules, fall through to rule
+32000 `unreachable`, and the node answers ICMP net-unreachable, which the pod's
+socket surfaces as `ENETUNREACH`.
+
+Flannel's masquerade is **not** the problem — `FLANNEL-POSTRTG` has the correct
+`-s 10.42.0.0/16 ! -d 224.0.0.0/4 -j MASQUERADE`; packets simply never get to
+the routing stage.
+
+### Two independent problems
+
+1. **Pod egress** (fixable on the node). A rule letting pod-sourced traffic use
+   the default table, e.g. `ip rule add from 10.42.0.0/16 lookup 1002 priority
+   10500`. Node-level change on a shared node, and tailscaled may re-assert its
+   rules on restart, so it needs to be made persistent.
+2. **Google is unreachable from this node at all** (`000` even from the node
+   netns). Brief generation is hardcoded to Vertex AI —
+   `worker/tasks.py` constructs `GeminiProvider(...)` directly, with no
+   DeepSeek/OpenAI-compatible fallback — so **`出简报` cannot work on this node**
+   even after fixing (1).
+
+### The lever that avoids touching node routing
+
+`ip rule 100: from all to 10.200.0.0/24 lookup main` is **not** `iif lo`
+qualified, so pods *can* already reach the WireGuard tailnet (verified: pod ->
+`10.200.0.1:80` OPEN, pod -> `10.200.0.2:22` OPEN). Pointing `HTTPS_PROXY` /
+`HTTP_PROXY` at a proxy on `10.200.0.0/24` in `10-configmap.yaml` would give
+both COS and Vertex egress with no node change — mirroring how
+`docker-compose.dev.yml` already does it
+(`HTTPS_PROXY: http://host.containers.internal:10809`,
+`NO_PROXY: ...,.myqcloud.com`). No such proxy was listening at the time of
+writing (10809/7890 refused on 10.200.0.1).
+
+Remember to keep `NO_PROXY` covering in-cluster names
+(`backend`, `redis`, `.svc`, `.cluster.local`, `10.42.0.0/16`, `10.43.0.0/16`)
+so cluster traffic does not get sent to the proxy.
+
 ## Memory risk — read this before deploying
 
 The node has ~2.2Gi realistically free and the worker's request/limit is
