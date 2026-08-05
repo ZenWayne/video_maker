@@ -285,9 +285,22 @@ node is overseas, so COS traffic becomes China -> US -> China:
 | via the overseas proxy | 2.23s | **54 KiB/s** |
 | direct from `vm-0-8-ubuntu` (node netns) | 0.026s | **3.96 MB/s** |
 
-~73x slower. A 1.8MB test upload already blew nginx's 60s `proxy_read_timeout`
-(now raised to 600s in `frontend-vite/nginx.conf`); a realistic 50MB reference
-video would take 15+ minutes.
+~73x slower. Worse, it is not merely slow — **COS uploads through the proxy
+fail outright once they are any real size.** Measured from the worker pod with
+the app's own COS client (`put_object`):
+
+| Upload | Result |
+|---|---|
+| 64 KiB | 13.3 KiB/s |
+| 512 KiB | 8.2 KiB/s |
+| 1.8 MB (the test reference video) | **FAILED** — `CosClientError('Connection aborted.', TimeoutError('The write operation timed out'))` after 131s |
+
+Throughput *degrades* as the payload grows, so the proxy path cannot carry
+reference videos at all. Small request/response traffic (Vertex AI JSON) is
+fine over it — a real `generate_content` call returned in 6.6s.
+
+The 1.8MB upload also blew nginx's 60s `proxy_read_timeout` (now raised to
+600s in `frontend-vite/nginx.conf`), but that timeout was only masking this.
 
 **The correct end state needs both halves:**
 
@@ -299,7 +312,27 @@ video would take 15+ minutes.
    (`NO_PROXY: ...,.myqcloud.com`).
 
 Until (1) is done, `.myqcloud.com` must **stay out** of `NO_PROXY` — without
-the `ip rule`, bypassing the proxy for COS means no COS at all.
+the `ip rule`, bypassing the proxy for COS means no COS at all. But note that
+leaving it in the proxy path does not actually work either (uploads >~1MB
+fail), so **(1) is required, not an optimisation**. There is no proxy-only
+configuration of this app that works.
+
+The model cache has the same problem: `faster-whisper large-v3` is ~3GB from
+HuggingFace, which over this path is ~16 hours and would realistically fail
+like the uploads do. With pod egress fixed (3.96 MB/s) it is ~13 minutes.
+
+### What HAS been verified end to end
+
+Everything except the ASR hop, which is blocked solely on the above:
+
+| Link | Result |
+|---|---|
+| nginx routing (`/api/`, SSE regex, upload cap) | 200 / 422 / 404 as expected |
+| backend image | `/health` -> `{"status":"ok","redis":"ok","db":"ok"}` |
+| worker image | arq up, 7 functions incl. `run_content_analysis`, past `on_startup` |
+| COS real credentials | `put` -> `get` -> `delete`, content byte-identical |
+| Vertex AI real call | `gemini-3.1-pro-preview` returned in 6.6s via the proxy |
+| scheduling / stability | 4/4 app pods on `vm-0-8-ubuntu`, 0 restarts, no OOMKilled, node 52% |
 
 ## Memory risk — read this before deploying
 
