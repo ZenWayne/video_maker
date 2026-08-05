@@ -1,8 +1,8 @@
 // pages/NewProjectPage.tsx - 新建项目页
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, Loader2 } from 'lucide-react'
+import { ArrowLeft, Link2, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -10,6 +10,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { UploadZone } from '@/components/UploadZone'
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/state'
+import type { ContentAnalysis } from '@/lib/types'
 
 export default function NewProjectPage() {
   const navigate = useNavigate()
@@ -21,6 +22,17 @@ export default function NewProjectPage() {
   const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('9:16')
   const [characterImages, setCharacterImages] = useState<File[]>([])
   const [sceneImages, setSceneImages] = useState<File[]>([])
+  const [completedAnalyses, setCompletedAnalyses] = useState<ContentAnalysis[]>([])
+  const [selectedAnalysisId, setSelectedAnalysisId] = useState('')
+
+  useEffect(() => {
+    api
+      .listAnalyses()
+      .then((list) => setCompletedAnalyses(list.filter((a) => a.status === 'completed')))
+      .catch(() => {
+        // 简报列表拉取失败不影响新建项目主流程，静默忽略
+      })
+  }, [])
 
   const handleSubmit = async () => {
     if (!title.trim()) {
@@ -53,7 +65,20 @@ export default function NewProjectPage() {
         await api.uploadReferenceImages(project_id, sceneImages, 'scene')
       }
 
-      // Step 4: 启动 pipeline
+      // Step 4: 挂载爆款简报（可选，失败不阻断主流程；必须在 startPipeline 之前完成，
+      // 否则 run_screenwriter worker 可能在 attached_brief_json 写入前读取项目行，导致简报被静默忽略）
+      if (selectedAnalysisId) {
+        try {
+          await api.attachBrief(project_id, selectedAnalysisId)
+        } catch (error) {
+          addToast({
+            type: 'error',
+            message: error instanceof Error ? `简报挂载失败：${error.message}` : '简报挂载失败',
+          })
+        }
+      }
+
+      // Step 5: 启动 pipeline
       await api.startPipeline(project_id)
 
       addToast({ type: 'success', message: '项目创建成功，开始生成脚本' })
@@ -157,6 +182,31 @@ export default function NewProjectPage() {
             value={sceneImages}
             onChange={setSceneImages}
           />
+
+          {/* 挂载爆款简报 */}
+          <div className="space-y-2">
+            <Label htmlFor="attach-brief" className="flex items-center gap-1.5">
+              <Link2 className="w-4 h-4 text-zinc-400" />
+              挂载爆款简报（可选）
+            </Label>
+            <select
+              id="attach-brief"
+              data-testid="attach-brief-select"
+              value={selectedAnalysisId}
+              onChange={(e) => setSelectedAnalysisId(e.target.value)}
+              className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">无（不挂载）</option>
+              {completedAnalyses.map((analysis) => (
+                <option key={analysis.id} value={analysis.id}>
+                  {analysis.title} · 🟢 已完成
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-zinc-400">
+              选中后简报以快照写入项目，日后简报改动不回溯污染已建项目
+            </p>
+          </div>
 
           {/* 提交按钮 */}
           <div className="flex justify-end gap-4 pt-4 border-t">

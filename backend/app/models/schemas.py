@@ -185,6 +185,9 @@ class ProjectResponse(BaseModel):
     reference_voice_shot_id: Optional[int] = None
     reference_voice_path: Optional[str] = None
     auto_voice_calibrate: bool = False
+    # 内容分析 brief 挂载溯源：挂载的分析 id + 挂载时的 brief 快照（见 attach_brief）
+    content_analysis_id: Optional[str] = None
+    attached_brief_json: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     reference_images: List[ReferenceImageResponse] = []
@@ -309,3 +312,46 @@ class HealthResponse(BaseModel):
     status: str
     redis: str
     db: str
+
+
+# ============== Content Analysis Schemas ==============
+
+class ReferenceSampleResponse(BaseModel):
+    id: int
+    analysis_id: str
+    order_index: int
+    video_path: str
+    has_speech: Optional[bool] = None
+    hook_text: Optional[str] = None
+    full_transcript: Optional[str] = None
+    language: Optional[str] = None
+    status: str
+    error_message: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ContentAnalysisResponse(BaseModel):
+    id: str
+    title: str
+    region_hint: Optional[str] = None
+    status: str
+    brief_json: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    samples: List[ReferenceSampleResponse] = []
+
+    class Config:
+        from_attributes = True
+
+
+class ContentAnalysisList(BaseModel):
+    analyses: List[ContentAnalysisResponse]
+    total: int
+
+
+class AttachBriefRequest(BaseModel):
+    analysis_id: str = Field(..., min_length=1)

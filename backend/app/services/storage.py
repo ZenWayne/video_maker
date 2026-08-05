@@ -74,6 +74,20 @@ def motion_prompt_key(project_id: str, shot_id: int) -> str:
     return shot_key(project_id, shot_id, "motion_prompt.txt")
 
 
+# ── 内容分析（爆款归因）key ──────────────────────────────────────────────────
+
+def analysis_prefix(analysis_id: str) -> str:
+    return f"analyses/{analysis_id}/"
+
+
+def sample_prefix(analysis_id: str, sample_id) -> str:
+    return f"{analysis_prefix(analysis_id)}sample_{sample_id}/"
+
+
+def sample_video_key(analysis_id: str, sample_id, filename: str) -> str:
+    return f"{sample_prefix(analysis_id, sample_id)}{filename}"
+
+
 # ── 项目级 key ────────────────────────────────────────────────────────────────
 
 def storyboard_key(project_id: str) -> str:

@@ -7,6 +7,7 @@ import type {
   ReferenceImageKind,
   APIError,
   ImageCandidate,
+  ContentAnalysis,
 } from './types'
 
 const BASE = import.meta.env.VITE_API_BASE || ''
@@ -109,8 +110,17 @@ async function uploadForm<T>(path: string, form: FormData): Promise<T> {
     body: form,
   })
   if (!response.ok) {
-    const detail = await response.text()
-    throw new APIErrorClass({ code: String(response.status), message: detail })
+    const text = await response.text()
+    let errorData: { error?: APIError; detail?: string }
+    try {
+      errorData = JSON.parse(text)
+    } catch {
+      throw new APIErrorClass({ code: String(response.status), message: text })
+    }
+    const apiError: APIError = errorData.error
+      ?? (errorData.detail ? { code: 'API_ERROR', message: errorData.detail } : null)
+      ?? { code: String(response.status), message: text }
+    throw new APIErrorClass(apiError)
   }
   return response.json()
 }
@@ -573,6 +583,29 @@ export const api = {
   ): Promise<{ deleted: string }> => {
     return request('DELETE', `/api/projects/${projectId}/shots/${shotId}/image-candidates/${candidateId}`)
   },
+
+  // ── 内容分析（Content Analysis）──
+
+  // 创建分析（multipart：title + region_hint? + files[]）
+  createAnalysis: (data: { title: string; regionHint?: string; files: File[] }): Promise<ContentAnalysis> => {
+    const form = new FormData()
+    form.append('title', data.title)
+    if (data.regionHint) form.append('region_hint', data.regionHint)
+    data.files.forEach((f) => form.append('files', f))
+    return uploadForm('/api/analyses', form)
+  },
+
+  // 分析列表
+  listAnalyses: (): Promise<ContentAnalysis[]> =>
+    request<{ analyses: ContentAnalysis[]; total: number }>('GET', '/api/analyses').then((d) => d.analyses),
+
+  // 分析详情
+  getAnalysis: (id: string): Promise<ContentAnalysis> =>
+    request<ContentAnalysis>('GET', `/api/analyses/${id}`),
+
+  // 附加简报到项目
+  attachBrief: (projectId: string, analysisId: string): Promise<ProjectDetail> =>
+    request<ProjectDetail>('POST', `/api/projects/${projectId}/attach-brief`, { analysis_id: analysisId }),
 
   // 资源 URL
   assetUrl: (projectId: string, kind: string, file: string): string => {

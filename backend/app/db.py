@@ -141,3 +141,10 @@ async def _ensure_columns(conn) -> None:
     # 存量库里可能已建出该列，这里幂等删掉。
     if await _has_column("shots", "pre_vc_video_key"):
         await conn.execute(sa.text("ALTER TABLE shots DROP COLUMN pre_vc_video_key"))
+
+    for col, typ in [
+        ("content_analysis_id", "VARCHAR(36)"),
+        ("attached_brief_json", "TEXT"),
+    ]:
+        if not await _has_column("projects", col):
+            await conn.execute(sa.text(f"ALTER TABLE projects ADD COLUMN {col} {typ}"))
