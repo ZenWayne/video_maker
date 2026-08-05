@@ -268,6 +268,39 @@ Remember to keep `NO_PROXY` covering in-cluster names
 (`backend`, `redis`, `.svc`, `.cluster.local`, `10.42.0.0/16`, `10.43.0.0/16`)
 so cluster traffic does not get sent to the proxy.
 
+### What was actually deployed, and why it is not the final answer
+
+`35-egress-proxy.yaml` deploys tinyproxy on `racknerd-b9d6fff` (the only
+measured node with full internet **including Google**) and `10-configmap.yaml`
+points `HTTP(S)_PROXY` at it. That makes both COS and Vertex reachable from
+the app pods, verified end to end. It is the one deliberate exception to
+"everything on `vm-0-8-ubuntu`" — unavoidable, because that node cannot reach
+Google in any netns.
+
+**But routing COS through it is impractically slow.** Every egress-capable
+node is overseas, so COS traffic becomes China -> US -> China:
+
+| Path | COS latency | COS throughput |
+|---|---|---|
+| via the overseas proxy | 2.23s | **54 KiB/s** |
+| direct from `vm-0-8-ubuntu` (node netns) | 0.026s | **3.96 MB/s** |
+
+~73x slower. A 1.8MB test upload already blew nginx's 60s `proxy_read_timeout`
+(now raised to 600s in `frontend-vite/nginx.conf`); a realistic 50MB reference
+video would take 15+ minutes.
+
+**The correct end state needs both halves:**
+
+1. **COS direct** — fix pod egress on `vm-0-8-ubuntu` (the `ip rule` from
+   "Two independent problems" above), so media moves at 3.96 MB/s.
+2. **Google via the proxy** — keep `35-egress-proxy.yaml`, and then add
+   `.myqcloud.com` to `NO_PROXY` so COS bypasses it. That is exactly what
+   `deploy/docker-compose.dev.yml` already does
+   (`NO_PROXY: ...,.myqcloud.com`).
+
+Until (1) is done, `.myqcloud.com` must **stay out** of `NO_PROXY` — without
+the `ip rule`, bypassing the proxy for COS means no COS at all.
+
 ## Memory risk — read this before deploying
 
 The node has ~2.2Gi realistically free and the worker's request/limit is

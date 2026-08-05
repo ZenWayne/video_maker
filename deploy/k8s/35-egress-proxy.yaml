@@ -1,0 +1,129 @@
+# Egress proxy — gives the app pods an internet path.
+#
+# WHY THIS EXISTS (see README "BLOCKER: pods on vm-0-8-ubuntu have no internet
+# egress"): pods on vm-0-8-ubuntu cannot reach the internet at all (the node's
+# Tailscale-style policy routing sends only `iif lo` traffic to the table that
+# holds the default route; forwarded pod traffic falls through to
+# `32000: lookup unspec unreachable`). On top of that, Google is unreachable
+# from that node even in the node's own netns, and brief generation is
+# hardcoded to Vertex AI in worker/tasks.py.
+#
+# THIS IS THE ONE DELIBERATE EXCEPTION to "everything pinned to
+# vm-0-8-ubuntu". It cannot be otherwise: the requirement (Vertex AI) and the
+# constraint (that node's network) are incompatible, so the egress hop has to
+# terminate somewhere with real internet. Everything else — backend, worker,
+# frontend, redis — stays on vm-0-8-ubuntu. Only this ~10Mi proxy runs
+# elsewhere, and it is ClusterIP-only (never exposed outside the cluster).
+#
+# Verified from the backend pod on vm-0-8-ubuntu through this proxy:
+#   cos.ap-guangzhou.myqcloud.com -> 403   (reachable)
+#   aiplatform.googleapis.com     -> 404   (reachable)
+#   oauth2.googleapis.com         -> 404   (reachable)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: egress-proxy-config
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: egress-proxy
+data:
+  tinyproxy.conf: |
+    Port 8888
+    Listen 0.0.0.0
+    Timeout 600
+    # Only cluster pod/service CIDRs may use this proxy.
+    Allow 10.42.0.0/16
+    Allow 10.43.0.0/16
+    ConnectPort 443
+    ConnectPort 80
+    LogLevel Warning
+    StartServers 2
+    MaxClients 60
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-maker-egress-proxy
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: egress-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: video-maker
+      component: egress-proxy
+  template:
+    metadata:
+      labels:
+        app: video-maker
+        component: egress-proxy
+    spec:
+      # MUST NOT be vm-0-8-ubuntu — that node is precisely the one without
+      # egress. racknerd-b9d6fff was measured to have full internet including
+      # Google (pod there reached aiplatform.googleapis.com -> 404).
+      nodeSelector:
+        kubernetes.io/hostname: racknerd-b9d6fff
+      tolerations:
+        - operator: Exists          # racknerd-b9d6fff is the control-plane
+      containers:
+        - name: tinyproxy
+          # Official alpine + apk at start. The baked image
+          # ccr.ccs.tencentyun.com/tarrot/video-maker-egress-proxy:latest is
+          # built by deploy/egress-proxy/Dockerfile and is strictly better
+          # (no network needed at container start) — swap this image and drop
+          # the command/args below once that TCR repo has been created; the
+          # push currently 403s because it does not exist yet.
+          image: docker.io/library/alpine:3.20
+          command: ["sh", "-c"]
+          args:
+            - |
+              apk add --no-cache tinyproxy
+              exec tinyproxy -d -c /etc/tinyproxy-cfg/tinyproxy.conf
+          ports:
+            - name: proxy
+              containerPort: 8888
+          volumeMounts:
+            - name: cfg
+              mountPath: /etc/tinyproxy-cfg
+          readinessProbe:
+            tcpSocket:
+              port: proxy
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: proxy
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+      volumes:
+        - name: cfg
+          configMap:
+            name: egress-proxy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-proxy
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: egress-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app: video-maker
+    component: egress-proxy
+  ports:
+    - name: proxy
+      port: 8888
+      targetPort: proxy

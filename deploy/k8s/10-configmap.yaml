@@ -21,6 +21,24 @@ data:
   # used by google-genai's Vertex AI client (vertexai=True, ADC).
   GOOGLE_APPLICATION_CREDENTIALS: "/var/secrets/gcp/sa.json"
 
+  # ---- Egress proxy (see 35-egress-proxy.yaml and README "BLOCKER") ----
+  # Pods on vm-0-8-ubuntu have NO route to the internet, and that node cannot
+  # reach Google at all, so BOTH Vertex AI and COS have to go through the
+  # in-cluster proxy. httpx (google-genai) and requests (qcloud_cos) both
+  # honour these variables.
+  #
+  # NOTE: unlike deploy/docker-compose.dev.yml, `.myqcloud.com` must NOT be in
+  # NO_PROXY here. Dev excludes it because the dev host can reach COS directly;
+  # in this cluster COS is only reachable *through* the proxy, so excluding it
+  # would reintroduce the ENETUNREACH upload failure.
+  HTTP_PROXY: "http://egress-proxy.video-maker.svc:8888"
+  HTTPS_PROXY: "http://egress-proxy.video-maker.svc:8888"
+  http_proxy: "http://egress-proxy.video-maker.svc:8888"
+  https_proxy: "http://egress-proxy.video-maker.svc:8888"
+  # Keep all in-cluster traffic off the proxy (service DNS + pod/service CIDRs).
+  NO_PROXY: "localhost,127.0.0.1,backend,redis,egress-proxy,.svc,.svc.cluster.local,.cluster.local,10.42.0.0/16,10.43.0.0/16"
+  no_proxy: "localhost,127.0.0.1,backend,redis,egress-proxy,.svc,.svc.cluster.local,.cluster.local,10.42.0.0/16,10.43.0.0/16"
+
   # ---- Everything below mirrors deploy/config.yml verbatim ----
 
   # Gemini model selection
