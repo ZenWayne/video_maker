@@ -238,8 +238,45 @@ Verified by deleting the rule for real and watching it come back:
 > "the pod is Running" proved nothing.
 
 It is a standing privileged / hostNetwork / NET_ADMIN pod on a shared node — it
-only ever touches this one rule, but a systemd unit on the node is the
-alternative if that trade-off is unwanted.
+only ever touches this one rule.
+
+### Second layer: node-side systemd backstop (also applied)
+
+`deploy/k8s/optional/pod-egress-systemd-install.yaml` installs a
+`video-maker-pod-egress.service` + `.timer` pair on `vm-0-8-ubuntu` (a one-shot
+Job that chroots into the host to write the units and arm the timer; the Job
+can be deleted afterwards, the units persist). This layer is independent of
+Kubernetes, so the rule comes back at boot and even if the DaemonSet is
+deleted or the kubelet is down. Both layers add the identical rule
+idempotently, so running both is harmless.
+
+Verified with the **DaemonSet parked** (`nodeSelector` patched to a
+non-existent node, 0 pods), so only systemd could act:
+
+```
+deleted rule -> COS FAIL: Errno 101 Network is unreachable
+[10s]        -> egress=YES
+```
+
+> **Two traps here, both of which look completely healthy.** This pattern —
+> "the thing reports Running/active and does nothing" — bit three times in this
+> deployment; only deleting the rule and watching for recovery ever proved
+> anything.
+>
+> 1. **`RemainAfterExit=yes` on the oneshot makes the timer inert.** The
+>    service stays `active (exited)` forever, systemd will not start an
+>    already-active unit, and the timer never schedules a next elapse. The
+>    symptom is `Trigger: n/a` and `NEXT`/`LEFT` = `n/a` in
+>    `systemctl list-timers` — while both timer and service report `active`.
+>    With this set, a deleted rule was NOT restored in 120s.
+> 2. **`systemctl enable --now` is a no-op on an already-active timer.**
+>    Re-running the installer after editing the unit silently kept the old
+>    behaviour (`LAST` timestamp unchanged). The Job now `stop`s both units and
+>    `restart`s the timer, and prints `list-timers` so an inert timer is
+>    visible in the Job log.
+>
+> Sanity check after any change here: `NEXT` must be a real timestamp, not
+> `n/a`.
 
 Final split, both halves verified:
 

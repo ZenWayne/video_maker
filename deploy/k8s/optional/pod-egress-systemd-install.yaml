@@ -1,0 +1,131 @@
+# OPTIONAL — node-side systemd backstop for the pod-egress policy route.
+#
+#     kubectl apply -f deploy/k8s/optional/pod-egress-systemd-install.yaml
+#     kubectl -n video-maker logs job/pod-egress-systemd-install
+#     kubectl -n video-maker delete job pod-egress-systemd-install   # after it succeeds
+#
+# WHY, on top of pod-egress-ip-rule-daemonset.yaml: that DaemonSet only works
+# while k3s and the pod are running. This unit is independent of Kubernetes
+# entirely, so the rule is restored at boot (before/regardless of k3s) and kept
+# in place even if the DaemonSet is deleted or the kubelet is down. Both are
+# idempotent and add the identical rule, so running both is harmless.
+#
+# The install Job chroots into the host filesystem to write the units and call
+# systemctl. It runs ONCE and can be deleted afterwards; the units persist on
+# the node. It does NOT install any package — `apk add` would deadlock on a
+# node whose egress is broken, which is exactly the situation this fixes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pod-egress-systemd-units
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: pod-egress-systemd
+data:
+  video-maker-pod-egress.service: |
+    [Unit]
+    Description=video-maker: policy route so k3s pod traffic can reach the internet
+    Documentation=https://github.com/ZenWayne/video_maker/blob/master/deploy/k8s/README.md
+    # Ordered after tailscaled because tailscaled installs the `iif lo`-only
+    # rules that make this one necessary; if it re-asserts them later the timer
+    # below re-adds ours.
+    After=network-online.target tailscaled.service
+    Wants=network-online.target
+
+    [Service]
+    Type=oneshot
+    # NO RemainAfterExit=yes. With it the oneshot stays `active (exited)`
+    # forever, systemd refuses to start an already-active unit, and the timer
+    # never schedules a next elapse (`Trigger: n/a`, `list-timers` NEXT=n/a).
+    # The units then look perfectly healthy — timer active, service active —
+    # while never re-adding the rule again. Verified the hard way: with the
+    # DaemonSet parked, a deleted rule was NOT restored in 120s.
+    # Letting the service go inactive after each run is what makes the timer
+    # able to re-trigger it.
+    #
+    # Idempotent: only adds the rule when it is missing.
+    ExecStart=/bin/sh -c 'ip rule show | grep -q "^10500:.*from 10.42.0.0/16" || ip rule add from 10.42.0.0/16 lookup 1002 priority 10500'
+
+    [Install]
+    WantedBy=multi-user.target
+  video-maker-pod-egress.timer: |
+    [Unit]
+    Description=video-maker: re-assert pod-egress policy route every minute
+    Documentation=https://github.com/ZenWayne/video_maker/blob/master/deploy/k8s/README.md
+
+    [Timer]
+    OnBootSec=30s
+    OnUnitActiveSec=60s
+    AccuracySec=5s
+    Unit=video-maker-pod-egress.service
+
+    [Install]
+    WantedBy=timers.target
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pod-egress-systemd-install
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: pod-egress-systemd
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: video-maker
+        component: pod-egress-systemd
+    spec:
+      restartPolicy: Never
+      hostNetwork: true
+      hostPID: true
+      nodeSelector:
+        kubernetes.io/hostname: vm-0-8-ubuntu
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: install
+          image: docker.io/library/alpine:3.20
+          securityContext:
+            privileged: true
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "installing units into /host/etc/systemd/system"
+              cp /units/video-maker-pod-egress.service /host/etc/systemd/system/
+              cp /units/video-maker-pod-egress.timer   /host/etc/systemd/system/
+              chroot /host systemctl daemon-reload
+              # `enable --now` is a NO-OP on an already-active timer, and a
+              # oneshot left over as `active (exited)` from an older unit file
+              # keeps the timer from ever arming. Stop both, then restart, so
+              # re-running this Job actually picks up unit changes.
+              chroot /host systemctl stop video-maker-pod-egress.timer   2>/dev/null || true
+              chroot /host systemctl stop video-maker-pod-egress.service 2>/dev/null || true
+              chroot /host systemctl enable  video-maker-pod-egress.timer
+              chroot /host systemctl restart video-maker-pod-egress.timer
+              chroot /host systemctl start   video-maker-pod-egress.service
+              echo "--- timer ---"
+              chroot /host systemctl is-enabled video-maker-pod-egress.timer
+              chroot /host systemctl is-active  video-maker-pod-egress.timer
+              echo "--- next elapse (must NOT be n/a, or the timer is inert) ---"
+              chroot /host systemctl list-timers video-maker-pod-egress.timer --no-pager | head -2
+              echo "--- rule ---"
+              ip rule show | grep 10500 || echo "RULE MISSING"
+              echo "done"
+          volumeMounts:
+            - name: host
+              mountPath: /host
+            - name: units
+              mountPath: /units
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+            type: Directory
+        - name: units
+          configMap:
+            name: pod-egress-systemd-units
