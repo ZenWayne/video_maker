@@ -1,25 +1,82 @@
-# Traefik IngressRoute — HTTP only, no domain/TLS was specified for this
-# deployment. Traefik itself runs on the other two cluster nodes (racknerd,
-# cool-cube-1: `kubectl get svc -n kube-system traefik` shows external IPs
-# 107.174.159.18 / 64.64.246.87) — that's fine, it still reaches the
-# `video-maker-frontend` ClusterIP Service across nodes via the cluster CNI.
+# Traefik IngressRoute for video-maker.kuanzw.com — HTTPS, with HTTP
+# redirected to it. Mirrors how the `tarot` project does TLS in this cluster
+# (a manually supplied kubernetes.io/tls secret referenced from the route),
+# because there is NO cert-manager here and Traefik has no ACME resolver
+# configured.
 #
-# REPLACE `video-maker.example.com` with the real hostname once DNS is
-# decided, then (optionally) add TLS the same way the `tarot` project does:
-# see /home/wayne/ZenWayne/tarot/ai_tarot_backend/deploy/k8s/50-tls-secret.example.yaml
-# and 60-ingressroute.yaml for the Cloudflare-origin-cert + websecure pattern.
+# NOTE ON THE HOSTNAME: it must not contain an underscore. `video_maker...`
+# cannot be used — RFC 1123 hostnames allow only letters/digits/hyphen, and
+# the CA/Browser Forum rules forbid underscores in a certificate's dNSName, so
+# neither Cloudflare Origin CA nor Let's Encrypt will issue for such a name.
+#
+# WHERE TRAFFIC ENTERS: Traefik runs only on the other two nodes
+# (`kubectl -n kube-system get svc traefik` -> 107.174.159.18 /
+# 64.64.246.87); it is NOT on vm-0-8-ubuntu, which is a mainland Tencent Cloud
+# host where serving 80/443 publicly requires ICP filing. So DNS points at a
+# Traefik LB IP and Traefik reaches the `video-maker-frontend` ClusterIP
+# across nodes via the CNI. Put Cloudflare in front (proxied / orange cloud)
+# so TLS terminates at the edge and static assets are cached there; only API
+# calls take the extra hop back to the pod. Shot media does not go through
+# here at all — the browser fetches it straight from COS via signed URLs.
+#
+# Cloudflare SSL/TLS mode must be **Full (strict)** so the edge validates the
+# origin certificate below.
+#
+# The TLS secret is created imperatively and never committed:
+#   kubectl -n video-maker create secret tls video-maker-tls \
+#     --cert=origin.pem --key=origin.key
+# (cert + key come from Cloudflare dashboard -> SSL/TLS -> Origin Server ->
+# Create Certificate; it is trusted by Cloudflare only, which is exactly what
+# Full (strict) needs.)
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-to-https
+  namespace: video-maker
+  labels:
+    app: video-maker
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
   name: video-maker-frontend
   namespace: video-maker
+  labels:
+    app: video-maker
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`video-maker.kuanzw.com`)
+      priority: 10
+      services:
+        - name: video-maker-frontend
+          port: 80
+  tls:
+    secretName: video-maker-tls
+---
+# Plain HTTP -> permanent redirect to HTTPS.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: video-maker-frontend-http-redirect
+  namespace: video-maker
+  labels:
+    app: video-maker
 spec:
   entryPoints:
     - web
   routes:
     - kind: Rule
-      match: Host(`video-maker.example.com`)
+      match: Host(`video-maker.kuanzw.com`)
       priority: 10
+      middlewares:
+        - name: redirect-to-https
       services:
         - name: video-maker-frontend
           port: 80

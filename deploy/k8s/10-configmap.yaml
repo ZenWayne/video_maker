@@ -78,8 +78,11 @@ data:
   ASR_DEVICE: "cpu"
   ASR_COMPUTE_TYPE: "int8"
 
-  # CORS — replace with the real frontend origin(s) once DNS/ingress host is known.
-  CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000,http://127.0.0.1:4000"
+  # CORS — the real deployed origin. HTTPS only: 80-ingressroute.yaml redirects
+  # plain HTTP to HTTPS, so an http:// origin would never legitimately appear.
+  # The localhost entries are kept for local `make dev` against this same
+  # config; drop them if you want the deployment to be strict.
+  CORS_ORIGINS: "https://video-maker.kuanzw.com,http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000,http://127.0.0.1:4000"
 
   # Langfuse (LLM observability)
   LANGFUSE_ENABLED: "true"
