@@ -198,7 +198,35 @@ kubectl -n video-maker run curl-test --rm -it --image=curlimages/curl --restart=
 curl -sS --resolve video-maker.example.com:80:107.174.159.18 http://video-maker.example.com/
 ```
 
-## BLOCKER: pods on `vm-0-8-ubuntu` have no internet egress
+## RESOLVED: pods on `vm-0-8-ubuntu` had no internet egress
+
+**Status: fixed and verified end to end.** The `ip rule` below has been applied
+to the node and the full content-analysis flow now passes (upload -> COS ->
+transcribe -> Vertex brief, 171.9s). Keep reading for what was wrong and what
+is still fragile.
+
+```bash
+# applied on vm-0-8-ubuntu — pod-sourced traffic now uses the default table
+ip rule add from 10.42.0.0/16 lookup 1002 priority 10500
+```
+
+**This rule is in-memory only.** A node reboot, or `tailscaled` re-asserting
+its rules, removes it and the app breaks again with `ENETUNREACH` on every COS
+call. `deploy/k8s/optional/pod-egress-ip-rule-daemonset.yaml` re-applies it on
+a loop — not applied by default, because it means a standing privileged pod on
+a shared node. A systemd unit on the node is the alternative.
+
+Final split, both halves verified:
+
+| Traffic | Path | Measured |
+|---|---|---|
+| COS (media) | **direct**, `.myqcloud.com` in `NO_PROXY` | 1.8MB upload in 3.10s; job's own COS fetch 1s |
+| Vertex AI + HuggingFace | via `egress-proxy` on `racknerd-b9d6fff` | `generate_content` 6.6s; HF 321 KiB/s |
+
+HuggingFace is **blocked direct** from this node (connection reset), so model
+weights must keep going through the proxy.
+
+## Background: why it was broken
 
 Found while running the real end-to-end check after deploying. All four pods
 run fine, but `POST /api/analyses` fails at the COS upload:
@@ -321,18 +349,35 @@ The model cache has the same problem: `faster-whisper large-v3` is ~3GB from
 HuggingFace, which over this path is ~16 hours and would realistically fail
 like the uploads do. With pod egress fixed (3.96 MB/s) it is ~13 minutes.
 
-### What HAS been verified end to end
-
-Everything except the ASR hop, which is blocked solely on the above:
+### Verified end to end
 
 | Link | Result |
 |---|---|
 | nginx routing (`/api/`, SSE regex, upload cap) | 200 / 422 / 404 as expected |
 | backend image | `/health` -> `{"status":"ok","redis":"ok","db":"ok"}` |
-| worker image | arq up, 7 functions incl. `run_content_analysis`, past `on_startup` |
+| worker image | arq up, 7 functions incl. `run_content_analysis` |
 | COS real credentials | `put` -> `get` -> `delete`, content byte-identical |
 | Vertex AI real call | `gemini-3.1-pro-preview` returned in 6.6s via the proxy |
-| scheduling / stability | 4/4 app pods on `vm-0-8-ubuntu`, 0 restarts, no OOMKilled, node 52% |
+| **full content-analysis flow** | **`completed` in 171.9s** — see below |
+| SSE through nginx | `state_snapshot` arrived live (buffering off confirmed) |
+| stability | 5/5 pods, 0 restarts, **no OOMKilled** |
+
+The real run: an 8s previously-generated shot video was uploaded through the
+real nginx -> backend -> COS, the worker transcribed it with faster-whisper
+`small`, and Vertex produced the brief.
+
+```
+sample : transcribed | has_speech=True | transcript_len=108
+  text : "You keep asking the cards why the physical chemistry is so intense,
+          but the communication is completely dead"
+brief  : 915 chars
+keys   : niche_summary, sample_stats, hook_strategy, script_structure,
+         do, dont, screenwriter_directives
+```
+
+Worker peaked at ~1004Mi resident with `small` (limit 2560Mi) and the node sat
+at 70%. `large-v3` would add roughly another 1–1.5Gi on top of that, which is
+why `ASR_MODEL` is set to `small` — see the comment in `10-configmap.yaml`.
 
 ## Memory risk — read this before deploying
 
