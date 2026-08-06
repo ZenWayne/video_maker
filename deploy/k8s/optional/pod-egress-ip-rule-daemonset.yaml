@@ -54,14 +54,23 @@ spec:
               add: ["NET_ADMIN"]
           command: ["sh", "-c"]
           args:
+            # NO `apk add` here, deliberately. An earlier version installed
+            # iproute2 first and deadlocked: this pod's whole job is to repair
+            # egress, so on a node with broken egress the install hung forever
+            # and the repair loop never started — the DaemonSet looked Running
+            # while doing nothing. BusyBox's built-in `ip` already supports
+            # `rule show/add/del`, so nothing needs installing and the pod is
+            # functional with no network at all.
             - |
-              apk add -q iproute2
+              echo "$(date -Iseconds) pod-egress-ip-rule watcher started"
               while true; do
-                if ! ip rule show | grep -q "10500:.*from 10.42.0.0/16 lookup 1002"; then
-                  echo "$(date -Iseconds) re-adding pod-egress ip rule"
-                  ip rule add from 10.42.0.0/16 lookup 1002 priority 10500 || true
+                if ! ip rule show | grep -q "^10500:.*from 10.42.0.0/16"; then
+                  echo "$(date -Iseconds) rule missing -> re-adding"
+                  ip rule add from 10.42.0.0/16 lookup 1002 priority 10500 \
+                    && echo "$(date -Iseconds) rule restored" \
+                    || echo "$(date -Iseconds) FAILED to add rule"
                 fi
-                sleep 60
+                sleep 15
               done
           resources:
             requests:

@@ -210,11 +210,36 @@ is still fragile.
 ip rule add from 10.42.0.0/16 lookup 1002 priority 10500
 ```
 
-**This rule is in-memory only.** A node reboot, or `tailscaled` re-asserting
+**That rule is in-memory only** — a node reboot, or `tailscaled` re-asserting
 its rules, removes it and the app breaks again with `ENETUNREACH` on every COS
-call. `deploy/k8s/optional/pod-egress-ip-rule-daemonset.yaml` re-applies it on
-a loop — not applied by default, because it means a standing privileged pod on
-a shared node. A systemd unit on the node is the alternative.
+call. `deploy/k8s/optional/pod-egress-ip-rule-daemonset.yaml` watches for that
+and re-adds it; it **has been applied** and is running on `vm-0-8-ubuntu`.
+
+Verified by deleting the rule for real and watching it come back:
+
+```
+=== deleting the rule (simulating reboot / tailscaled reset) ===
+  rule is GONE (expected)
+=== egress should now be broken ===
+  COS FAIL: OSError [Errno 101] Network is unreachable
+=== waiting for the DaemonSet ===
+  restored after ~10s
+=== egress recovered? ===
+  COS reachable again (0.74s)
+```
+
+> **Do not add `apk add iproute2` to that DaemonSet.** The first version did,
+> and deadlocked: this pod's entire job is to repair egress, so on a node with
+> broken egress the install hung forever and the repair loop never ran — the
+> DaemonSet reported `Running`/`1 Ready` while doing nothing, and a manual
+> delete of the rule was never repaired. BusyBox's built-in `ip` already
+> supports `rule show/add/del`, so the pod needs no packages and works with no
+> network at all. This was only caught by deleting the rule and watching;
+> "the pod is Running" proved nothing.
+
+It is a standing privileged / hostNetwork / NET_ADMIN pod on a shared node — it
+only ever touches this one rule, but a systemd unit on the node is the
+alternative if that trade-off is unwanted.
 
 Final split, both halves verified:
 
