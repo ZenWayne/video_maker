@@ -211,9 +211,22 @@ k3s 的 `svclb-traefik` DaemonSet 抢的就是 hostPort 80，但它带
 
 - [ ] 新建 prod 桶，与 CVM **同地域**（`ap-guangzhou`）
 - [ ] 给 CVM 绑 CAM 角色，授予该桶的读写权限
-- [ ] **桶的跨域（CORS）规则**要允许 `https://video.kuanzw.com`
-      （SPA 从 Vercel 域名去取 COS 上的签名 URL，是跨域请求）
 - [ ] 桶保持**私有读**（依赖预签名 URL，TTL 2h）
+- [ ] **桶的跨域（CORS）规则** —— 当前**不是必需**，属于防御性配置：
+      前端 `ShotPlayer` 用的是裸 `<video src>` / `<audio src>`（无 `crossOrigin` 属性），
+      属于 **no-cors 媒体加载**，浏览器不发 `Origin` 也不校验 CORS 头；
+      仓库里没有任何 `fetch`/XHR 打到 COS，上传走后端服务端 SDK，
+      波形图 peaks 也由后端 ffmpeg 算好返回（`GET /api/.../waveform`）。
+      配上是为了将来有人加 `crossorigin`、canvas 抽帧或直传时不会炸得莫名其妙。
+
+      | 字段 | 值 |
+      |---|---|
+      | 来源 Origin | 生产桶 `https://video.kuanzw.com`；dev 桶 `http://localhost:4000` 等 |
+      | 操作 Methods | 只勾 **GET** + **HEAD**（HEAD 用于视频拖动的 Range 探测；<br>上传是服务端 SDK，浏览器不碰，不需要 PUT/POST/DELETE） |
+      | Allow-Headers | `*` |
+      | Expose-Headers | 默认三项，可加 `Content-Range`、`Accept-Ranges` |
+      | 超时 Max-Age | `600` |
+      | 返回 Vary: Origin | **保持勾选** —— 允许了多个 Origin，不勾可能被缓存串源 |
 
 ---
 
