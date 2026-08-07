@@ -1,0 +1,12 @@
+# Keep the build context small and, more importantly, keep the HOST
+# node_modules out of the image: the builder stage runs `npm ci` on
+# node:20-alpine (musl), and copying glibc-built native binaries (esbuild,
+# rollup) over that install breaks `npm run build`.
+node_modules/
+dist/
+.vite/
+test-results/
+playwright-report/
+.playwright-mcp/
+*.tsbuildinfo
+*.log

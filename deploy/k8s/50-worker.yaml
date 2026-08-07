@@ -1,0 +1,86 @@
+# arq worker: shot generation, voice-clone-adjacent jobs, and ASR (faster-whisper
+# large-v3, int8, CPU) for content-analysis transcription. This is the memory
+# hog of the deployment — see README "Memory risk" before touching requests/limits.
+#
+# deploy/Dockerfile.worker now COPYs backend/ into /app and runs
+# `uv sync --frozen --no-dev --group asr` at build time, so the image is
+# self-contained (it used to be dev-only, relying on docker-compose's bind
+# mount — a standalone build would have crash-looped on a missing
+# /app/pyproject.toml). The venv lives at /app/.venv and is first on PATH, so
+# the command below runs it directly instead of via `uv run`: no lock
+# resolution, and therefore no network dependency, at container start.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-maker-worker
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: worker
+spec:
+  replicas: 1  # sqlite on a single PVC — do not scale beyond 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: video-maker
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: video-maker
+        component: worker
+    spec:
+      restartPolicy: Always
+      nodeSelector:
+        kubernetes.io/hostname: vm-0-8-ubuntu
+      imagePullSecrets:
+        - name: tcr-pull-secret
+      containers:
+        - name: worker
+          image: ccr.ccs.tencentyun.com/tarrot/video-maker-worker:latest
+          imagePullPolicy: Always
+          workingDir: /app
+          command:
+            - "python"
+            - "-m"
+            - "arq"
+            - "worker.arq_worker.WorkerSettings"
+          envFrom:
+            - configMapRef:
+                name: video-maker-config
+            - secretRef:
+                name: video-maker-secrets
+          env:
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: whisper-cache
+              mountPath: /root/.cache/huggingface
+            - name: gcp-sa
+              mountPath: /var/secrets/gcp
+              readOnly: true
+          # No HTTP port — arq workers don't expose a health endpoint. Observe
+          # liveness via `kubectl logs` / `kubectl top pod` (see README).
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "2560Mi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: video-maker-data
+        - name: whisper-cache
+          persistentVolumeClaim:
+            claimName: video-maker-whisper-cache
+        - name: gcp-sa
+          secret:
+            secretName: video-maker-gcp-sa
+            items:
+              - key: sa.json
+                path: sa.json

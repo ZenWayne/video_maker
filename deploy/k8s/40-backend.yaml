@@ -1,0 +1,118 @@
+# FastAPI backend. Port 8000 (NOT 8002) is used deliberately here — it
+# matches backend/Dockerfile's own `CMD uvicorn app.main:app --port 8000`
+# AND frontend-vite/nginx.conf's hardcoded `proxy_pass http://backend:8000/`,
+# so nothing needs to be overridden or patched to make the frontend's /api/
+# proxy work. (8002 is only a local-dev compose port-mapping choice — see
+# deploy/docker-compose.dev.yml's backend `command:` override.) The Service
+# below is named exactly `backend` so that hardcoded nginx upstream resolves.
+#
+# backend/Dockerfile now uses WORKDIR /app (it was /workspace) and installs
+# dependencies from pyproject.toml + uv.lock instead of a stale hardcoded pip
+# list, so the data PVC mounted at /app/data below lines up with
+# DATABASE_URL=sqlite+aiosqlite:////app/data/dev.db and with the worker,
+# which mounts the same PVC at the same path.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-maker-backend
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: backend
+spec:
+  replicas: 1  # sqlite on a single PVC — do not scale beyond 1
+  strategy:
+    type: Recreate  # avoid two pods writing the same sqlite file concurrently
+  selector:
+    matchLabels:
+      app: video-maker
+      component: backend
+  template:
+    metadata:
+      labels:
+        app: video-maker
+        component: backend
+    spec:
+      restartPolicy: Always
+      nodeSelector:
+        kubernetes.io/hostname: vm-0-8-ubuntu
+      imagePullSecrets:
+        - name: tcr-pull-secret
+      containers:
+        - name: backend
+          image: ccr.ccs.tencentyun.com/tarrot/video-maker-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: video-maker-config
+            - secretRef:
+                name: video-maker-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: gcp-sa
+              mountPath: /var/secrets/gcp
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: video-maker-data
+        - name: gcp-sa
+          secret:
+            secretName: video-maker-gcp-sa
+            items:
+              - key: sa.json
+                path: sa.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Name matters: frontend-vite/nginx.conf hardcodes `proxy_pass http://backend:8000/`.
+  name: backend
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: video-maker
+    component: backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

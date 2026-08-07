@@ -13,8 +13,12 @@ services:
 
   backend:
     build:
-      context: .
-      dockerfile: Dockerfile.worker
+      # Context is ../backend (not deploy/): Dockerfile.worker now COPYs the
+      # backend source so the image also works standalone in k8s, where there
+      # is no bind mount. In dev the ../backend bind mount below still
+      # shadows those layers with the live source.
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile.worker
     image: video-maker-backend-dev
     container_name: video-maker-backend-dev
     ports:
@@ -66,8 +70,12 @@ services:
 
   worker:
     build:
-      context: .
-      dockerfile: Dockerfile.worker
+      # Context is ../backend (not deploy/): Dockerfile.worker now COPYs the
+      # backend source so the image also works standalone in k8s, where there
+      # is no bind mount. In dev the ../backend bind mount below still
+      # shadows those layers with the live source.
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile.worker
     image: video-maker-worker-dev
     container_name: video-maker-worker-dev
     volumes:
@@ -151,8 +159,12 @@ services:
 
   mcp:
     build:
-      context: .
-      dockerfile: Dockerfile.worker
+      # Context is ../backend (not deploy/): Dockerfile.worker now COPYs the
+      # backend source so the image also works standalone in k8s, where there
+      # is no bind mount. In dev the ../backend bind mount below still
+      # shadows those layers with the live source.
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile.worker
     image: video-maker-worker-dev
     container_name: video-maker-mcp-dev
     ports:

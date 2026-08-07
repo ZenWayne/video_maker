@@ -1,0 +1,55 @@
+# Traefik IngressRoute for video-maker.kuanzw.com.
+#
+# HTTP-only at the origin, ON PURPOSE — TLS is terminated by Cloudflare.
+#
+# WHY NOT websecure/TLS here: this cluster's Traefik deliberately does not
+# publish 443. `kubectl -n kube-system get helmchartconfig traefik -o
+# jsonpath='{.spec.valuesContent}'` shows:
+#
+#     ports:
+#       websecure:
+#         expose:
+#           default: false
+#
+# so the LoadBalancer only carries port 80 (`kubectl -n kube-system get svc
+# traefik` -> `80:32499/TCP`). An IngressRoute on `websecure` is simply
+# unreachable from outside, and Cloudflare in Full (strict) mode answers 521
+# because nothing listens on origin:443. Someone configured that on purpose,
+# so this deployment works with it rather than flipping it cluster-wide.
+#
+# REQUIRED Cloudflare setting: SSL/TLS mode = **Flexible**
+#   browser <-- HTTPS --> Cloudflare edge <-- HTTP --> this Traefik
+# The edge certificate for *.kuanzw.com is issued by Cloudflare automatically,
+# so the browser still gets HTTPS.
+#
+# DO NOT add an HTTP->HTTPS redirect here. Under Flexible, Cloudflare reaches
+# the origin over plain HTTP; a redirect to https would be passed back to the
+# browser, which would request https again, which Cloudflare would again fetch
+# over http... an infinite redirect loop. (An earlier revision had exactly
+# that redirect, paired with a websecure route.)
+#
+# TRADE-OFF, accepted knowingly: the Cloudflare<->origin leg is unencrypted and
+# it crosses the public internet (Cloudflare edge -> cool-cube-1 overseas), so
+# API traffic and reference-video uploads traverse it in the clear. Shot media
+# is NOT affected — the browser fetches it straight from COS over signed HTTPS
+# URLs. To close this gap later, either publish 443 on the shared Traefik and
+# switch to Full (strict) with the `video-maker-tls` secret (already created
+# from the Cloudflare Origin certificate), or front the app with a Cloudflare
+# Tunnel so no inbound port is needed at all.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: video-maker-frontend
+  namespace: video-maker
+  labels:
+    app: video-maker
+spec:
+  entryPoints:
+    - web
+  routes:
+    - kind: Rule
+      match: Host(`video-maker.kuanzw.com`)
+      priority: 10
+      services:
+        - name: video-maker-frontend
+          port: 80

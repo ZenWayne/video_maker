@@ -1,0 +1,81 @@
+# OPTIONAL — deliberately NOT in deploy/k8s/, so `kubectl apply -f deploy/k8s/`
+# does not pick it up. Apply explicitly if you want the pod-egress fix to
+# survive reboots / tailscaled restarts:
+#
+#     kubectl apply -f deploy/k8s/optional/pod-egress-ip-rule-daemonset.yaml
+#
+# WHY: pods on vm-0-8-ubuntu have no internet route (see README "BLOCKER").
+# The fix is a single policy-routing rule sending pod-sourced traffic to the
+# table that actually holds the default route:
+#
+#     ip rule add from 10.42.0.0/16 lookup 1002 priority 10500
+#
+# That rule was applied by hand and is live, but it is in-memory only —
+# a node reboot, or tailscaled re-asserting its rules, silently removes it and
+# the app breaks again with ENETUNREACH on every COS call. This DaemonSet
+# re-applies it and keeps checking.
+#
+# TRADE-OFF, read before applying: this runs a privileged, hostNetwork,
+# NET_ADMIN container on a shared production node that also hosts the
+# monitoring stack. It only ever touches this one rule (idempotently, and
+# scoped to the pod CIDR), but if you would rather not have a standing
+# privileged pod there, the alternative is a systemd unit / network dispatcher
+# hook on the node itself, outside Kubernetes.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pod-egress-ip-rule
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: pod-egress-ip-rule
+spec:
+  selector:
+    matchLabels:
+      app: video-maker
+      component: pod-egress-ip-rule
+  template:
+    metadata:
+      labels:
+        app: video-maker
+        component: pod-egress-ip-rule
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/hostname: vm-0-8-ubuntu
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: ip-rule
+          image: docker.io/library/alpine:3.20
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["NET_ADMIN"]
+          command: ["sh", "-c"]
+          args:
+            # NO `apk add` here, deliberately. An earlier version installed
+            # iproute2 first and deadlocked: this pod's whole job is to repair
+            # egress, so on a node with broken egress the install hung forever
+            # and the repair loop never started — the DaemonSet looked Running
+            # while doing nothing. BusyBox's built-in `ip` already supports
+            # `rule show/add/del`, so nothing needs installing and the pod is
+            # functional with no network at all.
+            - |
+              echo "$(date -Iseconds) pod-egress-ip-rule watcher started"
+              while true; do
+                if ! ip rule show | grep -q "^10500:.*from 10.42.0.0/16"; then
+                  echo "$(date -Iseconds) rule missing -> re-adding"
+                  ip rule add from 10.42.0.0/16 lookup 1002 priority 10500 \
+                    && echo "$(date -Iseconds) rule restored" \
+                    || echo "$(date -Iseconds) FAILED to add rule"
+                fi
+                sleep 15
+              done
+          resources:
+            requests:
+              cpu: "5m"
+              memory: "8Mi"
+            limits:
+              cpu: "100m"
+              memory: "32Mi"
