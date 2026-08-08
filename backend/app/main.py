@@ -7,6 +7,7 @@ from typing import AsyncGenerator
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.datastructures import MutableHeaders
 from fastapi.responses import JSONResponse
 
 from app.config import settings
@@ -97,6 +98,50 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class NoStoreAPIMiddleware:
+    """Mark every /api/ response as uncacheable.
+
+    The API sent no cache headers at all, which lets any cache in front of it
+    decide for itself. That is not hypothetical: the Vercel-hosted frontend
+    proxies /api/* and its edge cache was serving `x-vercel-cache: HIT` with
+    `age: 18111` — i.e. ~5h-stale analysis lists.
+
+    It is also a correctness/privacy issue, not just staleness: callers are
+    identified by the `X-User-Name` header (see api/projects.py `_require_user`)
+    and caches do not key on that header, so one user's cached response can be
+    served to another. `no-store` is the blunt, correct answer for an API whose
+    responses are all per-user or fast-changing; nothing here is worth caching.
+
+    Applied at the app layer on purpose rather than in a proxy config, so it
+    holds no matter what sits in front (Vercel, Cloudflare, nginx, none).
+
+    Written as raw ASGI middleware rather than `@app.middleware("http")`:
+    the latter is `BaseHTTPMiddleware`, which wraps the response body and has
+    a long history of breaking streaming responses. Two endpoints here are SSE
+    (`/api/projects/{id}/stream`, `/api/analyses/{id}/stream`) and keeping them
+    unbuffered took real effort — this version only rewrites the response
+    headers and never touches the body stream.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_no_store(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["cache-control"] = "no-store"
+            await send(message)
+
+        await self.app(scope, receive, send_with_no_store)
+
+
+app.add_middleware(NoStoreAPIMiddleware)
 
 
 @app.exception_handler(Exception)
