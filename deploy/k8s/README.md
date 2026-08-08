@@ -441,6 +441,48 @@ Worker peaked at ~1004Mi resident with `small` (limit 2560Mi) and the node sat
 at 70%. `large-v3` would add roughly another 1–1.5Gi on top of that, which is
 why `ASR_MODEL` is set to `small` — see the comment in `10-configmap.yaml`.
 
+## 入口拓扑：国内入口（70-cn-ingress.yaml）
+
+集群共享的 Traefik 被 `nodeSelector` 钉在 `cool-cube-1`（美国），而本项目的
+pod 全在 `vm-0-8-ubuntu`（广州）。走共享 Traefik 时每个 API 请求的实际路径是
+
+    浏览器(国内) → CF 边缘 → cool-cube-1(美国) → wireguard/flannel → 广州 pod
+
+`70-cn-ingress.yaml` 用 `hostPort: 443` 在 `vm-0-8-ubuntu` 上开了独立入口，
+DNS 直接指向该节点公网 IP，链路变成
+
+    浏览器(国内) → CF 边缘 → vm-0-8-ubuntu:443(广州) → backend:8000(同节点)
+
+实测直连该入口 ttfb **0.09s**。顺带用 Cloudflare Origin 证书在这里做 TLS
+终结，所以 Cloudflare 该主机名的 SSL 模式是 **Full (strict)**，回源不再是明文
+（旧的 Flexible 方案回源是明文跨公网的）。
+
+Cloudflare 侧配置（集群外）：
+- DNS: `video-maker-api.kuanzw.com` A → `139.199.78.140`，橙云代理开启
+- **Configuration Rule** 针对 `http.host eq "video-maker-api.kuanzw.com"`
+  设 SSL = Full (strict)。**不要改 zone 默认值** —— `kuanzw.com` 上的
+  `xray-routes` 走 Traefik 的 web(80) 入口，zone 级切 Full (strict) 会打断它。
+
+切换顺序有坑：先改 DNS、后配 SSL 模式，中间必然出现一个窗口 —— Cloudflare
+仍按 Flexible 回源 80，而这个 ingress 只听 443，结果是 521。要么先让 nginx
+同时监听 80/443、切完再收掉 80，要么接受这个短暂窗口。
+
+备案风险：大陆 IP 上未备案域名跑 443 可能被运营商/云厂商事后拦截。真被拦了
+的退路是换 Cloudflare 支持的非标端口（2053/2083/2087/2096/8443）并配
+**Origin Rules** 改写回源端口 —— 注意默认情况下 Cloudflare 回源只打 80/443，
+非标端口不配 Origin Rules 是不生效的。
+
+## TODO：出站代理换成 xray
+
+`35-egress-proxy.yaml` 里的 tinyproxy 跑在 `racknerd-b9d6fff`（海外），与
+「除出站 API 调用外一律不上海外节点」的原则相冲突 —— 它本身就是个海外常驻
+组件。既定方向是换成集群里已有的 xray。
+
+暂时保留 tinyproxy 作为 fallback，因为 `kube-system` 里那三个 xray Service
+（`xray-ws-none-cf` / `xray-xhttp` / `xray-ws-hbproxy`）目前**没有 selector
+也没有 endpoints**，是空壳，无法直接作为出站代理接入。接入前需要先确认 xray
+实际部署在哪、以及它对外提供的是 HTTP 代理还是 SOCKS。
+
 ## Memory risk — read this before deploying
 
 The node has ~2.2Gi realistically free and the worker's request/limit is
