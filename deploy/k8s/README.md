@@ -43,6 +43,47 @@ Deployment/Service/IngressRoute（原 `60-frontend.yaml` 与 `80-ingressroute.ya
 `frontend-vite/Dockerfile` 和 `nginx.conf` 保留着，但生产路径不经过它们 ——
 它们只在需要用容器方式自托管前端时才有用。
 
+### Vercel 侧配置（三处，缺一不可）
+
+构建配置在 `frontend-vite/vercel.json`（已入库，**不要删** —— 若把 Vercel
+项目连到 Git 仓库，构建完全依赖它）：
+
+```json
+{
+  "buildCommand": "vite build",
+  "outputDirectory": "dist",
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}
+```
+
+1. **`buildCommand` 必须覆盖成 `vite build`。** Vercel 的 Vite 预设默认跑
+   `npm run build`，而本项目的该脚本是 `tsc && vite build`；`tsc` 目前在
+   `ShotsPage.tsx`（`video_path: undefined` 不匹配 `string | null`、
+   `asChild` 属性不存在）和一个测试文件上报 3 处错误，构建直接失败。
+   `frontend-vite/Dockerfile` 用的是 `npx vite build`，同样绕开 `tsc` ——
+   两边保持一致。**这些类型错误是既有问题，值得单独修掉，修完这条覆盖就能去掉。**
+
+2. **`rewrites` 是 SPA 回退。** 没有它，`/analyses` 这类深链接直接 404。
+
+3. **环境变量 `VITE_API_BASE`**（Production 作用域）：
+   ```
+   VITE_API_BASE = https://video-maker-api.kuanzw.com
+   ```
+   前端 `src/lib/api.ts` 与 `src/lib/sse.ts` 都是
+   `const BASE = import.meta.env.VITE_API_BASE || ''`，拼成 `${BASE}${path}`，
+   所以一个变量就能让全部接口调用指向跨域 API，无需改代码。
+   > ⚠️ **Vite 的 env 是构建时注入的**，改了必须重新部署才生效；
+   > 线上验证方式是抓取 `/assets/index-*.js` 在 bundle 里 grep 该域名，
+   > 而不是看接口有没有返回。
+
+另外 Vercel 项目的 **Root Directory 要设成 `frontend-vite`**。
+
+跨域方面，后端 `CORS_ORIGINS` 必须精确包含前端来源（`main.py` 里
+`allow_credentials=True`，**不能用通配符 `*`**，且 `cors_origins.split(",")`
+不做 trim，**逗号后不能有空格**）。Vercel 的 preview 部署域名每次构建都变
+（`xxx-<hash>.vercel.app`），不在白名单里，preview 环境会 CORS 失败 ——
+只有 production 域名可用。
+
 ## Why everything is pinned to `vm-0-8-ubuntu`
 
 `nodeSelector: kubernetes.io/hostname: vm-0-8-ubuntu` is set on every
