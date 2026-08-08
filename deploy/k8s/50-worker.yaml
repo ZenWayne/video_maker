@@ -38,7 +38,7 @@ spec:
         - name: tcr-pull-secret
       containers:
         - name: worker
-          image: ccr.ccs.tencentyun.com/tarrot/video-maker-worker:latest
+          image: ccr.ccs.tencentyun.com/video-maker/video-maker-worker:latest
           imagePullPolicy: Always
           workingDir: /app
           command:

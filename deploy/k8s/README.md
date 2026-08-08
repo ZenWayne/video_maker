@@ -11,17 +11,37 @@ in-cluster Redis) to the existing k3s cluster, pinned entirely to node
 |---|---|
 | `00-namespace.yaml` | Creates the `video-maker` namespace |
 | `10-configmap.yaml` | Non-secret env — mirrors `deploy/config.yml`, plus cluster-internal wiring (`REDIS_URL`, `DATABASE_URL`, `GOOGLE_APPLICATION_CREDENTIALS`) |
-| `20-secret.example.yaml` | Template for `video-maker-secrets` (API keys). Fill in real values → `20-secret.yaml`. Do not commit. |
+| `examples/secret.example.yaml` | `video-maker-secrets` 的占位符模板。**故意放在子目录**——见下方警告 |
 | `video-maker-gcp-sa` (no file) | GCP SA key for Vertex AI (Gemini/Veo/CC/TF). Created imperatively, never committed. |
 | `25-pvc.yaml` | `video-maker-data` (1Gi, sqlite DB, mounted in backend+worker) and `video-maker-whisper-cache` (5Gi, faster-whisper weights, worker only) |
 | `30-redis.yaml` | Redis `Deployment` + `Service` (arq broker) |
 | `40-backend.yaml` | FastAPI backend `Deployment` + `Service` (named `backend` — see note below) |
 | `50-worker.yaml` | arq worker `Deployment` (ASR + generation jobs, no Service — no HTTP port) |
-| `60-frontend.yaml` | nginx/Vite frontend `Deployment` + `Service` |
-| `80-ingressroute.yaml` | Traefik `IngressRoute`, HTTP only, placeholder host |
+| `35-egress-proxy.yaml` | tinyproxy，给 Vertex/HuggingFace 出网用（见下方 BLOCKER 与 TODO） |
+| `70-cn-ingress.yaml` | 国内入口：`hostPort: 443` 直接跑在 `vm-0-8-ubuntu`，TLS 终结 |
+| `optional/` | 非默认 apply：pod 出网 ip rule 的 DaemonSet 与节点 systemd 兜底 |
 
 Skipped on purpose: `vc-worker` (voice-conversion model, not needed for this
 deployment) and `playwright`/`mcp` (dev-only tooling).
+
+> **`kubectl apply -f deploy/k8s/` 必须是安全的。** 这个目录里的每个 `.yaml`
+> 都会被一次性 apply，所以任何「不该被直接 apply」的东西都放进子目录
+> （`examples/`、`optional/`）——`apply -f <dir>` 默认不递归。
+>
+> 占位符 secret 模板原本就叫 `20-secret.example.yaml` 放在本目录里，而它的
+> `metadata.name` 正是线上那个 `video-maker-secrets`。任何人执行一次
+> `kubectl apply -f deploy/k8s/`，线上真实密钥就会被
+> `YOUR_GEMINI_API_KEY_HERE` 之类的占位符覆盖，后端立刻全挂。已移到
+> `examples/`。
+>
+> 判据：`kubectl apply --dry-run=client -f deploy/k8s/` 的输出里**不应出现任何
+> `created`**（出现 = 仓库会凭空造出线上没有的对象），也不应包含 secret。
+
+**前端不在这里。** 前端由 Vercel 托管，k8s 侧不再有 frontend 的
+Deployment/Service/IngressRoute（原 `60-frontend.yaml` 与 `80-ingressroute.yaml`
+已删除）。本目录只负责后端 + worker + redis + 出网代理 + 国内入口。
+`frontend-vite/Dockerfile` 和 `nginx.conf` 保留着，但生产路径不经过它们 ——
+它们只在需要用容器方式自托管前端时才有用。
 
 ## Why everything is pinned to `vm-0-8-ubuntu`
 
@@ -127,17 +147,23 @@ because the fixes are what make the images runnable outside docker-compose.
    Then, from the repo root:
    ```bash
    # Backend (context: backend/)
-   podman build -t ccr.ccs.tencentyun.com/tarrot/video-maker-backend:latest -f backend/Dockerfile backend/
-   podman push ccr.ccs.tencentyun.com/tarrot/video-maker-backend:latest
+   podman build -t ccr.ccs.tencentyun.com/video-maker/video-maker-backend:latest -f backend/Dockerfile backend/
+   podman push ccr.ccs.tencentyun.com/video-maker/video-maker-backend:latest
 
    # Worker (context: backend/ — Dockerfile.worker needs a COPY of backend/ per "Known gaps" #1)
-   podman build -t ccr.ccs.tencentyun.com/tarrot/video-maker-worker:latest -f deploy/Dockerfile.worker backend/
-   podman push ccr.ccs.tencentyun.com/tarrot/video-maker-worker:latest
+   podman build -t ccr.ccs.tencentyun.com/video-maker/video-maker-worker:latest -f deploy/Dockerfile.worker backend/
+   podman push ccr.ccs.tencentyun.com/video-maker/video-maker-worker:latest
 
-   # Frontend (context: frontend-vite/)
-   podman build -t ccr.ccs.tencentyun.com/tarrot/video-maker-frontend:latest -f frontend-vite/Dockerfile frontend-vite/
-   podman push ccr.ccs.tencentyun.com/tarrot/video-maker-frontend:latest
    ```
+
+   > **TCR 命名空间是 `video-maker/`，不是 `tarrot/`。** 这两个都存在，推错了
+   > 不会报错、只是没人拉 —— 表现是「部署成功但跑的还是旧代码」。踩过一次：
+   > 推到 `tarrot/` 后 rollout 显示成功，但 pod 里 `grep NoStoreAPIMiddleware`
+   > 是 0。改完镜像后务必用
+   > `kubectl -n video-maker exec deploy/video-maker-backend -- grep -c <新符号> /app/app/main.py`
+   > 之类的方式确认 pod 里真的是新代码，别只看 rollout 成功。
+
+   前端不需要构建镜像 —— 由 Vercel 托管。
 
 2. **TCR pull secret** — the cluster needs credentials to pull these private
    images:
@@ -168,19 +194,23 @@ kubectl apply -f 00-namespace.yaml
 kubectl apply -f 10-configmap.yaml
 
 # Secrets — copy template, fill in from deploy/secrets.yml, apply, then delete
-cp 20-secret.example.yaml 20-secret.yaml
-$EDITOR 20-secret.yaml
-kubectl apply -f 20-secret.yaml
-shred -u 20-secret.yaml   # or just delete
+cp examples/secret.example.yaml /tmp/20-secret.yaml
+$EDITOR /tmp/20-secret.yaml
+kubectl apply -f /tmp/20-secret.yaml
+shred -u /tmp/20-secret.yaml   # or just delete
 
 # (video-maker-gcp-sa and tcr-pull-secret — see "Prerequisites" above)
 
 kubectl apply -f 25-pvc.yaml
 kubectl apply -f 30-redis.yaml
+kubectl apply -f 35-egress-proxy.yaml
 kubectl apply -f 40-backend.yaml
 kubectl apply -f 50-worker.yaml
-kubectl apply -f 60-frontend.yaml
-kubectl apply -f 80-ingressroute.yaml
+kubectl apply -f 70-cn-ingress.yaml
+
+# 出网规则保活（见 BLOCKER 一节）——不在默认 apply 范围内，按需执行
+# kubectl apply -f optional/pod-egress-ip-rule-daemonset.yaml
+# kubectl apply -f optional/pod-egress-systemd-install.yaml
 ```
 
 ## Verify
@@ -513,8 +543,12 @@ Mitigation levers, in order of preference:
 ```bash
 kubectl -n video-maker rollout restart deploy/video-maker-backend
 kubectl -n video-maker rollout restart deploy/video-maker-worker
-kubectl -n video-maker rollout restart deploy/video-maker-frontend
 kubectl -n video-maker rollout status  deploy/video-maker-backend
+
+# rollout 成功 != 跑的是新代码。imagePullPolicy: Always 只保证重新拉取，
+# 拉的仍是 deployment 里写的那个仓库 —— 推错命名空间时它会安静地用旧镜像。
+# 改完代码后确认 pod 里真的是新版本：
+kubectl -n video-maker exec deploy/video-maker-backend -- grep -c <新加的符号> /app/app/main.py
 ```
 
 ## Rollback
