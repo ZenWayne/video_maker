@@ -1,0 +1,135 @@
+# 国内入口 —— 直接跑在 vm-0-8-ubuntu 上，绕开集群共享的 Traefik。
+#
+# 为什么需要这个：
+# 集群的 Traefik 被 nodeSelector 钉在 cool-cube-1（美国），而 backend 的 pod
+# 在 vm-0-8-ubuntu（广州）。走共享 Traefik 的话，每个 API 请求的实际路径是
+#
+#     浏览器(国内) → CF 边缘 → cool-cube-1(美国) → wireguard/flannel → 广州 pod
+#
+# 实测一个空的 /health 要 660~800ms，而本机直连该节点只要 18ms —— 多出来的
+# 600ms 全是中美往返。SSE 和参考视频上传也都在这条路上。
+#
+# 这个 Deployment 用 hostPort 443 直接在 vm-0-8-ubuntu 上开 TLS 入口，
+# DNS 指向该节点公网 IP(139.199.78.140)，链路变成
+#
+#     浏览器(国内) → CF 边缘 → vm-0-8-ubuntu:443(广州) → backend:8000(同节点)
+#
+# 顺带把回源那段也加密了：这里用 Cloudflare Origin 证书做 TLS 终结，
+# Cloudflare SSL 模式对该主机名设成 Full (strict) 即可端到端加密，
+# 不再需要 Flexible 的明文回源。
+#
+# 前置条件（集群外，需要在腾讯云侧完成）：
+#   1. 安全组放行 vm-0-8-ubuntu 的 TCP 443 入站
+#   2. DNS: video-maker-api.kuanzw.com A -> 139.199.78.140（橙云代理开启）
+#   3. Cloudflare 对该主机名用 Configuration Rule 设 SSL = Full (strict)
+#      （不要改整个 zone 的默认值 —— kuanzw.com 上的 xray-routes 走的是
+#        Traefik 的 web(80) 入口，zone 级切 Full strict 会把它打断）
+#
+# 注意：大陆 IP 的 443 对外服务通常要求 ICP 备案，未备案可能被云厂商/运营商
+# 拦截。如果开了安全组仍然不通，退路是换一个 Cloudflare 支持的非标端口
+# （2053/2083/2087/2096/8443）并配 Origin Rules 改写回源端口。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cn-ingress-nginx
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: cn-ingress
+data:
+  default.conf: |
+    server {
+        listen 443 ssl;
+        http2 on;
+        server_name video-maker-api.kuanzw.com;
+
+        ssl_certificate     /etc/nginx/tls/tls.crt;
+        ssl_certificate_key /etc/nginx/tls/tls.key;
+        ssl_protocols       TLSv1.2 TLSv1.3;
+
+        # 参考视频上传：nginx 默认 1m，会把内容分析整个功能挡死
+        client_max_body_size 512m;
+
+        location / {
+            proxy_pass http://backend:8000;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+
+            # 上传要流到 COS，响应可能远超默认 60s
+            proxy_connect_timeout 30s;
+            proxy_send_timeout 600s;
+            proxy_read_timeout 600s;
+        }
+
+        # SSE：两个流式端点必须关缓冲，否则进度不实时
+        location ~ ^/api/(?:projects|analyses)/[^/]+/stream$ {
+            proxy_pass http://backend:8000;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Connection '';
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 86400s;
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-maker-cn-ingress
+  namespace: video-maker
+  labels:
+    app: video-maker
+    component: cn-ingress
+spec:
+  replicas: 1          # hostPort 443，一个节点只能有一个
+  selector:
+    matchLabels:
+      app: video-maker
+      component: cn-ingress
+  template:
+    metadata:
+      labels:
+        app: video-maker
+        component: cn-ingress
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: vm-0-8-ubuntu
+      containers:
+        - name: nginx
+          image: docker.io/library/nginx:alpine
+          ports:
+            - name: https
+              containerPort: 443
+              hostPort: 443        # 直接占用节点的 443
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/conf.d
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: 443
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+      volumes:
+        - name: conf
+          configMap:
+            name: cn-ingress-nginx
+        - name: tls
+          secret:
+            secretName: video-maker-tls
