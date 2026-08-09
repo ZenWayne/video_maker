@@ -39,7 +39,17 @@ metadata:
 data:
   default.conf: |
     server {
-        listen 443 ssl;
+        # 只监听 8443，不监听 443。
+        #
+        # 443 上带 SNI 的 TLS 握手会被大陆对未备案域名的 SNI 阻断丢弃 ——
+        # 实测：带任意 SNI 的 ClientHello 收不到任何回应，不带 SNI 则握手
+        # 正常，明文 HTTP 打 443 也能正常拿到 nginx 响应，节点自身
+        # 127.0.0.1:443 同样是 200。即 TCP/nginx/证书都没问题，只有
+        # 「443 + 带 SNI」这个组合被丢。换到 8443 后带 SNI 握手正常。
+        #
+        # Cloudflare 侧由 Origin Rules 把目标端口重写为 8443（默认只会回源
+        # 80/443，不配这条规则不生效）。
+        listen 8443 ssl;
         http2 on;
         server_name video-maker-api.kuanzw.com;
 
@@ -89,6 +99,10 @@ metadata:
     component: cn-ingress
 spec:
   replicas: 1          # hostPort 443，一个节点只能有一个
+  # 必须是 Recreate。hostPort 是节点级独占资源，默认的 RollingUpdate 会先起
+  # 新 pod 再删旧 pod，新 pod 因端口被占而永远 Pending，rollout 卡死。
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: video-maker
@@ -106,8 +120,8 @@ spec:
           image: docker.io/library/nginx:alpine
           ports:
             - name: https
-              containerPort: 443
-              hostPort: 443        # 直接占用节点的 443
+              containerPort: 8443
+              hostPort: 8443       # 回源端口（443 被 SNI 阻断，见上方注释）
           volumeMounts:
             - name: conf
               mountPath: /etc/nginx/conf.d
@@ -116,7 +130,7 @@ spec:
               readOnly: true
           readinessProbe:
             tcpSocket:
-              port: 443
+              port: 8443
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
