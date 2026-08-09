@@ -39,7 +39,13 @@ metadata:
 data:
   default.conf: |
     server {
-        listen 443 ssl;
+        # 443 与 8443 都监听。443 上带 SNI 的 TLS 握手会被大陆的未备案域名
+        # 阻断（实测：带任意 SNI 的 ClientHello 收不到任何回应，不带 SNI 则
+        # 握手正常，明文 HTTP 也正常 —— 说明是 SNI 阻断而非端口封锁），
+        # 所以实际回源走 8443，由 Cloudflare Origin Rules 改写目标端口。
+        # 443 保留是为了留一条退路，并便于对比验证阻断是否也蔓延到新端口。
+        listen 443  ssl;
+        listen 8443 ssl;
         http2 on;
         server_name video-maker-api.kuanzw.com;
 
@@ -89,6 +95,10 @@ metadata:
     component: cn-ingress
 spec:
   replicas: 1          # hostPort 443，一个节点只能有一个
+  # 必须是 Recreate。hostPort 是节点级独占资源，默认的 RollingUpdate 会先起
+  # 新 pod 再删旧 pod，新 pod 因端口被占而永远 Pending，rollout 卡死。
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: video-maker
@@ -107,7 +117,10 @@ spec:
           ports:
             - name: https
               containerPort: 443
-              hostPort: 443        # 直接占用节点的 443
+              hostPort: 443        # 保留退路
+            - name: https-alt
+              containerPort: 8443
+              hostPort: 8443       # 实际回源端口（绕 SNI 阻断）
           volumeMounts:
             - name: conf
               mountPath: /etc/nginx/conf.d
