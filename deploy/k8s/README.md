@@ -528,11 +528,38 @@ DNS 直接指向该节点公网 IP，链路变成
 终结，所以 Cloudflare 该主机名的 SSL 模式是 **Full (strict)**，回源不再是明文
 （旧的 Flexible 方案回源是明文跨公网的）。
 
+### 回源走 8443，不是 443
+
+443 上**带 SNI 的 TLS 握手会被丢弃** —— 大陆对未备案域名的 SNI 阻断。实测：
+
+| 端口 | 带 SNI 的 ClientHello | 不带 SNI |
+|---|---|---|
+| 443 | 无任何响应（被丢包） | 握手成功 |
+| 8443 | 握手成功 | 握手成功 |
+
+同时明文 HTTP 打 443 能正常拿到 nginx 响应、节点自身 `127.0.0.1:443` 也是
+200。即 TCP/nginx/证书都正常，**只有「443 + 带 SNI」这个组合被丢**。用 443
+上线后能正常服务约十分钟才开始被拦，表现为公网 525。
+
+换到 8443 即可绕开。注意这是绕过不是根治 —— 阻断按域名+SNI 识别，8443 将来
+也可能被盯上。根治要么备案，要么改用 Cloudflare Tunnel（不需要任何入站端口）。
+
 Cloudflare 侧配置（集群外）：
 - DNS: `video-maker-api.kuanzw.com` A → `139.199.78.140`，橙云代理开启
 - **Configuration Rule** 针对 `http.host eq "video-maker-api.kuanzw.com"`
   设 SSL = Full (strict)。**不要改 zone 默认值** —— `kuanzw.com` 上的
   `xray-routes` 走 Traefik 的 web(80) 入口，zone 级切 Full (strict) 会打断它。
+- **Origin Rule** 同样匹配该主机名 → 目标端口重写为 `8443`。
+  没有这条规则，Cloudflare 只会回源 80/443，8443 根本不会被访问。
+
+腾讯云安全组：只放行 **Cloudflare 官方 IPv4 回源段**（15 条）的 TCP 8443，
+不要用 `0.0.0.0/0`（实测敞开时有大量公网扫描打到 nginx）。列表见
+<https://www.cloudflare.com/ips-v4>，建议用「参数模板」维护成一条规则。
+不需要 IPv6 —— DNS 上只有 A 记录，Cloudflare 只走 IPv4 回源。
+
+收紧是否真正生效的判据：**从非 Cloudflare 网段直连 `<节点IP>:8443` 应该不通**，
+同时经 Cloudflare 访问正常。只验证后者会漏掉「旧的 0.0.0.0/0 规则还在、更宽松
+所以一直优先命中」这种情况。
 
 切换顺序有坑：先改 DNS、后配 SSL 模式，中间必然出现一个窗口 —— Cloudflare
 仍按 Flexible 回源 80，而这个 ingress 只听 443，结果是 521。要么先让 nginx
