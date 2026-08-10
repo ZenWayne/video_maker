@@ -570,16 +570,77 @@ Cloudflare 侧配置（集群外）：
 **Origin Rules** 改写回源端口 —— 注意默认情况下 Cloudflare 回源只打 80/443，
 非标端口不配 Origin Rules 是不生效的。
 
-## TODO：出站代理换成 xray
+## 已知性能问题：API 经 Cloudflare 绕行美国，延迟约 1 秒
 
-`35-egress-proxy.yaml` 里的 tinyproxy 跑在 `racknerd-b9d6fff`（海外），与
-「除出站 API 调用外一律不上海外节点」的原则相冲突 —— 它本身就是个海外常驻
-组件。既定方向是换成集群里已有的 xray。
+**现状是知情接受的**，不是待修 bug。记录在此以免以后有人重新排查一遍。
 
-暂时保留 tinyproxy 作为 fallback，因为 `kube-system` 里那三个 xray Service
-（`xray-ws-none-cf` / `xray-xhttp` / `xray-ws-hbproxy`）目前**没有 selector
-也没有 endpoints**，是空壳，无法直接作为出站代理接入。接入前需要先确认 xray
-实际部署在哪、以及它对外提供的是 HTTP 代理还是 SOCKS。
+### 现象
+
+`GET /api/projects` 经公网约 1.7s，`/health`（只返回 38 字节）也要 1.3s。
+
+### 定位
+
+分层实测，一眼能看出瓶颈不在应用：
+
+| 层 | `/api/projects` | `/health` |
+|---|---|---|
+| 后端容器内（无网络） | 0.022s | 0.002s |
+| 经 cn-ingress nginx（节点内） | 0.031s | 0.008s |
+| 经 Cloudflare（真实用户路径） | **1.68s** | **1.33s** |
+
+`/health` 后端只花 2ms 却要 1.33s —— 与接口逻辑、数据量（`/api/projects`
+返回 17KB / 73 个项目）都无关，时间全在网络路径上。
+
+### 原因
+
+Cloudflare 免费版把国内用户调度到了 **SEA（西雅图）** PoP（浏览器响应头
+`cf-ray` 末尾的机场码可确认）。于是路径变成
+
+    用户(国内) → CF 西雅图 → 广州源站 → 原路返回
+
+一次跨太平洋往返约 300–400ms，加上 TLS 握手和回源，接近 1 秒。而
+`/api/*` 全部是 `no-store`（见 `app/main.py` 的 `NoStoreAPIMiddleware`），
+每次都必须回源，边缘缓存帮不上忙。
+
+**用户在国内、源站也在国内，中间却绕了趟美国** —— Cloudflare 在这个场景下
+不是加速而是负担；它对海外源站才有意义。
+
+### 参考数字
+
+国内网络直连广州节点 8443：**ttfb 0.09s**（收紧安全组前实测）。即绕行成本
+约 **10 倍**。
+
+### 选项与决策
+
+| | 方案 | 延迟 | 代价 |
+|---|---|---|---|
+| A | API 摘掉 CF，DNS 灰云直连广州 | ~0.09s | 需换公网可信证书（Let's Encrypt DNS-01；现在这张 Cloudflare Origin 证书只有 CF 信任）、前端地址加 `:8443`、源站 IP 暴露、失去 WAF/DDoS 防护 |
+| **B** | **维持现状** ← 当前选择 | ~1s | 前端需做好 loading 态、减少串行请求 |
+| C | 换有国内节点的 CDN（腾讯云 EdgeOne 等） | 低 | **大陆节点加速要 ICP 备案**，绕不开 |
+
+## TODO：换国内 CDN（需先备案）
+
+上面的 C 方案。备案完成后可用腾讯云 EdgeOne 之类做国内加速，能同时解决两件事：
+API 绕行美国的 ~1s 延迟，以及现在靠换端口绕开的 SNI 阻断（备案后 443 即可
+正常使用，不必再依赖 8443 + Origin Rules 这套）。
+
+在备案之前，A 方案是不需要备案就能拿到 10 倍提升的选项，代价是安全防护 ——
+如果哪天延迟变成实际痛点，优先考虑它。
+
+## TODO：把 xray 接成出站代理的备选通道
+
+`35-egress-proxy.yaml` 的 tinyproxy（跑在 `racknerd-b9d6fff`）是**主用**通道，
+Vertex AI 和 HuggingFace 的出站流量都走它。它是单点：这个 pod 或那台节点一挂，
+出简报和模型下载就全断。
+
+方向是把集群里已有的 xray 接成**备选通道**，在 egress-proxy 不可用时兜底 ——
+不是替换掉 tinyproxy，两者并存。
+
+尚未实施的原因：`kube-system` 里那三个 xray Service（`xray-ws-none-cf` /
+`xray-xhttp` / `xray-ws-hbproxy`）目前**没有 selector 也没有 endpoints**，
+是空壳，接不上。实施前需要确认 xray 实际部署在哪、对外提供的是 HTTP 代理
+还是 SOCKS（后者的话 `HTTPS_PROXY` 用不了，httpx/requests 需要
+`socks5://` 且要装 `httpx[socks]` / `PySocks`）。
 
 ## Memory risk — read this before deploying
 
