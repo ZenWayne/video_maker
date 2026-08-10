@@ -382,8 +382,10 @@ sqlalchemy.url =
 ```python
 """Alembic 运行环境（async）。
 
-数据库 URL 不从 alembic.ini 读，而是从 app.config.settings.resolved_database_url
-取——保证应用与迁移永远指向同一个库，不会出现「应用连 A、迁移改 B」。
+数据库 URL 默认从 app.config.settings.resolved_database_url 取——保证应用与迁移
+永远指向同一个库，不会出现「应用连 A、迁移改 B」。但调用方（测试、将来可能的
+按租户迁移运行器）可以在调 command.upgrade() 前显式设 Config 的 sqlalchemy.url
+来覆盖，走标准 Alembic 方式，不必依赖环境变量。
 """
 
 import asyncio
@@ -404,7 +406,15 @@ from app.config import settings  # noqa: E402
 from app.models.project import Base  # noqa: E402
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.resolved_database_url)
+
+# 只在 URL 尚未设置时才回退到 settings。
+#
+# 不能无条件覆盖：那会丢弃调用方在 command.upgrade() 之前以编程方式设到
+# Config 上的 URL（测试 fixture 正是这么做的），导致迁移打到非预期的库上，
+# 而「迁移了哪个库」变成隐式依赖进程环境变量——是个没写在任何地方的约定。
+# 正常 CLI 路径下 alembic.ini 的 sqlalchemy.url 为空，回退照常生效。
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", settings.resolved_database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
