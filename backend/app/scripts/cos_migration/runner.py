@@ -216,23 +216,14 @@ async def _derive_key_columns(storage_root: Path, session_factory) -> dict:
 async def backfill(storage_root: Path, session_factory) -> dict:
     """把 DB 里的路径值回填成 COS key，并推导两个新列的初值。
 
-    需要停写窗口。开始前先跑一次幂等建列 —— 切换顺序里本步骤(第 5 步)早于
-    部署新代码后的首次启动(第 6 步)，而两个 key 列正是在启动时由幂等
-    ALTER TABLE 创建的；不先建列这一步会直接失败（Spec B §9.2）。
+    需要停写窗口。
 
-    注意这里用 ``_ensure_columns(conn)`` 而**不是** ``init_db()``：后者写死
-    操作 app.db 模块级的 engine（指向真实 dev.db），在测试里会绕过传进来的
-    session_factory 去动共享库 —— 那正是本计划明令禁止的事。``_ensure_columns``
-    接收调用方的 conn，因此永远作用在正确的引擎上（Spec A 写它时就预留了
-    这个用法，见其 docstring）。该例程幂等，重复执行无害。
+    历史说明：本函数曾在开头调用 ``app.db._ensure_columns`` 做幂等建列，
+    因为当时 ``pre_cc_last_frame_key`` / ``pristine_last_frame_key`` 两列是
+    靠应用启动时的 ALTER TABLE 创建的。迁移到 Alembic 之后，这两列由
+    initial revision 建出，调用方在跑本脚本前必然已经 ``alembic upgrade head``，
+    故建列步骤已删除。
     """
-    from app.db import _ensure_columns
-
-    async with session_factory() as s:
-        conn = await s.connection()
-        await _ensure_columns(conn)
-        await s.commit()
-
     changed = skipped = 0
     unrecognized = []
     async with session_factory() as s:
