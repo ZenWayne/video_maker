@@ -1,7 +1,9 @@
 """Alembic 运行环境（async）。
 
-数据库 URL 不从 alembic.ini 读，而是从 app.config.settings.resolved_database_url
-取——保证应用与迁移永远指向同一个库，不会出现「应用连 A、迁移改 B」。
+数据库 URL 优先取调用方显式设到 Config 上的值（例如测试用 command API
+按需指向 videomaker_test）；没有显式设置时，才回退到
+app.config.settings.resolved_database_url——保证在没有更具体来源的情况下，
+应用与迁移永远指向同一个库，不会出现「应用连 A、迁移改 B」。
 """
 
 import asyncio
@@ -22,7 +24,8 @@ from app.config import settings  # noqa: E402
 from app.models.project import Base  # noqa: E402
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.resolved_database_url)
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", settings.resolved_database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -52,9 +55,24 @@ def do_run_migrations(connection: Connection) -> None:
         context.run_migrations()
 
 
+def _with_async_driver(url: str) -> str:
+    """Config 上的 URL 可能是不带异步驱动后缀的 plain ``postgresql://``
+    （例如测试按 psycopg2 习惯显式设置的同步风格 URL——见
+    ``tests/integration/test_alembic_schema.py``）。run_migrations_online
+    全程走异步引擎，这里统一补上 ``+asyncpg``，不管 URL 来自
+    settings.resolved_database_url（已经是 asyncpg）还是调用方显式设置
+    （可能没写 driver）。
+    """
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+
 async def run_async_migrations() -> None:
+    section = config.get_section(config.config_ini_section, {})
+    section["sqlalchemy.url"] = _with_async_driver(section["sqlalchemy.url"])
     connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        section,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
