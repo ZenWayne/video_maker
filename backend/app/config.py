@@ -1,7 +1,9 @@
 """Application configuration using pydantic-settings."""
 
+from pathlib import Path
 from typing import Optional
 
+from sqlalchemy import URL
 from pydantic_settings import BaseSettings
 
 
@@ -19,8 +21,49 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://redis:6379"
 
-    # Database (3 slashes for relative path)
+    # Database ——「唯一真相」是 resolved_database_url 属性，不要直接读这两组字段。
+    #
+    # database_url 是回退值（本地开发 / 回滚到 SQLite 时用）。
+    # postgres_* 一旦设了 host，就优先按分量拼出 PostgreSQL URL —— 这样
+    # compose 里只需要用一个 YAML 锚点喂分量，不必在 3 个服务里各写一遍完整
+    # URL（那正是迁移前的漂移来源）。
     database_url: str = "sqlite+aiosqlite:///./metadata.db"
+
+    postgres_host: str = ""
+    postgres_port: int = 5432
+    postgres_db: str = "videomaker"
+    postgres_user: str = "videomaker"
+    postgres_password: str = ""
+    # 容器里密码以文件形式挂载（compose secrets），优先级低于 postgres_password
+    postgres_password_file: str = ""
+
+    # PostgreSQL 连接池（sqlite 分支不使用这些值）
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_recycle_sec: int = 1800
+
+    @property
+    def resolved_database_url(self) -> str:
+        """应用与 Alembic 都应当只读这个属性，不要直接读 database_url。
+
+        用 URL.create 而不是 f-string 拼接：密码里若含 @ / : / 空格，手工
+        转义极易和 SQLAlchemy 的反向解析对不上（quote_plus 把空格编成 +，
+        但 URL 解析 userinfo 时用的是 unquote，不会把 + 还原成空格）。
+        交给 URL.create 就没有这类不对称问题。
+        """
+        if not self.postgres_host:
+            return self.database_url
+        password = self.postgres_password
+        if not password and self.postgres_password_file:
+            password = Path(self.postgres_password_file).read_text().strip()
+        return URL.create(
+            "postgresql+asyncpg",
+            username=self.postgres_user,
+            password=password,
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_db,
+        ).render_as_string(hide_password=False)
 
     # LLM Models (via Vertex AI)
     gemini_project: str = "tarot-493203"

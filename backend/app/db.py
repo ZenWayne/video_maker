@@ -3,21 +3,35 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from app.config import settings
 
-# SQLite with aiosqlite doesn't benefit from connection pooling — each
-# aiosqlite connection is an independent async process. NullPool creates a
-# fresh connection per session and closes it immediately on release, which
-# eliminates QueuePool exhaustion under concurrent SSE streams.
-_pool_kwargs: dict = {}
-if settings.database_url.startswith("sqlite"):
-    from sqlalchemy.pool import NullPool
-    _pool_kwargs["poolclass"] = NullPool
+
+def build_pool_kwargs(database_url: str) -> dict:
+    """按数据库后端选择连接池策略。
+
+    SQLite + aiosqlite：每个连接是独立的异步进程，池化无收益；而 QueuePool
+    在 SSE 长连接并发时会被耗尽。用 NullPool——每次会话新建连接、释放即关。
+
+    PostgreSQL：建连接昂贵，必须池化。pool_pre_ping 让被中间件掐掉的死连接
+    在使用前被发现并重建；pool_recycle 避免连接活得比服务端 idle 超时更久。
+    """
+    if database_url.startswith("sqlite"):
+        from sqlalchemy.pool import NullPool
+        return {"poolclass": NullPool}
+    return {
+        "pool_size": settings.db_pool_size,
+        "max_overflow": settings.db_max_overflow,
+        "pool_pre_ping": True,
+        "pool_recycle": settings.db_pool_recycle_sec,
+    }
+
+
+_database_url = settings.resolved_database_url
 
 # Create async engine
 engine = create_async_engine(
-    settings.database_url,
+    _database_url,
     echo=False,
     future=True,
-    **_pool_kwargs,
+    **build_pool_kwargs(_database_url),
 )
 
 # Create async session factory
