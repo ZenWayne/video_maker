@@ -36,13 +36,16 @@ vi.mock('@/lib/api', () => ({
 // 'analysis_progress' and calls close() on unmount. We never emit any events
 // in these tests, so the initial fetch result is what drives rendering.
 const { createAnalysisSSEConnection } = vi.hoisted(() => ({
-  createAnalysisSSEConnection: vi.fn(() => ({
+  // 参数签名与真实的 createAnalysisSSEConnection(analysisId: string) 对齐，
+  // 否则转发时展开实参会因形参为空而类型报错
+  createAnalysisSSEConnection: vi.fn((_analysisId: string) => ({
     subscribe: vi.fn(() => vi.fn()),
     close: vi.fn(),
   })),
 }))
 vi.mock('@/lib/analysisSse', () => ({
-  createAnalysisSSEConnection: (...a: unknown[]) => createAnalysisSSEConnection(...a),
+  createAnalysisSSEConnection: (analysisId: string) =>
+    createAnalysisSSEConnection(analysisId),
 }))
 
 import AnalysisDetailPage from '@/pages/AnalysisDetailPage'

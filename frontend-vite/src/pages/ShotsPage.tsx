@@ -250,7 +250,7 @@ export default function ShotsPage() {
       // Clear stale video so the old clip doesn't keep showing
       setShots(shots.map((s) =>
         ids.includes(s.shot_id)
-          ? { ...s, status: 'pending', video_path: undefined, last_frame_path: undefined }
+          ? { ...s, status: 'pending', video_path: null, last_frame_path: null }
           : s
       ))
       clearSelection()
@@ -399,7 +399,7 @@ export default function ShotsPage() {
       // Clear stale video so the old clip doesn't keep showing
       setShots(shots.map((s) =>
         s.shot_id === shotId
-          ? { ...s, status: 'pending', video_path: undefined, last_frame_path: undefined }
+          ? { ...s, status: 'pending', video_path: null, last_frame_path: null }
           : s
       ))
       setStatus('shot_generating')
@@ -984,21 +984,19 @@ export default function ShotsPage() {
                 </Button>
 
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="outline"
-                      onClick={handleVoiceConvertAll}
-                      disabled={(!referenceVoiceShotId && !referenceVoicePath) || isVcConverting}
-                    >
-                      {isVcConverting ? (
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      ) : (
-                        <Mic className="w-4 h-4 mr-2" />
-                      )}
-                      {referenceVoiceShotId
-                        ? `统一音色 (基准: #${referenceVoiceShotId})`
-                        : '统一音色'}
-                    </Button>
+                  <TooltipTrigger
+                    render={<Button variant="outline" />}
+                    onClick={handleVoiceConvertAll}
+                    disabled={(!referenceVoiceShotId && !referenceVoicePath) || isVcConverting}
+                  >
+                    {isVcConverting ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      <Mic className="w-4 h-4 mr-2" />
+                    )}
+                    {referenceVoiceShotId
+                      ? `统一音色 (基准: #${referenceVoiceShotId})`
+                      : '统一音色'}
                   </TooltipTrigger>
                   {!referenceVoiceShotId && !referenceVoicePath && (
                     <TooltipContent>

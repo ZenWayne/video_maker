@@ -50,18 +50,17 @@ Deployment/Service/IngressRoute（原 `60-frontend.yaml` 与 `80-ingressroute.ya
 
 ```json
 {
-  "buildCommand": "vite build",
   "outputDirectory": "dist",
   "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }
 ```
 
-1. **`buildCommand` 必须覆盖成 `vite build`。** Vercel 的 Vite 预设默认跑
-   `npm run build`，而本项目的该脚本是 `tsc && vite build`；`tsc` 目前在
-   `ShotsPage.tsx`（`video_path: undefined` 不匹配 `string | null`、
-   `asChild` 属性不存在）和一个测试文件上报 3 处错误，构建直接失败。
-   `frontend-vite/Dockerfile` 用的是 `npx vite build`，同样绕开 `tsc` ——
-   两边保持一致。**这些类型错误是既有问题，值得单独修掉，修完这条覆盖就能去掉。**
+1. **构建命令用 Vercel Vite 预设的默认值 `npm run build`**（= `tsc && vite build`），
+   类型检查是构建的一部分。这里曾经有一条 `"buildCommand": "vite build"` 覆盖，
+   为的是绕开 master 上 30 个既有类型错误；那些错误已全部修掉
+   （`npx tsc --noEmit` 干净），覆盖已移除，`Dockerfile` 也同步换回 `npm run build`。
+   > 本地开发不会暴露类型错误 —— vite dev server 不做类型检查。
+   > 所以构建里这道 `tsc` 是唯一能在合并前拦住类型退化的闸，**不要再绕开它**。
 
 2. **`rewrites` 是 SPA 回退。** 没有它，`/analyses` 这类深链接直接 404。
 

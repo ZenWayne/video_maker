@@ -188,7 +188,7 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
     const unsubscribeTfStarted = sse.subscribe('tf_started', (data) => {
       setLastEventTime(Date.now())
       const d = data as { shot_id: number }
-      updateShot(d.shot_id, { tf_status: 'generating' } as Partial<{ tf_status: string }>)
+      updateShot(d.shot_id, { tf_status: 'generating' })
       setStatus(`分镜 #${d.shot_id} 尾帧生成中`)
       onEvent?.('tf_started', data)
     })
@@ -210,7 +210,7 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
         target_last_frame_path: d.target_last_frame_path,
         motion_prompt: d.motion_prompt,
         tf_confirmed: false,
-      } as Partial<{ tf_status: string; target_last_frame_path: string; motion_prompt: string; tf_confirmed: boolean }>)
+      })
       updateProjectStatus('shot_review')
       setStatus(`分镜 #${d.shot_id} 尾帧已生成，请确认`)
       addToast({ type: 'success', message: `分镜 #${d.shot_id} 尾帧已生成，请确认` })
@@ -224,7 +224,7 @@ export function ProgressStream({ projectId, onEvent }: ProgressStreamProps) {
       updateShot(d.shot_id, {
         tf_status: 'failed',
         tf_error_message: d.error_message,
-      } as Partial<{ tf_status: string; tf_error_message: string }>)
+      })
       updateProjectStatus('shot_review')
       setStatus(`分镜 #${d.shot_id} 尾帧生成失败`)
       addToast({ type: 'error', message: `分镜 #${d.shot_id} 尾帧生成失败: ${d.error_message}` })
