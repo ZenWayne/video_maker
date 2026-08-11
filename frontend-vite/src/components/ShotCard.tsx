@@ -27,7 +27,7 @@ import {
 import { TrimDialog } from '@/components/TrimDialog'
 import { ShotPlayer } from './ShotPlayer'
 import { CcCandidateStrip } from './CcCandidateStrip'
-import type { AspectRatio, Shot, ShotStatus } from '@/lib/types'
+import type { AspectRatio, Shot, ShotDuration, ShotStatus } from '@/lib/types'
 
 interface ShotCardProps {
   shot: Shot
@@ -42,7 +42,6 @@ interface ShotCardProps {
   onEditScript?: (shotId: number, newText: string, newVisual: string, newAlign: boolean) => void
   onEditPrompt?: (shotId: number, prompt: string) => void
   onToggleAlign?: (shotId: number, align: boolean) => void
-  onViewFirstFrame?: (shotId: number) => void
   onRedraw?: (shotId: number) => void
   onShotUpdated?: (shotId: number, updates: Partial<Shot>) => void
   onSetReferenceVoice?: (shotId: number) => void
@@ -194,7 +193,6 @@ export function ShotCard({
   onEditScript,
   onEditPrompt,
   onToggleAlign,
-  onViewFirstFrame,
   onRedraw,
   onShotUpdated,
   isReferenceVoice,
@@ -493,7 +491,8 @@ export function ShotCard({
               <label className="text-xs font-medium text-zinc-500 block mb-1">时长</label>
               <select
                 value={editDuration}
-                onChange={(e) => setEditDuration(Number(e.target.value))}
+                // select 只提供 4/6/8 三个选项，与 ShotDuration 一一对应
+                onChange={(e) => setEditDuration(Number(e.target.value) as ShotDuration)}
                 className="text-sm bg-transparent border-none outline-none"
               >
                 <option value={4}>4s</option>

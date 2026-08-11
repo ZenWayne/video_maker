@@ -18,17 +18,13 @@ RUN npm ci
 
 # Copy source and build.
 #
-# `npx vite build`, not `npm run build`: the package.json script is
-# `tsc && vite build`, and `tsc --noEmit` currently reports 30 pre-existing
-# errors on master (20 of them just missing vitest globals in src/**/__tests__,
-# the rest genuine type errors in ShotsPage/ShotCard/ProgressStream/
-# ProjectPage/TrimDialog). Local dev never hits this because the vite dev
-# server does not type-check. Bundling does not depend on tsc — esbuild strips
-# types — so the image builds from vite alone rather than having the container
-# build be the thing that's blocked on unrelated type debt. Restore
-# `npm run build` here once `npx tsc --noEmit` is clean.
+# `npm run build` (= `tsc && vite build`)，类型检查是构建的一部分。
+# 这里曾经是 `npx vite build`，为的是绕开 master 上 30 个既有类型错误；
+# 那些错误已全部修掉（`npx tsc --noEmit` 干净），门禁随之恢复。
+# 注意本地开发不会暴露类型错误 —— vite dev server 不做类型检查，
+# 所以这道闸是唯一能在合并前拦住类型退化的地方，不要再绕开它。
 COPY . .
-RUN npx vite build
+RUN npm run build
 
 # Stage 2: Serve with nginx
 FROM docker.io/nginx:alpine

@@ -15,6 +15,7 @@ import { useVideoErrorRetry } from '../hooks/useVideoErrorRetry'
 interface TrimDialogProps {
   shot: Shot
   projectId: string
+  /** ShotsPage → ShotCard 一路传下来；组件内目前未消费，保留以免影响调用方 */
   aspectRatio?: AspectRatio
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -33,7 +34,6 @@ interface TrimDialogProps {
 export function TrimDialog({
   shot,
   projectId,
-  aspectRatio,
   open,
   onOpenChange,
   onTrimmed,
