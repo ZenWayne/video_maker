@@ -34,6 +34,6 @@ describe('voice calibration api', () => {
     const [url, opts] = (global.fetch as any).mock.calls[0]
     expect(url).toContain('/api/projects/p1/reference-voice/upload')
     expect(opts.body instanceof FormData).toBe(true)
-    expect(opts.headers['X-User-Name']).toBe('testuser')
+    expect(opts.credentials).toBe('include')
   })
 })

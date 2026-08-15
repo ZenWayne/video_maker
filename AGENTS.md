@@ -322,6 +322,13 @@ podman restart video-maker-backend-dev video-maker-worker-dev
 
 ### Notes / gotchas
 
+- **改了 `deploy/config.env` 必须 `down` + `up`，`restart` 不生效。** env_file 在容器
+  **创建**时读取，podman-compose 还会缓存 spec：实测 `podman restart`、
+  `podman compose up -d <service>`、甚至先 `podman rm -f` 再 `up -d <service>`，容器拿到的
+  都还是旧值，且**不报任何错**——表现为「我改了开关，但一点反应都没有」。只有
+  `podman compose -f deploy/docker-compose.dev.yml down && ... up -d` 才会重新读。
+  验证方式：`podman exec video-maker-backend-dev sh -c 'echo $AUTH_ENFORCED'`，
+  别只看文件内容。（k8s 侧不同：改 ConfigMap 后 `kubectl rollout restart` 会重建 Pod。）
 - **A backend-only change does NOT alter the UI.** If the frontend looks unchanged after deploy, check
   `git diff <base>..HEAD -- frontend-vite` — an empty diff means there is no frontend code to show, so no
   amount of container rebuilding will change the page. (Rebuild only matters for `Dockerfile.*` / dep changes.)

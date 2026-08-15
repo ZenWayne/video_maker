@@ -22,7 +22,8 @@ interface AnalysisSSEEvent {
 
 export function createAnalysisSSEConnection(analysisId: string): AnalysisSSEConnection {
   const url = `${BASE}/api/analyses/${analysisId}/stream`
-  const eventSource = new EventSource(url)
+  // 同 lib/sse.ts：EventSource 不支持自定义请求头，凭据只能靠 cookie。
+  const eventSource = new EventSource(url, { withCredentials: true })
   const handlers = new Map<AnalysisSSEEventType, Set<(data: unknown) => void>>()
 
   eventSource.onmessage = (event) => {

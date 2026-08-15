@@ -11,7 +11,9 @@ const BASE = import.meta.env.VITE_API_BASE || ''
 
 export function createSSEConnection(projectId: string): SSEConnection {
   const url = `${BASE}/api/projects/${projectId}/stream`
-  const eventSource = new EventSource(url)
+  // withCredentials 是 SSE 唯一能带上会话的方式：EventSource 不支持自定义
+  // 请求头（Web 标准限制），所以 Authorization: Bearer 这类方案覆盖不到进度流。
+  const eventSource = new EventSource(url, { withCredentials: true })
   const handlers = new Map<SSEEventType, Set<(data: unknown) => void>>()
 
   eventSource.onmessage = (event) => {

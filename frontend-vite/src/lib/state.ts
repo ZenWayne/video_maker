@@ -9,10 +9,6 @@ import type {
 } from './types'
 
 interface AppStore {
-  // 当前用户名（镜像 localStorage）
-  userName: string
-  setUserName: (name: string) => void
-
   // 当前打开的项目（在 /projects/[id] 系列页面下有值）
   currentProject: Project | null
   setCurrentProject: (project: Project | null) => void
@@ -35,15 +31,6 @@ interface AppStore {
 }
 
 export const useStore = create<AppStore>((set, get) => ({
-  // 用户名
-  userName: '',
-  setUserName: (name) => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('user_name', name)
-    }
-    set({ userName: name })
-  },
-
   // 当前项目
   currentProject: null,
   setCurrentProject: (project) => set({ currentProject: project }),
@@ -96,8 +83,6 @@ export const useStore = create<AppStore>((set, get) => ({
     })),
 }))
 
-// 初始化用户名（仅在客户端）
-if (typeof window !== 'undefined') {
-  const storedName = localStorage.getItem('user_name') || ''
-  useStore.setState({ userName: storedName })
-}
+// 身份不再由前端保管：会话在 httpOnly cookie 里，当前用户从 lib/auth 的
+// AuthProvider（GET /api/auth/me）拿。原来存在 localStorage 的 user_name
+// 是自称身份，已随 X-User-Name 一起删除。
