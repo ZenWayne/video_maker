@@ -16,6 +16,7 @@ from sqlalchemy import (
     ForeignKey,
     UniqueConstraint,
     Index,
+    text,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -61,13 +62,95 @@ class ReferenceSampleStatus(str, Enum):
     FAILED = "failed"
 
 
+class CreditReason(str, Enum):
+    REGISTER = "register"
+    GRANT = "grant"
+    RESERVE = "reserve"
+    REFUND = "refund"
+
+
+class User(Base):
+    """An application account.
+
+    Accounts live in the DB (not in a secret): self-service registration at a
+    scale of ≤1000 accounts makes re-rendering a secret + restarting pods per
+    signup untenable. Only the *machine token* stays in secrets.
+
+    ``credits`` is the authoritative balance; ``credit_ledger`` is the audit
+    trail and the basis for refunds (see app.services.credits).
+    """
+
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    username = Column(String(64), nullable=False, unique=True)
+    password_hash = Column(Text, nullable=False)
+    credits = Column(Integer, nullable=False, default=0)
+    is_admin = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_users_username", "username", unique=True),
+    )
+
+
+class CreditLedger(Base):
+    """Append-only credit movements.
+
+    Every balance change writes exactly one row **in the same transaction** as
+    the ``users.credits`` update — otherwise a deduction can exist with no
+    traceable origin, or a refund can run twice.
+
+    ``ref_type``/``ref_id`` point at what caused the movement; for a refund
+    they point at the reserve row being refunded (``ref_type='reservation'``),
+    which is what makes refunds idempotent via ``uq_credit_ledger_refund``.
+    """
+
+    __tablename__ = "credit_ledger"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    delta = Column(Integer, nullable=False)  # negative = deduction
+    reason = Column(String(20), nullable=False)  # register|grant|reserve|refund
+    ref_type = Column(String(40), nullable=True)
+    ref_id = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_credit_ledger_user_created", "user_id", "created_at"),
+        # One refund per reservation, enforced by the DB rather than by a
+        # check-then-insert race in the worker.
+        Index(
+            "uq_credit_ledger_refund",
+            "ref_type",
+            "ref_id",
+            unique=True,
+            sqlite_where=text("reason = 'refund'"),
+        ),
+    )
+
+
 class Project(Base):
     __tablename__ = "projects"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     title = Column(Text, nullable=False)
     theme_text = Column(Text, nullable=False)
+    # Display name only. Access control is decided by owner_id — never by this
+    # field, or renaming yourself would be a privilege escalation.
     creator_name = Column(Text, nullable=False)
+    # Authoritative owner. Nullable for pre-auth rows until the FR-8.3
+    # migration (P3) backfills them.
+    owner_id = Column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     status = Column(String(20), nullable=False, default=ProjectStatus.DRAFT.value)
     aspect_ratio = Column(String(10), nullable=False, default="9:16")
     scene_overview = Column(Text, nullable=True)
@@ -105,6 +188,7 @@ class Project(Base):
     __table_args__ = (
         Index("ix_projects_status", "status"),
         Index("ix_projects_creator_name", "creator_name"),
+        Index("ix_projects_owner_id", "owner_id"),
         Index("ix_projects_created_at", "created_at"),
     )
 

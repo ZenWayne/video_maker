@@ -94,3 +94,28 @@ data:
   cos_scheme: "https"
   cos_auth_mode: "static"
   cos_signed_url_ttl_sec: "7200"
+
+  # ---- 应用级鉴权（FRD 2026-08-11） ----
+  # 唯一的「未认证是否放行」开关，也是唯一的回滚手段（改回 "false" 即恢复放行，
+  # 无需回滚镜像）。P1/P2 保持 "false"；P3 完成存量数据迁移 + 数据库备份之后
+  # 才置 "true" —— 顺序颠倒会让用户在中间窗口里看到空列表。
+  AUTH_ENFORCED: "false"
+  SESSION_TTL_DAYS: "7"
+  # 前端在 Vercel、API 在集群，是不同站点：会话 cookie 必须 Secure + SameSite=None。
+  SESSION_COOKIE_SECURE: "true"
+  # 机器令牌绑定的账号，留空 = 服务主体（不受归属过滤、不扣点数）。
+  MACHINE_TOKEN_USER: ""
+  # 注册限流：每 IP 每小时 1 次。取 IP 用 CF-Connecting-IP，
+  # 因为前面压着 Cloudflare + cn-ingress，socket 地址是它们的。
+  REGISTER_RATE_LIMIT: "1"
+  REGISTER_RATE_LIMIT_WINDOW_SEC: "3600"
+  REGISTER_GRANT_CREDITS: "0"
+
+  # 点数单价（1 点 = $0.01 底层成本）。
+  # ⚠️ VEO_MODEL 与 CREDIT_COST_VIDEO_PER_SECOND 必须同改。
+  CREDIT_COST_VIDEO_PER_SECOND: "15"
+  CREDIT_COST_SCRIPT: "5"
+  CREDIT_COST_SHOTLIST: "5"
+  CREDIT_COST_IMAGE: "8"
+  CREDIT_COST_ANALYSIS: "3"
+  CREDIT_COST_AI_EDIT: "1"

@@ -355,3 +355,50 @@ class ContentAnalysisList(BaseModel):
 
 class AttachBriefRequest(BaseModel):
     analysis_id: str = Field(..., min_length=1)
+
+
+# ============== Auth / Credits Schemas ==============
+
+class RegisterRequest(BaseModel):
+    """注册。用户名字符集收紧到 [a-z0-9._-]，既避免同形字冒充，也顺手挡掉
+    最粗暴的批量生成模式（FR-10）。"""
+    username: str = Field(..., min_length=3, max_length=32)
+    password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("username")
+    @classmethod
+    def _validate_username(cls, v: str) -> str:
+        import re
+        value = v.strip().lower()
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?", value):
+            raise ValueError("用户名只能包含小写字母、数字、点、下划线、连字符，且不能以符号开头或结尾")
+        return value
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class UserResponse(BaseModel):
+    username: str
+    credits: int
+    is_admin: bool
+
+
+class GrantCreditsRequest(BaseModel):
+    """管理员定向发放/回收。delta 可正可负。"""
+    delta: int
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
+class CreditLedgerEntry(BaseModel):
+    id: str
+    delta: int
+    reason: str
+    ref_type: Optional[str] = None
+    ref_id: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

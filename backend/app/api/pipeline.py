@@ -10,13 +10,15 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 from arq.connections import ArqRedis
-from fastapi import APIRouter, Depends, HTTPException, Header, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import observability
+from app.api.identity import current_principal, require_user
 from app.config import settings
 from app.db import get_session
+from app.services import credits
 from app.main import get_redis
 from app.models.project import Project, Shot, ReferenceImage
 from app.models.schemas import (
@@ -81,13 +83,15 @@ def _reset_tail_frame(shot: Shot) -> None:
 
 
 async def _enqueue_next_shot_task(
-    project_id: str, session: AsyncSession, arq, user: str
+    project_id: str, session: AsyncSession, arq, user: str, principal=None
 ) -> str:
     """Pick the next pending shot and enqueue the video pipeline task.
 
     Path-as-truth: tail frame use is decided inside the worker (resolve_tail_frame).
     Auto tail-frame generation is no longer triggered here — use the explicit
     generate-tail-frame endpoint instead.
+
+    点数在**入队前**按该分镜时长预扣（Veo 按秒计价）；余额不足直接 402，不入队。
 
     Returns the enqueued job name.
     """
@@ -104,15 +108,38 @@ async def _enqueue_next_shot_task(
     if not shot:
         return "none"
 
-    await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}")
+    reservation = await credits.reserve(
+        principal,
+        credits.video_cost(shot.shot_duration),
+        ref_type="shot_video",
+        ref_id=f"{project_id}:{shot.shot_id}",
+    )
+    await arq.enqueue_job(
+        "run_shot_pipeline", project_id, f"user:{user}",
+        **credits.enqueue_kwargs(reservation),
+    )
     return "run_shot_pipeline"
 
 
-def _require_user(x_user_name: Optional[str] = Header(default=None)) -> str:
-    """Require X-User-Name header."""
-    if not x_user_name:
-        raise HTTPException(status_code=400, detail="X-User-Name header required")
-    return x_user_name
+async def _ensure_video_balance(
+    project_id: str, session: AsyncSession, principal, shot_ids: Optional[list[int]] = None
+) -> None:
+    """按「即将生成的那个分镜」的时长做 402 预检。
+
+    approve-script / regenerate-shots 都会先重置分镜再入队，所以目标分镜是
+    重置范围内 shot_id 最小的那个——与 _enqueue_next_shot_task 之后实际挑中的
+    是同一个。
+    """
+    query = select(Shot).where(Shot.project_id == project_id)
+    if shot_ids:
+        query = query.where(Shot.shot_id.in_(shot_ids))
+    shot = (await session.execute(query.order_by(Shot.shot_id).limit(1))).scalar_one_or_none()
+    if shot is not None:
+        await credits.ensure_balance(principal, credits.video_cost(shot.shot_duration))
+
+
+# 兼容旧调用点的别名；实现见 app.api.identity（会话优先，X-User-Name 回落）。
+_require_user = require_user
 
 
 async def _get_project_or_404(project_id: str, session: AsyncSession) -> Project:
@@ -135,11 +162,13 @@ async def _get_arq_redis(redis) -> ArqRedis:
 async def start_project(
     project_id: str,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
     """Start the video generation pipeline (transition to SCRIPTING)."""
     project = await _get_project_or_404(project_id, session)
+    await credits.ensure_balance(principal, credits.script_cost())
 
     # Validate at least one character image
     result = await session.execute(
@@ -162,9 +191,15 @@ async def start_project(
     except InvalidTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    # Enqueue screenwriter task
+    # Enqueue screenwriter task（预扣在入队之前；402 时不入队）
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_screenwriter", project_id, f"user:{user}")
+    reservation = await credits.reserve(
+        principal, credits.script_cost(), ref_type="script", ref_id=project_id
+    )
+    await arq.enqueue_job(
+        "run_screenwriter", project_id, f"user:{user}",
+        **credits.enqueue_kwargs(reservation),
+    )
 
     return {"status": "queued", "message": "Screenwriter task queued"}
 
@@ -173,11 +208,13 @@ async def start_project(
 async def regenerate_script(
     project_id: str,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
     """Regenerate script (archive current, clear shots, restart)."""
     project = await _get_project_or_404(project_id, session)
+    await credits.ensure_balance(principal, credits.script_cost())
 
     # Archive current storyboard
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
@@ -198,9 +235,15 @@ async def regenerate_script(
     except InvalidTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    # Enqueue screenwriter task
+    # Enqueue screenwriter task（预扣在入队之前；402 时不入队）
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_screenwriter", project_id, f"user:{user}")
+    reservation = await credits.reserve(
+        principal, credits.script_cost(), ref_type="script", ref_id=project_id
+    )
+    await arq.enqueue_job(
+        "run_screenwriter", project_id, f"user:{user}",
+        **credits.enqueue_kwargs(reservation),
+    )
 
     return {"status": "queued", "message": "Script regeneration queued"}
 
@@ -370,11 +413,13 @@ async def put_storyboard(
 async def approve_script(
     project_id: str,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
     """Approve script and start shot generation."""
     project = await _get_project_or_404(project_id, session)
+    await _ensure_video_balance(project_id, session, principal)
 
     try:
         await transition_project_status(
@@ -400,7 +445,7 @@ async def approve_script(
 
     # Enqueue tail frame or video pipeline for the first pending shot
     arq = await _get_arq_redis(redis)
-    job = await _enqueue_next_shot_task(project_id, session, arq, user)
+    job = await _enqueue_next_shot_task(project_id, session, arq, user, principal)
 
     return {"status": "queued", "message": "Shot generation queued"}
 
@@ -410,11 +455,13 @@ async def regenerate_shots(
     project_id: str,
     body: RegenerateShotsRequest,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
     """Regenerate specific shots."""
     project = await _get_project_or_404(project_id, session)
+    await _ensure_video_balance(project_id, session, principal, body.shot_ids)
 
     try:
         await transition_project_status(
@@ -452,8 +499,11 @@ async def regenerate_shots(
     await session.commit()
 
     # Enqueue video pipeline for the first pending shot
+    # 注：本端点重置分镜后走的是 run_shot_pipeline（Veo 视频），不是重跑分镜表，
+    # 所以按**视频**单价预扣，而不是 CREDIT_COST_SHOTLIST。计价一律按实际会调用
+    # 的外部服务来算。
     arq = await _get_arq_redis(redis)
-    job = await _enqueue_next_shot_task(project_id, session, arq, user)
+    job = await _enqueue_next_shot_task(project_id, session, arq, user, principal)
 
     return {"status": "queued", "message": "Shot regeneration queued"}
 
@@ -462,6 +512,7 @@ async def regenerate_shots(
 async def continue_generation(
     project_id: str,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
@@ -490,6 +541,8 @@ async def continue_generation(
     if not next_shot:
         raise HTTPException(status_code=400, detail="No pending shots to generate")
 
+    await credits.ensure_balance(principal, credits.video_cost(next_shot.shot_duration))
+
     try:
         await transition_project_status(
             project, ProjectStatus.SHOT_GENERATING, f"user:{user}", session, redis
@@ -499,7 +552,16 @@ async def continue_generation(
 
     # Directly enqueue video generation — no auto tail frame generation
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}")
+    reservation = await credits.reserve(
+        principal,
+        credits.video_cost(next_shot.shot_duration),
+        ref_type="shot_video",
+        ref_id=f"{project_id}:{next_shot.shot_id}",
+    )
+    await arq.enqueue_job(
+        "run_shot_pipeline", project_id, f"user:{user}",
+        **credits.enqueue_kwargs(reservation),
+    )
 
     return {"status": "queued", "message": "Next shot generation queued"}
 
@@ -561,6 +623,7 @@ async def ai_edit_shot(
     project_id: str,
     shot_id: int,
     body: ShotAiEditRequest,
+    principal=Depends(current_principal),
 ):
     """Use AI to revise a shot based on a user instruction."""
     from app.agents.shot_editor import run_shot_editor
@@ -607,10 +670,16 @@ async def ai_edit_shot(
         )
     # Session released here — now safe to do the long LLM call
     # Provider is selected inside run_shot_editor (DeepSeek if key set, else Gemini)
+    # 同步 LLM：先扣后调，调用失败当场退款（不必等 worker）。
+    reservation = await credits.reserve(
+        principal, credits.ai_edit_cost(),
+        ref_type="ai_edit", ref_id=f"{project_id}:{shot_id}",
+    )
     try:
         async with observability.project_context(project_id, "api-shot-editor-edit"):
             result = await run_shot_editor(**editor_kwargs)
     except Exception as e:
+        await credits.refund(reservation)
         raise HTTPException(status_code=502, detail=f"AI generation failed: {e}")
 
     return result
@@ -621,6 +690,7 @@ async def ai_edit_motion_prompt(
     project_id: str,
     shot_id: int,
     body: ShotAiEditRequest,
+    principal=Depends(current_principal),
 ):
     """Use AI to revise a shot's motion prompt based on a user instruction."""
     from app.agents.llm import GeminiProvider
@@ -668,6 +738,10 @@ async def ai_edit_motion_prompt(
         f"Output the revised full motion prompt in English:"
     )
 
+    reservation = await credits.reserve(
+        principal, credits.ai_edit_cost(),
+        ref_type="ai_edit_prompt", ref_id=f"{project_id}:{shot_id}",
+    )
     try:
         async with observability.project_context(project_id, "api-regenerate-motion"):
             new_prompt = await provider.generate_text(
@@ -678,6 +752,7 @@ async def ai_edit_motion_prompt(
                 operation="api-pipeline-regenerate-motion",
             )
     except Exception as e:
+        await credits.refund(reservation)
         raise HTTPException(status_code=502, detail=f"AI generation failed: {e}")
 
     return {"motion_prompt": new_prompt}
@@ -687,6 +762,7 @@ async def ai_edit_motion_prompt(
 async def rewrite_motion_prompt(
     project_id: str,
     shot_id: int,
+    principal=Depends(current_principal),
 ):
     """Re-generate a shot's motion prompt from scratch using the Director agent."""
     from app.agents.director import run_director as run_director_agent
@@ -716,6 +792,10 @@ async def rewrite_motion_prompt(
         project=settings.gemini_project, location=settings.gemini_location
     )
 
+    reservation = await credits.reserve(
+        principal, credits.ai_edit_cost(),
+        ref_type="rewrite_prompt", ref_id=f"{project_id}:{shot_id}",
+    )
     try:
         async with observability.project_context(project_id, "api-rewrite-motion"):
             # object_ref_paths holds COS keys — director.run_director does
@@ -741,6 +821,7 @@ async def rewrite_motion_prompt(
                     reference_image_paths=local_obj_refs or None,
                 )
     except Exception as e:
+        await credits.refund(reservation)
         raise HTTPException(status_code=502, detail=f"Director agent failed: {e}")
 
     return {"motion_prompt": new_prompt}
@@ -958,11 +1039,13 @@ async def generate_tail_frame(
     project_id: str,
     shot_id: int,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
     """[Deprecated wrapper] 创建 auto 尾帧候选（新入口：POST .../image-candidates）。"""
     await _get_project_or_404(project_id, session)
+    await credits.ensure_balance(principal, credits.image_cost())
     result = await session.execute(
         select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
     )
@@ -980,7 +1063,13 @@ async def generate_tail_frame(
     await session.refresh(cand)
 
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_image_candidate", project_id, shot_id, cand.id, f"user:{user}")
+    reservation = await credits.reserve(
+        principal, credits.image_cost(), ref_type="image_candidate", ref_id=cand.id
+    )
+    await arq.enqueue_job(
+        "run_image_candidate", project_id, shot_id, cand.id, f"user:{user}",
+        **credits.enqueue_kwargs(reservation),
+    )
     return {"status": "queued", "shot_id": shot_id, "candidate_id": cand.id}
 
 
@@ -989,11 +1078,13 @@ async def generate_first_frame(
     project_id: str,
     shot_id: int,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
     """[Deprecated wrapper] 创建 auto 首帧候选（新入口：POST .../image-candidates）。"""
     await _get_project_or_404(project_id, session)
+    await credits.ensure_balance(principal, credits.image_cost())
     result = await session.execute(
         select(Shot).where(Shot.project_id == project_id, Shot.shot_id == shot_id)
     )
@@ -1011,7 +1102,13 @@ async def generate_first_frame(
     await session.refresh(cand)
 
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_image_candidate", project_id, shot_id, cand.id, f"user:{user}")
+    reservation = await credits.reserve(
+        principal, credits.image_cost(), ref_type="image_candidate", ref_id=cand.id
+    )
+    await arq.enqueue_job(
+        "run_image_candidate", project_id, shot_id, cand.id, f"user:{user}",
+        **credits.enqueue_kwargs(reservation),
+    )
     return {"status": "queued", "shot_id": shot_id, "candidate_id": cand.id}
 
 
@@ -1020,6 +1117,7 @@ async def confirm_tail_frame(
     project_id: str,
     shot_id: int,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
@@ -1039,6 +1137,8 @@ async def confirm_tail_frame(
     if not shot.target_last_frame_path:
         raise HTTPException(status_code=400, detail="No target tail frame exists")
 
+    await credits.ensure_balance(principal, credits.video_cost(shot.shot_duration))
+
     shot.tf_confirmed = True
     session.add(shot)
     await session.commit()
@@ -1052,7 +1152,16 @@ async def confirm_tail_frame(
         raise HTTPException(status_code=409, detail=str(e))
 
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_shot_pipeline", project_id, f"user:{user}", shot_id)
+    reservation = await credits.reserve(
+        principal,
+        credits.video_cost(shot.shot_duration),
+        ref_type="shot_video",
+        ref_id=f"{project_id}:{shot_id}",
+    )
+    await arq.enqueue_job(
+        "run_shot_pipeline", project_id, f"user:{user}", shot_id,
+        **credits.enqueue_kwargs(reservation),
+    )
 
     return {
         "shot_id": shot_id,
@@ -2044,11 +2153,13 @@ async def character_calibrate_shot(
     project_id: str,
     shot_id: int,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
     """Calibrate a shot's last frame to match character reference images."""
     project = await _get_project_or_404(project_id, session)
+    await credits.ensure_balance(principal, credits.image_cost())
 
     # Validate project has character reference images
     ref_result = await session.execute(
@@ -2078,9 +2189,17 @@ async def character_calibrate_shot(
     session.add(shot)
     await session.commit()
 
+    # 角色校准走 Gemini 图像模型（settings.cc_model），是真金白银的外部调用，
+    # 按图像单价扣。FR-9.1 的表里没有单列这一项，但它既不在「不扣」那几行里，
+    # 也确实产生费用——漏扣就等于开了一条免费通道。
     arq = await _get_arq_redis(redis)
+    reservation = await credits.reserve(
+        principal, credits.image_cost(),
+        ref_type="character_calibrate", ref_id=f"{project_id}:{shot_id}",
+    )
     await arq.enqueue_job(
         "run_character_calibrate", project_id, shot_id, f"user:{user}",
+        **credits.enqueue_kwargs(reservation),
     )
 
     return {"status": "queued", "shot_id": shot_id}
@@ -2090,6 +2209,7 @@ async def character_calibrate_shot(
 async def character_calibrate_all(
     project_id: str,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
@@ -2119,6 +2239,8 @@ async def character_calibrate_all(
     if not shots:
         raise HTTPException(status_code=400, detail="No eligible shots to calibrate")
 
+    await credits.ensure_balance(principal, credits.image_cost() * len(shots))
+
     shot_ids = []
     for shot in shots:
         shot.cc_status = "calibrating"
@@ -2127,9 +2249,19 @@ async def character_calibrate_all(
         shot_ids.append(shot.shot_id)
     await session.commit()
 
+    # 批量校准：**每个分镜一笔独立预扣**，这样 worker 能按分镜粒度退款
+    # （失败几个退几个），而不是整单退或整单不退。
+    reservations: list[Optional[str]] = []
+    for sid in shot_ids:
+        reservations.append(await credits.reserve(
+            principal, credits.image_cost(),
+            ref_type="character_calibrate", ref_id=f"{project_id}:{sid}",
+        ))
+
     arq = await _get_arq_redis(redis)
     await arq.enqueue_job(
         "run_character_calibrate_batch", project_id, shot_ids, f"user:{user}",
+        **({"reservation_ids": reservations} if any(reservations) else {}),
     )
 
     return {"status": "queued", "shot_ids": shot_ids}

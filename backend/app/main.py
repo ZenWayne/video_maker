@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import MutableHeaders
 from fastapi.responses import JSONResponse
 
+from app.auth_middleware import AuthMiddleware
 from app.config import settings
 from app.db import init_db
 from app.services import cos_client
@@ -40,6 +41,26 @@ def check_video_provider() -> None:
         logger.info("Video provider: vertex (Veo via Vertex AI)")
 
 
+def check_auth_config() -> None:
+    """把鉴权/计费开关的实际状态打到日志里。
+
+    ``AUTH_ENFORCED`` 决定「未认证是否放行」，是唯一的回滚开关；它写在
+    gitignore 的 config.env 里，容易与预期不符，所以每次启动都明说一次。
+    """
+    if settings.auth_enforced:
+        logger.info("AUTH_ENFORCED=true — 未认证请求一律 401，项目按 owner_id 严格隔离")
+    else:
+        logger.warning(
+            "AUTH_ENFORCED=false — 未认证请求照常放行（与鉴权上线前行为一致）。"
+            "会话/注册/点数接口可用，但不构成任何访问控制。"
+        )
+    if settings.machine_token and not settings.machine_token_user:
+        logger.warning(
+            "机器令牌已配置但未绑定账号（MACHINE_TOKEN_USER 为空）："
+            "持有该令牌的调用方不受归属过滤、也不扣点数。请按高权限凭据保管。"
+        )
+
+
 async def get_redis() -> aioredis.Redis:
     """Get Redis client dependency."""
     if _redis_client is None:
@@ -55,6 +76,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Startup
     # Surface the active video provider (loud warning if not vertex)
     check_video_provider()
+    check_auth_config()
 
     # Credentials must be warmed before serving: to_media_url() is a *sync*
     # function (called from ~50 sync serializers) that only reads the cache —
@@ -79,6 +101,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if _redis_client:
         await _redis_client.aclose()
         _redis_client = None
+    # 会话服务在没有全局客户端时会自建一条连接（脚本/测试路径），一并关掉。
+    from app.services.auth import close_own_redis
+    await close_own_redis()
     await cos_client.close_client()
 
 
@@ -89,16 +114,6 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
-
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins.split(","),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 class NoStoreAPIMiddleware:
     """Mark every /api/ response as uncacheable.
@@ -141,7 +156,24 @@ class NoStoreAPIMiddleware:
         await self.app(scope, receive, send_with_no_store)
 
 
+# ── 中间件顺序 ──────────────────────────────────────────────────────────────
+# add_middleware 是**头插**：最后添加的包在最外层。所以下面的顺序意味着
+#   CORS → NoStore → Auth → 路由
+# CORS 必须在最外层：AuthMiddleware 直接构造 401 响应返回，如果 CORS 在它
+# 里面，这个 401 就不带 Access-Control-Allow-Origin，浏览器只会报一个跨域
+# 错误，前端连「我未登录」都读不到，无从触发跳登录页。
+# NoStore 在 Auth 外面：401/404 这类拒绝响应同样不该被任何中间缓存留下。
+app.add_middleware(AuthMiddleware)
 app.add_middleware(NoStoreAPIMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    # allow_credentials=True 时规范禁止用 "*"，所以来源必须精确列举。
+    # 已知坑：逗号后带空格会静默失配，这里统一 strip 掉。
+    allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.exception_handler(Exception)
@@ -176,8 +208,10 @@ async def health_check():
 
 # Import and include routers
 from app.api import (projects, pipeline, uploads, assets, stream, debug,
-                     voice, image_candidates, content_analysis)
+                     voice, image_candidates, content_analysis, auth, admin)
 
+app.include_router(auth.router, prefix="/api")
+app.include_router(admin.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(pipeline.router, prefix="/api")
 app.include_router(voice.router, prefix="/api")
