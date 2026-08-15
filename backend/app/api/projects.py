@@ -3,11 +3,13 @@
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Query
-from sqlalchemy import select, func
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.identity import current_principal, require_user
+from app.config import settings
 from app.db import get_session
 from app.models.project import Project, Shot, ReferenceImage
 from app.models.schemas import (
@@ -98,11 +100,8 @@ def _shot_to_dict(s) -> dict:
     }
 
 
-def _require_user(x_user_name: Optional[str] = Header(default=None)) -> str:
-    """Require X-User-Name header."""
-    if not x_user_name:
-        raise HTTPException(status_code=400, detail="X-User-Name header required")
-    return x_user_name
+# 兼容旧调用点的别名；实现见 app.api.identity（会话优先，X-User-Name 回落）。
+_require_user = require_user
 
 
 @router.get("/projects", response_model=ProjectList)
@@ -112,6 +111,7 @@ async def list_projects(
     sort: str = Query(default="created_at:desc"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
 ):
     """List projects with filtering and pagination."""
@@ -123,7 +123,19 @@ async def list_projects(
 
     if status:
         query = query.where(Project.status == status)
-    if creator:
+
+    if principal is not None and principal.is_billable:
+        # 已登录：按会话身份过滤，**忽略 creator 查询参数** —— 把过滤条件交给
+        # 调用方等于没有过滤。注意仅过滤列表是不够的，逐对象归属校验在
+        # app.auth_middleware 里（知道 id 也拿不到别人的项目）。
+        conditions = [Project.owner_id == principal.user_id]
+        if not settings.auth_enforced:
+            # 强制校验打开之前，存量未迁移数据（owner_id IS NULL）仍然可见，
+            # 否则 P2 阶段一登录就是空列表。P3 迁移后不再有 NULL 行。
+            conditions.append(Project.owner_id.is_(None))
+        query = query.where(or_(*conditions))
+    elif creator:
+        # 匿名调用（仅 AUTH_ENFORCED=false 时可能）保持鉴权上线前的行为。
         query = query.where(Project.creator_name == creator)
 
     # Sorting
@@ -182,6 +194,7 @@ async def list_projects(
 async def create_project(
     body: ProjectCreate,
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
 ):
     """Create a new project."""
@@ -189,6 +202,9 @@ async def create_project(
         title=body.title,
         theme_text=body.theme_text,
         creator_name=user,
+        # 归属以 owner_id 为准；匿名创建（AUTH_ENFORCED=false）留 NULL，与存量
+        # 数据同处境，由 P3 的迁移脚本一并归到 stella 名下。
+        owner_id=principal.user_id if (principal and principal.is_billable) else None,
         status=ProjectStatus.DRAFT.value,
         aspect_ratio=body.aspect_ratio,
     )

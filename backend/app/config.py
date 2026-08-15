@@ -291,6 +291,38 @@ class Settings(BaseSettings):
     # CORS (from config.yml / config.env)
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    # ── 应用级鉴权（FRD 2026-08-11） ────────────────────────────────────────
+    # 唯一的「未认证是否放行」开关。false（默认）= 线上行为与鉴权上线前一致：
+    # 无凭据照常放行、不按用户过滤、不扣点数。true = 默认拒绝，且按 owner_id
+    # 严格隔离。分期上线见 FRD §4.1（P1/P2 保持 false，P3 才打开）。
+    auth_enforced: bool = False
+    # 会话有效期（滑动过期）。每次通过校验的请求都会把 TTL 重置回该值。
+    session_ttl_days: int = 7
+    session_cookie_name: str = "session"
+    # 前后端是**不同站点**（Vercel vs 集群），跨站 cookie 必须 SameSite=None
+    # + Secure，否则登录后一刷新就掉线。本地 http 调试可置 false。
+    session_cookie_secure: bool = True
+    # 机器凭据（MCP 等非浏览器调用方）。来自 secret，绝不写进 config.yml。
+    machine_token: str = ""
+    # 机器令牌绑定到哪个账号：置空 = 服务主体（不受 owner 过滤、不扣点数）。
+    # 设成某个用户名后，机器调用与该用户完全同权同计费。
+    machine_token_user: str = ""
+    # 注册限流：每个来源 IP 每 window 秒最多注册 N 次（FR-10，已定 1 次/小时）。
+    register_rate_limit: int = 1
+    register_rate_limit_window_sec: int = 3600
+    # 注册赠送点数 = 0（FR-0）：消灭批量注册的经济动机。
+    register_grant_credits: int = 0
+
+    # ── 点数单价（FRD §5.1，锚点 1 点 = $0.01 底层成本） ────────────────────
+    # ⚠️ 换 VEO_MODEL 必须同步改 credit_cost_video_per_second：
+    # Fast $0.15/秒 vs 标准 $0.75/秒，差 5 倍。
+    credit_cost_video_per_second: int = 15
+    credit_cost_script: int = 5
+    credit_cost_shotlist: int = 5
+    credit_cost_image: int = 8
+    credit_cost_analysis: int = 3
+    credit_cost_ai_edit: int = 1
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

@@ -5,6 +5,20 @@ import httpx
 HEADERS = {"X-User-Name": "mcp-agent"}
 
 
+def _auth_headers() -> dict[str, str]:
+    """机器凭据：``Authorization: Bearer <token>``（FR-5）。
+
+    与会话 cookie **二者满足其一即放行**。每次请求时才读配置，方便在测试里
+    monkeypatch，也不会把启动时的空值固化下来。
+    """
+    from mcp_server.config import settings
+
+    headers = dict(HEADERS)
+    if settings.machine_token:
+        headers["Authorization"] = f"Bearer {settings.machine_token}"
+    return headers
+
+
 class BackendError(Exception):
     def __init__(self, status_code: int, detail: str):
         self.status_code = status_code
@@ -32,7 +46,9 @@ class BackendClient:
     async def _request(self, method: str, path: str, json: Any = None,
                        data: Any = None, files: Any = None) -> Any:
         client = await self._http()
-        resp = await client.request(method, path, json=json, data=data, files=files, headers=HEADERS)
+        resp = await client.request(
+            method, path, json=json, data=data, files=files, headers=_auth_headers()
+        )
         if resp.status_code >= 400:
             try:
                 detail = resp.json().get("detail", resp.text)

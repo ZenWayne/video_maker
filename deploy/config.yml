@@ -44,3 +44,33 @@ cos_bucket: video-maker-dev-1414782845
 cos_scheme: https
 cos_auth_mode: static
 cos_signed_url_ttl_sec: 7200
+
+# ── 应用级鉴权（FRD 2026-08-11） ──────────────────────────────────────────
+# AUTH_ENFORCED 是唯一的「未认证是否放行」开关，也是唯一的回滚手段：
+# 改回 false 即恢复放行，无需回滚镜像。
+#   P1（后端上线）/ P2（前端上线）：保持 false —— 线上行为与鉴权上线前一致。
+#   P3：完成 FR-8.3 存量数据迁移 + 备份数据库之后才置 true。
+# ⚠️ 顺序不能颠倒：先开强制校验再迁移，中间窗口里用户会看到空列表。
+AUTH_ENFORCED: "false"
+SESSION_TTL_DAYS: "7"
+# 跨站 cookie 必须 Secure（前端在 Vercel、API 在集群，是不同站点）。
+# 只有本地纯 http 调试才需要置 false。
+SESSION_COOKIE_SECURE: "true"
+# 机器令牌绑定的账号，留空 = 服务主体（不受归属过滤、不扣点数）。
+MACHINE_TOKEN_USER: ""
+# 注册限流：每 IP 每小时 1 次（FR-10）。上线后观察 429 触发量，
+# 若真实用户（CGNAT/办公室 NAT 共享出口）被误伤，优先放宽到按天计。
+REGISTER_RATE_LIMIT: "1"
+REGISTER_RATE_LIMIT_WINDOW_SEC: "3600"
+# 注册赠送 0 点：消灭批量注册的经济动机，点数只由管理员定向发放。
+REGISTER_GRANT_CREDITS: "0"
+
+# 点数单价（锚点：1 点 = $0.01 底层成本）
+# ⚠️ 换 VEO_MODEL 必须同步改 CREDIT_COST_VIDEO_PER_SECOND：
+# Fast $0.15/秒 vs 标准 $0.75/秒，差 5 倍，改一个不改另一个直接亏钱。
+CREDIT_COST_VIDEO_PER_SECOND: "15"
+CREDIT_COST_SCRIPT: "5"
+CREDIT_COST_SHOTLIST: "5"
+CREDIT_COST_IMAGE: "8"
+CREDIT_COST_ANALYSIS: "3"
+CREDIT_COST_AI_EDIT: "1"

@@ -39,6 +39,7 @@ services:
       - langfuse_secret_key
       - cos_secret_id
       - cos_secret_key
+      - machine_token
     env_file:
       - path: ./config.env
         required: true
@@ -62,6 +63,7 @@ services:
              export LANGFUSE_SECRET_KEY=$(cat /run/secrets/langfuse_secret_key) &&
              export COS_SECRET_ID=$(cat /run/secrets/cos_secret_id) &&
              export COS_SECRET_KEY=$(cat /run/secrets/cos_secret_key) &&
+             export MACHINE_TOKEN=$(cat /run/secrets/machine_token) &&
              uv run --project . uvicorn app.main:app --host 0.0.0.0 --port 8002
              --reload --reload-dir /app/app --reload-dir /app/worker"
     depends_on:
@@ -95,6 +97,7 @@ services:
       - langfuse_secret_key
       - cos_secret_id
       - cos_secret_key
+      - machine_token
     env_file:
       - path: ./config.env
         required: true
@@ -119,6 +122,7 @@ services:
              export LANGFUSE_SECRET_KEY=$(cat /run/secrets/langfuse_secret_key) &&
              export COS_SECRET_ID=$(cat /run/secrets/cos_secret_id) &&
              export COS_SECRET_KEY=$(cat /run/secrets/cos_secret_key) &&
+             export MACHINE_TOKEN=$(cat /run/secrets/machine_token) &&
              uv run --project . --group asr python -m arq worker.arq_worker.WorkerSettings"
     depends_on:
       - redis
@@ -188,11 +192,14 @@ services:
       # internal backend must bypass the proxy (proxy can't resolve container names)
       NO_PROXY: video-maker-backend-dev,localhost,127.0.0.1
       no_proxy: video-maker-backend-dev,localhost,127.0.0.1
+    secrets:
+      - machine_token
     # host.containers.internal does not route to the host under this network; pin it.
     extra_hosts:
       - "host.containers.internal:100.121.231.24"
     command: >
-      uv run --project . python -m mcp_server.server
+      sh -c "export MACHINE_TOKEN=$(cat /run/secrets/machine_token) &&
+             uv run --project . python -m mcp_server.server"
     depends_on:
       - backend
     restart: unless-stopped
@@ -245,3 +252,5 @@ secrets:
     file: ./secrets/cos_secret_id  # written by: make secrets
   cos_secret_key:
     file: ./secrets/cos_secret_key  # written by: make secrets
+  machine_token:
+    file: ./secrets/machine_token  # written by: make secrets — MCP 的 Bearer 令牌

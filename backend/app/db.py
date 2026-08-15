@@ -148,3 +148,13 @@ async def _ensure_columns(conn) -> None:
     ]:
         if not await _has_column("projects", col):
             await conn.execute(sa.text(f"ALTER TABLE projects ADD COLUMN {col} {typ}"))
+
+    # 归属字段（应用级鉴权 FR-8.3）。create_all 只建缺失的**表**，不会给已存在
+    # 的 projects 表加列，所以新列必须在这里补。留 NULL 表示「鉴权上线前的存量
+    # 数据」，由 P3 的回填脚本指向 stella；ALTER TABLE 不能加 REFERENCES，外键
+    # 约束只对新建库（create_all 路径）生效。
+    if not await _has_column("projects", "owner_id"):
+        await conn.execute(sa.text("ALTER TABLE projects ADD COLUMN owner_id VARCHAR(36)"))
+        await conn.execute(
+            sa.text("CREATE INDEX IF NOT EXISTS ix_projects_owner_id ON projects (owner_id)")
+        )

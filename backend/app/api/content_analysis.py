@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.db import AsyncSession as session_factory
 from app.main import get_redis
+from app.api.identity import current_principal
 from app.api.projects import _require_user
+from app.services import credits
 from app.agents.asr import get_supported_language_codes
 from app.models.project import ContentAnalysis, ReferenceSample, Project
 from app.models.schemas import (
@@ -58,12 +60,15 @@ async def create_analysis(
     region_hint: Optional[str] = Form(default=None),
     files: List[UploadFile] = File(...),
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="至少上传一个参考视频")
     region_hint = _validate_region_hint(region_hint)
+    # 预检在落库+上传样本视频之前，否则 402 会留下一堆没人管的 COS 对象。
+    await credits.ensure_balance(principal, credits.analysis_cost())
     analysis = ContentAnalysis(title=title, region_hint=region_hint)
     session.add(analysis)
     await session.flush()  # 拿 analysis.id
@@ -85,7 +90,13 @@ async def create_analysis(
     await session.refresh(analysis)
 
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_content_analysis", analysis.id, f"user:{user}")
+    reservation = await credits.reserve(
+        principal, credits.analysis_cost(), ref_type="analysis", ref_id=analysis.id
+    )
+    await arq.enqueue_job(
+        "run_content_analysis", analysis.id, f"user:{user}",
+        **credits.enqueue_kwargs(reservation),
+    )
     return analysis
 
 

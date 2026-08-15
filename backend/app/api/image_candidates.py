@@ -6,13 +6,15 @@ from pathlib import Path
 from typing import List, Optional
 
 from arq.connections import ArqRedis
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.identity import current_principal, require_user
 from app.db import get_session
 from app.main import get_redis
 from app.models.project import ImageCandidate, Project, ReferenceImage, Shot
+from app.services import credits
 from app.services.storage import (
     to_media_url, ts_uuid_name, shot_key,
     shot_candidates_prefix, shot_custom_frames_prefix,
@@ -26,10 +28,8 @@ router = APIRouter()
 VALID_CREATE_SLOTS = {"first_frame", "tail_frame"}
 
 
-def _require_user(x_user_name: Optional[str] = Header(default=None)) -> str:
-    if not x_user_name:
-        raise HTTPException(status_code=400, detail="X-User-Name header required")
-    return x_user_name
+# 兼容旧调用点的别名；实现见 app.api.identity（会话优先，X-User-Name 回落）。
+_require_user = require_user
 
 
 async def _get_project_or_404(project_id: str, session: AsyncSession) -> Project:
@@ -82,6 +82,7 @@ async def create_image_candidate(
     include_shot_refs: bool = Form(default=True),
     files: List[UploadFile] = File(default=[]),
     user: str = Depends(_require_user),
+    principal=Depends(current_principal),
     session: AsyncSession = Depends(get_session),
     redis=Depends(get_redis),
 ):
@@ -95,6 +96,8 @@ async def create_image_candidate(
         )
     await _get_project_or_404(project_id, session)
     shot = await _get_shot_or_404(project_id, shot_id, session)
+    # 预检放在建候选行/上传参考图之前，402 不该留下孤儿 generating 候选。
+    await credits.ensure_balance(principal, credits.image_cost())
 
     custom_prompt = (custom_prompt or "").strip() or None
 
@@ -157,7 +160,13 @@ async def create_image_candidate(
     await session.refresh(cand)
 
     arq = await _get_arq_redis(redis)
-    await arq.enqueue_job("run_image_candidate", project_id, shot_id, cand.id, f"user:{user}")
+    reservation = await credits.reserve(
+        principal, credits.image_cost(), ref_type="image_candidate", ref_id=cand.id
+    )
+    await arq.enqueue_job(
+        "run_image_candidate", project_id, shot_id, cand.id, f"user:{user}",
+        **credits.enqueue_kwargs(reservation),
+    )
 
     return {"status": "queued", "candidate": _candidate_to_dict(cand)}
 

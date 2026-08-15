@@ -22,6 +22,7 @@ dependencies = [
     "langfuse>=3.0",
     "fastmcp>=2.0",
     "cos-python-sdk-v5>=1.9",
+    "bcrypt>=4.1",
 ]
 
 [dependency-groups]

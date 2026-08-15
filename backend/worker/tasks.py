@@ -4,6 +4,7 @@ import json
 import asyncio
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -146,6 +147,39 @@ class WorkerContext:
         return self.ctx["redis"]
 
 
+async def refund_reservation(session_factory, reservation_id: Optional[str]) -> None:
+    """任务失败/没活干时把预扣退回去。
+
+    退款是**常规路径**不是边缘情况：Veo 确实会失败（配置里专门有
+    kie_max_retries / "upstream gen failed" 这类项）。不退等于用户白扣点数。
+
+    幂等由 credit_ledger 上的唯一索引保证，所以重复调用安全；但退款本身绝不能
+    把任务的失败吞掉——这里只记日志，不改变调用方的控制流。
+    """
+    if not reservation_id:
+        return
+    try:
+        from app.services import credits
+
+        await credits.refund(reservation_id, session_factory=session_factory)
+    except Exception:  # noqa: BLE001 — 退款失败不能盖掉原始失败原因
+        logger.error("退款失败：reservation=%s", reservation_id, exc_info=True)
+
+
+@asynccontextmanager
+async def refund_on_error(session_factory, reservation_id: Optional[str]):
+    """未预期异常导致任务整体失败时兜底退款。
+
+    只兜「异常」这一条路；任务内部那些 ``return`` 掉的失败/无事可做分支必须自己
+    显式退——它们不抛异常，这里看不见。
+    """
+    try:
+        yield
+    except BaseException:
+        await refund_reservation(session_factory, reservation_id)
+        raise
+
+
 async def _mark_shot_failed(
     session: AsyncSession,
     redis,
@@ -187,7 +221,10 @@ def get_prompts_dir() -> Path:
 
 
 @observability.traced_job("worker-screenwriter-run", tags=["screenwriter"])
-async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> None:
+async def run_screenwriter(
+    ctx: Dict[str, Any], project_id: str, actor: str,
+    reservation_id: Optional[str] = None,
+) -> None:
     """
     Run screenwriter agent to generate storyboard.
 
@@ -195,18 +232,20 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
         ctx: arq context with session_factory and redis
         project_id: Project ID
         actor: Who triggered this (e.g., 'user:alice')
+        reservation_id: 入队前预扣的流水 id；任务失败时按它退款。
     """
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory
     redis = worker_ctx.redis
 
-    async with session_factory() as session:
+    async with refund_on_error(session_factory, reservation_id), session_factory() as session:
         # Get project
         result = await session.execute(select(Project).where(Project.id == project_id))
         project = result.scalar_one_or_none()
 
         if not project:
             logger.error(f"Project {project_id} not found")
+            await refund_reservation(session_factory, reservation_id)
             return
 
         # Load reference images
@@ -252,6 +291,7 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
                 await transition_project_status(
                     project, ProjectStatus.FAILED, "system:worker", session, redis
                 )
+                await refund_reservation(session_factory, reservation_id)
                 return
 
             try:
@@ -269,6 +309,7 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
                 await transition_project_status(
                     project, ProjectStatus.FAILED, "system:worker", session, redis
                 )
+                await refund_reservation(session_factory, reservation_id)
                 return
 
         # Write storyboard.json
@@ -328,6 +369,7 @@ async def run_screenwriter(ctx: Dict[str, Any], project_id: str, actor: str) -> 
 @observability.traced_job("worker-shot-pipeline-run", tags=["shot-pipeline"])
 async def run_shot_pipeline(
     ctx: Dict[str, Any], project_id: str, actor: str, shot_id: int | None = None,
+    reservation_id: Optional[str] = None,
 ) -> None:
     """
     Run shot pipeline: director + video generation for ONE pending shot.
@@ -342,18 +384,22 @@ async def run_shot_pipeline(
         actor: Who triggered this
         shot_id: Optional — when given, process this specific shot instead of
                  the first pending one (used by confirm-tail-frame).
+        reservation_id: 入队前按该分镜时长预扣的流水 id。本任务一次只处理**一个**
+                 分镜，所以「一次入队 = 一笔预扣 = 一个可独立退款的单位」，
+                 天然就是分镜粒度：失败几个退几个。
     """
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory
     redis = worker_ctx.redis
 
-    async with session_factory() as session:
+    async with refund_on_error(session_factory, reservation_id), session_factory() as session:
         # Get project
         result = await session.execute(select(Project).where(Project.id == project_id))
         project = result.scalar_one_or_none()
 
         if not project:
             logger.error(f"Project {project_id} not found")
+            await refund_reservation(session_factory, reservation_id)
             return
 
         if shot_id is not None:
@@ -369,6 +415,7 @@ async def run_shot_pipeline(
                 await transition_project_status(
                     project, ProjectStatus.SHOT_REVIEW, "system:worker", session, redis
                 )
+                await refund_reservation(session_factory, reservation_id)
                 return
         else:
             # Get pending shots
@@ -387,6 +434,8 @@ async def run_shot_pipeline(
                 await transition_project_status(
                     project, ProjectStatus.SHOT_REVIEW, "system:worker", session, redis
                 )
+                # 一个分镜都没生成，预扣必须原样退回。
+                await refund_reservation(session_factory, reservation_id)
                 return
 
             shot = pending_shots[0]
@@ -635,6 +684,8 @@ async def run_shot_pipeline(
         except Exception as e:
             logger.error(f"Shot {shot.shot_id} failed: {e}")
             has_failures = True
+            # 这个分镜没产出，退它自己的那一份（Veo 失败是常规路径）。
+            await refund_reservation(session_factory, reservation_id)
             await _mark_shot_failed(
                 session, redis, project_id, shot, e,
                 status_field="status", status_value=ShotStatus.FAILED.value,
@@ -738,7 +789,8 @@ async def _resolve_ff_context(shot: Shot) -> str | None:
 
 @observability.traced_job("worker-image-candidate-run", tags=["image-candidate"])
 async def run_image_candidate(
-    ctx: Dict[str, Any], project_id: str, shot_id: int, candidate_id: str, actor: str
+    ctx: Dict[str, Any], project_id: str, shot_id: int, candidate_id: str, actor: str,
+    reservation_id: Optional[str] = None,
 ) -> None:
     """统一图片候选生成：模式 = slot + 有无 custom_prompt；不触碰 project 状态机。
 
@@ -768,6 +820,7 @@ async def run_image_candidate(
         if not project or not shot or not cand:
             logger.error("run_image_candidate: missing project/shot/candidate (%s/%s/%s)",
                          project_id, shot_id, candidate_id)
+            await refund_reservation(session_factory, reservation_id)
             return
 
         await publish_event(redis, project_id, {
@@ -908,6 +961,7 @@ async def run_image_candidate(
 
         except Exception as e:
             logger.error("Image candidate %s failed: %s", candidate_id, e, exc_info=True)
+            await refund_reservation(session_factory, reservation_id)
             cand.status = "failed"
             cand.error = str(e)
             if cand.slot == "cc":
@@ -1322,7 +1376,8 @@ async def _do_character_calibrate_one(
 
 @observability.traced_job("worker-character-calibrate-run", tags=["character-calibrate"])
 async def run_character_calibrate(
-    ctx: Dict[str, Any], project_id: str, shot_id: int, actor: str
+    ctx: Dict[str, Any], project_id: str, shot_id: int, actor: str,
+    reservation_id: Optional[str] = None,
 ) -> None:
     """Character-calibrate a single shot's last frame."""
     worker_ctx = WorkerContext(ctx)
@@ -1339,20 +1394,32 @@ async def run_character_calibrate(
         refs = result.scalars().all()
         if not refs:
             logger.error("Project %s has no character reference images", project_id)
+            await refund_reservation(session_factory, reservation_id)
             return
 
     ref_paths = [r.storage_path for r in refs]
-    await _do_character_calibrate_one(session_factory, redis, project_id, shot_id, ref_paths)
+    async with refund_on_error(session_factory, reservation_id):
+        await _do_character_calibrate_one(
+            session_factory, redis, project_id, shot_id, ref_paths
+        )
 
 
 @observability.traced_job("worker-character-calibrate-batch-run", tags=["character-calibrate"])
 async def run_character_calibrate_batch(
-    ctx: Dict[str, Any], project_id: str, shot_ids: list[int], actor: str
+    ctx: Dict[str, Any], project_id: str, shot_ids: list[int], actor: str,
+    reservation_ids: Optional[list[Optional[str]]] = None,
 ) -> None:
-    """Character-calibrate multiple shots' last frames."""
+    """Character-calibrate multiple shots' last frames.
+
+    ``reservation_ids`` 与 ``shot_ids`` 一一对应：每个分镜一笔独立预扣，失败的
+    那个分镜退它自己那笔，不整单退也不整单不退。
+    """
     worker_ctx = WorkerContext(ctx)
     session_factory = worker_ctx.session_factory
     redis = worker_ctx.redis
+
+    reservations: list[Optional[str]] = list(reservation_ids or [])
+    reservations += [None] * (len(shot_ids) - len(reservations))
 
     async with session_factory() as session:
         result = await session.execute(
@@ -1364,18 +1431,21 @@ async def run_character_calibrate_batch(
         refs = result.scalars().all()
         if not refs:
             logger.error("Project %s has no character reference images", project_id)
+            for reservation in reservations:
+                await refund_reservation(session_factory, reservation)
             return
 
     ref_paths = [r.storage_path for r in refs]
 
     calibrated = 0
     failed = 0
-    for sid in shot_ids:
+    for sid, reservation in zip(shot_ids, reservations):
         try:
             await _do_character_calibrate_one(session_factory, redis, project_id, sid, ref_paths)
             calibrated += 1
         except Exception:
             failed += 1
+            await refund_reservation(session_factory, reservation)
 
     await publish_event(
         redis, project_id,
@@ -1393,7 +1463,10 @@ async def run_character_calibrate_batch(
 # ============== Content Analysis ==============
 
 
-async def run_content_analysis(ctx: Dict[str, Any], analysis_id: str, actor: str) -> None:
+async def run_content_analysis(
+    ctx: Dict[str, Any], analysis_id: str, actor: str,
+    reservation_id: Optional[str] = None,
+) -> None:
     """三步管线：逐样本转写（本地 ASR）→ 归纳统计 → 一次 LLM 调用生成 creation brief。
 
     逐样本转写失败不拖垮整体（仅记录该样本失败原因，继续其余样本）；仅当
@@ -1422,6 +1495,7 @@ async def run_content_analysis(ctx: Dict[str, Any], analysis_id: str, actor: str
         )).scalar_one_or_none()
         if analysis is None:
             logger.error("ContentAnalysis %s not found", analysis_id)
+            await refund_reservation(session_factory, reservation_id)
             return
         if analysis.status == ContentAnalysisStatus.COMPLETED.value:
             # Guard against re-entry for an analysis that already reached a
@@ -1510,6 +1584,7 @@ async def run_content_analysis(ctx: Dict[str, Any], analysis_id: str, actor: str
                 logger.error("Content analysis brief failed for %s: %s", analysis_id, e)
                 analysis.status = ContentAnalysisStatus.FAILED.value
                 analysis.error_message = f"brief 生成失败: {e}"
+                await refund_reservation(session_factory, reservation_id)
             await session.commit()
             await _publish(analysis)
         except asyncio.CancelledError:
@@ -1528,6 +1603,7 @@ async def run_content_analysis(ctx: Dict[str, Any], analysis_id: str, actor: str
             analysis.error_message = "分析被取消（任务超时或 worker 重启）"
             await session.commit()
             await _publish(analysis)
+            await refund_reservation(session_factory, reservation_id)
             raise
         except Exception as e:  # noqa: BLE001 — 安全网：任何未预期异常都必须
             # 把 analysis 推进到终态，绝不能卡在 transcribing/analyzing 不动。
@@ -1542,3 +1618,4 @@ async def run_content_analysis(ctx: Dict[str, Any], analysis_id: str, actor: str
             analysis.error_message = f"分析失败: {e}"
             await session.commit()
             await _publish(analysis)
+            await refund_reservation(session_factory, reservation_id)
