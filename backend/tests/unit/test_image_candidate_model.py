@@ -1,23 +1,14 @@
 """ImageCandidate 模型 + 序列化 + candidates 目录 helper."""
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy.pool import StaticPool
 
-from app.models.project import Base, Project, Shot
+from app.models.project import Project, Shot
 
 
 @pytest.fixture
-async def sf():
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
-    await engine.dispose()
+async def sf(db_session_factory):
+    """沿用原名 sf，实际委托给 tests/conftest.py 的 PostgreSQL 会话工厂。"""
+    return db_session_factory
 
 
 async def _seed(sf):

@@ -39,9 +39,15 @@ class DbRef:
 
 
 async def _table_exists(conn, table: str) -> bool:
-    r = await conn.execute(sa.text(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=:t"), {"t": table})
-    return r.first() is not None
+    """方言无关的建表探测。
+
+    原实现查 ``sqlite_master``——那是 SQLite 专有表，在 PostgreSQL 上会抛
+    UndefinedTableError。改用 SQLAlchemy 的 inspector，两种后端都能用。
+    """
+    def _has(sync_conn) -> bool:
+        return sa.inspect(sync_conn).has_table(table)
+
+    return await conn.run_sync(_has)
 
 
 def _refs_from_value(spec, pk, raw: str) -> list[DbRef]:

@@ -1,11 +1,9 @@
-"""Fixtures for MCP server tests: real backend ASGI app over in-memory SQLite."""
+"""Fixtures for MCP server tests: real backend ASGI app over PostgreSQL."""
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy.pool import StaticPool
 
-from app.models.project import Base, Project, Shot
+from app.models.project import Project, Shot
 
 # conftest_cos.py (under tests/integration/) defines the cos_prefix fixture used
 # by COS-backed MCP tests. Re-export it here for the same reason
@@ -15,24 +13,6 @@ from tests.integration.conftest_cos import cos_prefix  # noqa: F401
 from tests.integration.conftest import install_fake_cos_credentials  # noqa: F401
 
 USER = "mcp-agent"
-
-
-@pytest.fixture
-async def db_engine():
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
-
-
-@pytest.fixture
-async def db_session_factory(db_engine):
-    return async_sessionmaker(db_engine, expire_on_commit=False, autoflush=False)
 
 
 @pytest.fixture

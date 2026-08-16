@@ -6,10 +6,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy.pool import StaticPool
 
-from app.models.project import Base, Project, Shot, ReferenceImage, ReferenceSample
+from app.models.project import Project, Shot, ReferenceImage, ReferenceSample
 
 # conftest_cos.py defines the cos_prefix fixture used by COS integration tests;
 # it isn't named conftest.py so pytest won't auto-discover it on its own.
@@ -86,24 +84,6 @@ def install_fake_cos_credentials(monkeypatch):
         {"secret_id": "fake-id", "secret_key": "fake-key", "token": None},
     )
     monkeypatch.setattr(cos_client, "_cred_expires_at", None)
-
-
-@pytest.fixture
-async def db_engine():
-    engine = create_async_engine(
-        "sqlite+aiosqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    await engine.dispose()
-
-
-@pytest.fixture
-async def db_session_factory(db_engine):
-    return async_sessionmaker(db_engine, expire_on_commit=False, autoflush=False)
 
 
 @pytest.fixture

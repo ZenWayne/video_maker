@@ -33,12 +33,12 @@ async def _seed_legacy_rows(sf, storage_root: Path):
         await s.execute(sa.text(
             "INSERT INTO projects (id,title,theme_text,creator_name,status,aspect_ratio,"
             "storyboard_path,auto_voice_calibrate) "
-            "VALUES (:i,'t','t','a','draft','9:16',:sb,0)"),
+            "VALUES (:i,'t','t','a','draft','9:16',:sb,false)"),
             {"i": pid, "sb": f"storage/projects/{pid}/storyboard.json"})
         await s.execute(sa.text(
             "INSERT INTO shots (project_id,shot_id,text,shot_type,visual_description,shot_duration,"
             "status,align_with_previous,use_prev_last_frame,auto_trim,video_path,last_frame_path) "
-            "VALUES (:p,1,'t','Wide','v',4,'completed',1,1,1,:v,:l)"),
+            "VALUES (:p,1,'t','Wide','v',4,'completed',true,true,true,:v,:l)"),
             {"p": pid,
              "v": f"storage/projects/{pid}/shots/shot_1/output.mp4",
              "l": f"storage/projects/{pid}/shots/shot_1/last_frame.png"})
