@@ -1126,8 +1126,12 @@ x-db-env: &db-env
 
 ```yaml
   postgres_password:
-    file: ../secrets/postgres_password   # written by: make secrets
+    file: ./secrets/postgres_password   # written by: make secrets
 ```
+
+> 路径是 `./secrets/`，与该文件里已有的 8 个 secrets 条目一致（Makefile 的
+> `DEPLOY_DIR=deploy` 就是往这里写）。别写成 `../secrets/`——那是 CLAUDE.md 里
+> 一段示意片段的写法，与本仓库实际约定不符，照抄会让起栈时找不到文件。
 
 在 `volumes:` 段加：
 
