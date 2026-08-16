@@ -161,7 +161,8 @@ async def me(
     """当前用户名 + 余额（供前端展示，并在触发计费前提示余额不足）。"""
     principal = require_principal(request)
     if not principal.is_billable:
-        # 未绑定账号的机器令牌：有身份但没有账号，也就没有余额。
+        # 兜底：现在每种身份都必然带账号（没绑账号的机器令牌已按未鉴权处理），
+        # 走到这里说明冒出了新的无账号身份——按 0 余额返回而不是 500。
         return UserResponse(username=principal.username, credits=0, is_admin=principal.is_admin)
 
     user = (await session.execute(

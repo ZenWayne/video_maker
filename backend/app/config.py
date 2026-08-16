@@ -304,8 +304,10 @@ class Settings(BaseSettings):
     session_cookie_secure: bool = True
     # 机器凭据（MCP 等非浏览器调用方）。来自 secret，绝不写进 config.yml。
     machine_token: str = ""
-    # 机器令牌绑定到哪个账号：置空 = 服务主体（不受 owner 过滤、不扣点数）。
-    # 设成某个用户名后，机器调用与该用户完全同权同计费。
+    # 机器令牌绑定到哪个账号。**置空 = 该令牌按未鉴权处理**（开关关着时落回匿名，
+    # 打开后 401）——令牌只能证明「是自己人」，答不了「能看哪些项目」「扣谁的点数」，
+    # 所以不绑账号就不放行。设成某个用户名后，机器调用与该用户完全同权同计费
+    # （包括继承它的 is_admin）。
     machine_token_user: str = ""
     # 注册限流：每个来源 IP 每 window 秒最多注册 N 次（FR-10，已定 1 次/小时）。
     register_rate_limit: int = 1

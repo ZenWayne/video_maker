@@ -56,7 +56,10 @@ SESSION_TTL_DAYS: "7"
 # 跨站 cookie 必须 Secure（前端在 Vercel、API 在集群，是不同站点）。
 # 只有本地纯 http 调试才需要置 false。
 SESSION_COOKIE_SECURE: "true"
-# 机器令牌绑定的账号，留空 = 服务主体（不受归属过滤、不扣点数）。
+# 机器令牌绑定的账号。**留空 = 该令牌按未鉴权处理**：开关关着时 MCP 落回匿名
+# 照常可用，AUTH_ENFORCED=true 之后就是 401。P3 打开开关前必须绑好，否则
+# MCP 会被一并挡死（FRD 风险表里专门列了这条）。
+# 注意绑定会连 is_admin 一起继承——绑管理员账号意味着持令牌者能自行发放点数。
 MACHINE_TOKEN_USER: ""
 # 注册限流：每 IP 每小时 1 次（FR-10）。上线后观察 429 触发量，
 # 若真实用户（CGNAT/办公室 NAT 共享出口）被误伤，优先放宽到按天计。

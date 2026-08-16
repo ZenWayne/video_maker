@@ -277,10 +277,12 @@ async def test_ac11_new_user_has_zero_credits_and_gets_402(
 # ── AC-5：机器令牌 ─────────────────────────────────────────────────────────
 
 async def test_ac5_machine_token_grants_access_and_wrong_token_is_401(
-    auth_client, monkeypatch
+    auth_client, db_session_factory, monkeypatch
 ):
+    await make_user(db_session_factory, "mcpbot")
     monkeypatch.setattr(settings, "auth_enforced", True)
     monkeypatch.setattr(settings, "machine_token", "s3cret-machine-token")
+    monkeypatch.setattr(settings, "machine_token_user", "mcpbot")
 
     ok = await auth_client.get(
         "/api/projects", headers={"Authorization": "Bearer s3cret-machine-token"}
@@ -289,6 +291,59 @@ async def test_ac5_machine_token_grants_access_and_wrong_token_is_401(
 
     bad = await auth_client.get("/api/projects", headers={"Authorization": "Bearer wrong"})
     assert bad.status_code == 401
+
+
+async def test_unbound_machine_token_is_treated_as_unauthenticated(
+    auth_client, monkeypatch
+):
+    """令牌有效但没绑账号 → 未鉴权，而不是拿到一个无边界的服务主体。
+
+    令牌只能回答「是不是自己人」，回答不了「能看哪些项目」「扣谁的点数」。
+    放它进来就只能绕过归属过滤且不计费——那等于**配置漏填换来最大权限**，
+    与 FR-3 默认拒绝的原则正好相反。
+    """
+    monkeypatch.setattr(settings, "machine_token", "unbound-token")
+    monkeypatch.setattr(settings, "machine_token_user", "")
+    headers = {"Authorization": "Bearer unbound-token"}
+
+    # 开关关着：落回匿名，与鉴权上线前一致——不打断 P1/P2 期间的 MCP
+    monkeypatch.setattr(settings, "auth_enforced", False)
+    assert (await auth_client.get("/api/projects", headers=headers)).status_code == 200
+
+    # 开关打开：401。恰好在强制校验生效的那一刻响亮地失败
+    monkeypatch.setattr(settings, "auth_enforced", True)
+    r = await auth_client.get("/api/projects", headers=headers)
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "unauthenticated"
+
+
+async def test_machine_token_bound_to_missing_user_is_unauthenticated(
+    auth_client, monkeypatch
+):
+    """绑了个不存在的账号（打错字/账号被删）也必须 fail closed，不能退化成全权限。"""
+    monkeypatch.setattr(settings, "auth_enforced", True)
+    monkeypatch.setattr(settings, "machine_token", "typo-token")
+    monkeypatch.setattr(settings, "machine_token_user", "stlla")  # 打错了
+
+    r = await auth_client.get("/api/projects", headers={"Authorization": "Bearer typo-token"})
+    assert r.status_code == 401
+
+
+async def test_unbound_machine_token_cannot_bypass_ownership_filter(
+    auth_client, db_session_factory, monkeypatch
+):
+    """回归：未绑定的令牌不得看到别人的项目（旧的服务主体正是这么漏的）。"""
+    alice = await make_user(db_session_factory, "alice_mt")
+    await owned_project(db_session_factory, alice)
+
+    monkeypatch.setattr(settings, "auth_enforced", True)
+    monkeypatch.setattr(settings, "machine_token", "unbound-token-2")
+    monkeypatch.setattr(settings, "machine_token_user", "")
+
+    r = await auth_client.get(
+        "/api/projects", headers={"Authorization": "Bearer unbound-token-2"}
+    )
+    assert r.status_code == 401, "未绑账号的令牌不该能看到任何人的项目"
 
 
 async def test_machine_token_bound_to_user_is_scoped_and_billable(

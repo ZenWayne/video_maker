@@ -92,8 +92,10 @@ def verify_password(password: str, password_hash: str) -> bool:
 class Principal:
     """一次请求的调用方身份。
 
-    ``user_id is None`` 表示服务主体（未绑定账号的机器令牌）：它绕过归属过滤
-    与点数扣减，因为它没有账号可归属、也没有余额可扣。
+    身份**恒有账号**（``user_id`` 非空）。曾经存在一种「服务主体」——机器令牌
+    有效但没绑账号时给一个无账号身份——已经删掉：那意味着配置漏填换来的是最大
+    权限（绕过归属过滤、不扣点数），与 FR-3「默认拒绝」的原则正好相反。现在
+    没绑账号的机器令牌直接判未鉴权。
     """
 
     username: str
@@ -104,7 +106,12 @@ class Principal:
 
     @property
     def is_billable(self) -> bool:
-        """是否有账号可以扣点数/校验归属。"""
+        """是否有账号可以扣点数/校验归属。
+
+        按现在的构造路径恒为 True（会话与机器令牌都必然带账号）。保留它是**兜底**：
+        万一将来又冒出一种无账号身份，归属过滤和扣费的调用点会自动把它当成
+        「不可计费」而不是默默放行。
+        """
         return self.user_id is not None
 
 
@@ -158,34 +165,47 @@ async def load_session(token: str) -> Optional[Principal]:
     )
 
 
-async def _machine_principal() -> Principal:
+async def _machine_principal() -> Optional[Principal]:
     """机器令牌对应的身份。
 
-    绑定了 ``MACHINE_TOKEN_USER`` 就完全等同该用户（同样扣点数、同样按 owner
-    过滤）；没绑定则是服务主体——**它是一条不计费的通道**，所以令牌本身必须
-    当作高权限凭据保管。
+    绑定了 ``MACHINE_TOKEN_USER`` 就完全等同该用户：同样按 owner 过滤、同样扣
+    点数、同样继承那个账号的 ``is_admin``。
+
+    **没绑定（或绑的账号不存在/已停用）→ 返回 None，视同未鉴权。** 令牌本身只
+    回答了「是不是我们自己人」，回答不了「能看哪些项目」「扣谁的点数」——放它
+    进来就只能是无边界的全权限，等于配置漏填换来最大权限。这与 FR-3 的默认拒绝
+    是同一条原则：配置不全时应当进不去，而不是裸奔。
+
+    分期上线下的效果：开关关着时它落回匿名（与鉴权上线前一致，不打断 MCP），
+    开关一打开就 401——**恰好在强制校验生效的那一刻响亮地失败**。
     """
     username = (settings.machine_token_user or "").strip()
-    if username:
-        from app import db as db_module
-        from app.models.project import User
-
-        async with db_module.AsyncSession() as session:
-            user = (await session.execute(
-                select(User).where(User.username == username)
-            )).scalar_one_or_none()
-        if user is not None and user.is_active:
-            return Principal(
-                username=user.username,
-                user_id=user.id,
-                is_admin=bool(user.is_admin),
-                is_machine=True,
-            )
+    if not username:
         logger.warning(
-            "MACHINE_TOKEN_USER=%r 不存在或已停用 —— 机器令牌退化为不计费的服务主体",
-            username,
+            "机器令牌有效但 MACHINE_TOKEN_USER 未配置 —— 按未鉴权处理。"
+            "绑定一个账号后 MCP 才能在强制校验下工作。"
         )
-    return Principal(username="machine", is_machine=True)
+        return None
+
+    from app import db as db_module
+    from app.models.project import User
+
+    async with db_module.AsyncSession() as session:
+        user = (await session.execute(
+            select(User).where(User.username == username)
+        )).scalar_one_or_none()
+    if user is None or not user.is_active:
+        logger.warning(
+            "MACHINE_TOKEN_USER=%r 不存在或已停用 —— 机器令牌按未鉴权处理", username,
+        )
+        return None
+
+    return Principal(
+        username=user.username,
+        user_id=user.id,
+        is_admin=bool(user.is_admin),
+        is_machine=True,
+    )
 
 
 def _bearer_token(headers: dict[bytes, bytes]) -> Optional[str]:
