@@ -5,7 +5,9 @@
 迁移的意义有一半在这里。
 
 隔离策略：每个测试前 drop_all + create_all。表只有 7 张，成本约 50ms，
-换来的是与生产完全一致的方言行为和零残留。
+换来的是与生产完全一致的方言行为，且这 7 张业务表内零残留。注意 drop_all
+只清 Base.metadata 覆盖的这 7 张表，不会碰 alembic_version（由 Alembic
+自己管理，不在 Base.metadata 里）——若它存在，不受本 fixture 影响。
 
 为什么测试用 create_all 而生产用 Alembic：两者都以 Base.metadata 为准，
 而 test_alembic_schema.py 用 compare_metadata 断言「Alembic head == ORM

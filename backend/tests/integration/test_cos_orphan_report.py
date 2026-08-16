@@ -22,14 +22,17 @@ async def test_reports_known_orphans_and_spares_referenced_objects(
         await object_store.put(f"{cos_prefix}{k}", p)
 
     async with db_session_factory() as s:
+        # Boolean 列走绑定参数（Python bool），不用 SQL 字面量 0/1 或 true/false——
+        # 绑定参数交给驱动按列类型编排，两种后端都对，且不用记「这个方言接受哪种字面量」。
         await s.execute(sa.text(
             "INSERT INTO projects (id,title,theme_text,creator_name,status,aspect_ratio,"
-            "auto_voice_calibrate) VALUES (:i,'t','t','a','draft','9:16',0)"), {"i": pid})
+            "auto_voice_calibrate) VALUES (:i,'t','t','a','draft','9:16',:avc)"),
+            {"i": pid, "avc": False})
         await s.execute(sa.text(
             "INSERT INTO shots (project_id,shot_id,text,shot_type,visual_description,shot_duration,"
             "status,align_with_previous,use_prev_last_frame,auto_trim,video_path) "
-            "VALUES (:p,1,'t','Wide','v',4,'completed',1,1,1,:v)"),
-            {"p": pid, "v": referenced})
+            "VALUES (:p,1,'t','Wide','v',4,'completed',:awp,:uplf,:at,:v)"),
+            {"p": pid, "awp": True, "uplf": True, "at": True, "v": referenced})
         await s.commit()
 
     report = await find_orphans(db_session_factory, key_prefix=cos_prefix)
