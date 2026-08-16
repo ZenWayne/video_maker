@@ -3,12 +3,41 @@
 #   make secrets   (write deploy/secrets.yml → deploy/secrets/)
 #   make dev       (runs both automatically, then starts all containers)
 
+# 数据库连接分量 —— 三个 Python 服务共用这一处定义。
+# 迁移前这里是 3 份写死的 DATABASE_URL，改一处漏两处是常态。
+x-db-env: &db-env
+  POSTGRES_HOST: video-maker-postgres-dev
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: videomaker
+  POSTGRES_USER: videomaker
+  POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+
 services:
   redis:
     image: redis:7-alpine
     container_name: video-maker-redis-dev
     ports:
       - "6381:6379"
+    restart: unless-stopped
+
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    container_name: video-maker-postgres-dev
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: videomaker
+      POSTGRES_DB: videomaker
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - app-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U videomaker -d videomaker"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
     restart: unless-stopped
 
   backend:
@@ -35,13 +64,14 @@ services:
       - langfuse_secret_key
       - cos_secret_id
       - cos_secret_key
+      - postgres_password
     env_file:
       - path: ./config.env
         required: true
     working_dir: /app
     environment:
+      <<: *db-env
       REDIS_URL: redis://video-maker-redis-dev:6379
-      DATABASE_URL: sqlite+aiosqlite:////app/data/dev.db
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-sa.json
       HTTP_PROXY: http://host.containers.internal:10809
       HTTPS_PROXY: http://host.containers.internal:10809
@@ -61,7 +91,10 @@ services:
              uv run --project . uvicorn app.main:app --host 0.0.0.0 --port 8002
              --reload --reload-dir /app/app --reload-dir /app/worker"
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   worker:
@@ -87,13 +120,14 @@ services:
       - langfuse_secret_key
       - cos_secret_id
       - cos_secret_key
+      - postgres_password
     env_file:
       - path: ./config.env
         required: true
     working_dir: /app
     environment:
+      <<: *db-env
       REDIS_URL: redis://video-maker-redis-dev:6379
-      DATABASE_URL: sqlite+aiosqlite:////app/data/dev.db
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-sa.json
       HTTP_PROXY: http://host.containers.internal:10809
       HTTPS_PROXY: http://host.containers.internal:10809
@@ -113,7 +147,10 @@ services:
              export COS_SECRET_KEY=$(cat /run/secrets/cos_secret_key) &&
              uv run --project . --group asr python -m arq worker.arq_worker.WorkerSettings"
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   vc-worker:
@@ -131,13 +168,14 @@ services:
     secrets:
       - cos_secret_id
       - cos_secret_key
+      - postgres_password
     env_file:
       - path: ./config.env
         required: true
     working_dir: /app
     environment:
+      <<: *db-env
       REDIS_URL: redis://video-maker-redis-dev:6379
-      DATABASE_URL: sqlite+aiosqlite:////app/data/dev.db
       PYTHONPATH: /usr/local/lib/python3.12/site-packages
       NO_PROXY: localhost,127.0.0.1,host.containers.internal,.myqcloud.com
       no_proxy: localhost,127.0.0.1,host.containers.internal,.myqcloud.com
@@ -146,7 +184,10 @@ services:
              export COS_SECRET_KEY=$(cat /run/secrets/cos_secret_key) &&
              uv run --project . python -m arq worker.vc_arq_worker.VcWorkerSettings"
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   mcp:
@@ -215,6 +256,7 @@ volumes:
   app-data:      # shared sqlite DB — same volume for every worktree's stack (project "deploy")
   app-storage:   # shared shot media — same volume for every worktree's stack
   whisper-cache: # faster-whisper model weights (HF_HOME) — avoids re-downloading ~3GB on container recreate
+  app-pgdata:    # PostgreSQL 数据目录，与 app-data(sqlite) 并存以便回滚
 
 secrets:
   gemini_api_key:
@@ -233,3 +275,5 @@ secrets:
     file: ./secrets/cos_secret_id  # written by: make secrets
   cos_secret_key:
     file: ./secrets/cos_secret_key  # written by: make secrets
+  postgres_password:
+    file: ./secrets/postgres_password  # written by: make secrets
