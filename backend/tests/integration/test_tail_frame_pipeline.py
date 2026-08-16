@@ -1,3 +1,4 @@
+from unittest.mock import ANY
 """Integration tests for tail frame pipeline endpoints."""
 import json
 import pytest
@@ -31,7 +32,7 @@ async def test_generate_tail_frame_success(client, db_session_factory):
     cid = body["candidate_id"]
 
     client.arq.enqueue_job.assert_called_once_with(
-        "run_image_candidate", pid, 1, cid, f"user:{USER}"
+        "run_image_candidate", pid, 1, cid, f"user:{USER}", reservation_id=ANY
     )
     from app.models.project import ImageCandidate
     async with db_session_factory() as s:
@@ -103,7 +104,7 @@ async def test_confirm_tail_frame_success(client, db_session_factory, tmp_path):
 
     # Verify video generation was enqueued
     client.arq.enqueue_job.assert_called_with(
-        "run_shot_pipeline", pid, f"user:{USER}", 1
+        "run_shot_pipeline", pid, f"user:{USER}", 1, reservation_id=ANY
     )
 
 

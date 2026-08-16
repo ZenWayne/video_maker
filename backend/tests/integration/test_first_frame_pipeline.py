@@ -1,3 +1,4 @@
+from unittest.mock import ANY
 """Integration tests for first frame generation (generate-first-frame endpoint).
 
 Mirrors test_tail_frame_pipeline.py. Worker-level routing for the auto
@@ -33,7 +34,7 @@ async def test_generate_first_frame_success(client, db_session_factory):
     cid = body["candidate_id"]
 
     client.arq.enqueue_job.assert_called_once_with(
-        "run_image_candidate", pid, 1, cid, f"user:{USER}"
+        "run_image_candidate", pid, 1, cid, f"user:{USER}", reservation_id=ANY
     )
     from app.models.project import ImageCandidate
     async with db_session_factory() as s:

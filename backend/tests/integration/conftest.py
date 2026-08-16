@@ -158,8 +158,40 @@ async def client(db_engine, db_session_factory, redis, monkeypatch):
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_redis] = override_redis
 
+    # 会话/限流要用真实 redis：中间件不走 FastAPI 依赖注入，读的是 app.main 的
+    # 全局客户端。
+    import app.main as app_main
+    monkeypatch.setattr(app_main, "_redis_client", redis)
+
+    # 默认带一个**已登录**身份。计费操作（改运镜提示词、生成分镜……）不接受匿名
+    # 调用——那是一条免费的 LLM 通道，不受 AUTH_ENFORCED 控制（见
+    # app.services.credits.AuthenticationRequired）。所以驱动这些端点的测试必须
+    # 有身份，否则测的就不是真实调用路径。
+    #
+    # 用户名刻意取成 USER（"test-user"），这样 require_user 从会话取到的名字与
+    # 原来 X-User-Name 头给的一致，creator_name 相关断言不受影响。
+    from app.models.project import User
+    from app.services import auth as auth_service
+
+    async with db_session_factory() as s:
+        user = User(
+            username=USER,
+            password_hash=auth_service.hash_password("test-password"),
+            credits=10_000_000,  # 足够多，免得测试被 402 打断
+            is_admin=True,
+            is_active=True,
+        )
+        s.add(user)
+        await s.commit()
+        await s.refresh(user)
+    token = await auth_service.create_session(user)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        # 手动设 Cookie 头而不是靠 cookie jar：会话 cookie 是 Secure 的，
+        # 而测试走 http://test，jar 会（正确地）拒绝回发它。
+        c.headers["Cookie"] = f"session={token}"
         c.arq = arq
+        c.test_user_id = user.id
         yield c
 
     app.dependency_overrides.clear()

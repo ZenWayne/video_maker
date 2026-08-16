@@ -2214,6 +2214,9 @@ async def character_calibrate_all(
     redis=Depends(get_redis),
 ):
     """Calibrate all completed shots' last frames to match character references."""
+    # 身份先卡住：本端点的金额要等数完可校准分镜才算得出来，而那些业务校验会
+    # 抢在前面返回 400，匿名调用就看不到 401 了。
+    credits.require_identity(principal)
     project = await _get_project_or_404(project_id, session)
 
     # Validate project has character reference images

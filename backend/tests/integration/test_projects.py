@@ -18,12 +18,14 @@ async def test_create_project_success(client):
     assert data["creator_name"] == "test-user"
 
 
-async def test_create_project_no_user_header(client):
+async def test_create_project_without_any_credentials_is_rejected(client):
+    """无任何凭据 → 拒绝。conftest 的 client 默认已登录，先摘掉会话。"""
+    client.headers.pop("Cookie", None)
     r = await client.post(
         "/api/projects",
         json={"title": "Title", "theme_text": "Theme"},
     )
-    assert r.status_code == 400
+    assert r.status_code in (400, 401)
 
 
 async def test_create_project_blank_title(client):

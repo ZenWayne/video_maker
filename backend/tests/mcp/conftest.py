@@ -65,6 +65,29 @@ async def http_client(db_engine, db_session_factory, monkeypatch):
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_redis] = override_redis
 
+    # MCP 走机器令牌通道（FR-5）。计费操作不接受匿名调用——没有账号就没有余额
+    # 可扣，放行等于开一条免费的 LLM 通道，且这条**不受 AUTH_ENFORCED 控制**。
+    # 所以这里按生产的样子把令牌绑到一个账号上：令牌只证明「是自己人」，
+    # MACHINE_TOKEN_USER 才决定它以谁的身份干活、扣谁的点数。
+    from app.config import settings as app_settings
+    from app.models.project import User
+    from app.services import auth as auth_service
+    from mcp_server.config import settings as mcp_settings
+
+    async with db_session_factory() as s:
+        s.add(User(
+            username=USER,
+            password_hash=auth_service.hash_password("mcp-test-password"),
+            credits=10_000_000,  # 足够多，免得测试被 402 打断
+            is_admin=False,
+            is_active=True,
+        ))
+        await s.commit()
+
+    monkeypatch.setattr(app_settings, "machine_token", "test-machine-token")
+    monkeypatch.setattr(app_settings, "machine_token_user", USER)
+    monkeypatch.setattr(mcp_settings, "machine_token", "test-machine-token", raising=False)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
     app.dependency_overrides.clear()

@@ -1,6 +1,6 @@
 """Integration tests for pipeline workflow endpoints."""
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from tests.integration.conftest import (
     HEADERS, USER,
@@ -19,7 +19,7 @@ async def test_start_success(client, project_in_draft_with_image):
     p = (await client.get(f"/api/projects/{pid}")).json()
     assert p["status"] == "scripting"
     client.arq.enqueue_job.assert_called_once_with(
-        "run_screenwriter", pid, f"user:{USER}"
+        "run_screenwriter", pid, f"user:{USER}", reservation_id=ANY
     )
 
 
@@ -37,10 +37,16 @@ async def test_start_invalid_transition(client, db_session_factory):
     assert r.status_code == 409
 
 
-async def test_start_no_user_header(client, project_in_draft_with_image):
+async def test_start_without_any_credentials_is_rejected(client, project_in_draft_with_image):
+    """无任何凭据（既没有会话，也没有 X-User-Name）→ 拒绝。
+
+    conftest 的 client 默认带一条已登录会话，所以这里要先摘掉它；否则测的是
+    「登录用户能不能 start」，而不是「没身份能不能 start」。
+    """
+    client.headers.pop("Cookie", None)
     pid = project_in_draft_with_image["project"]["id"]
     r = await client.post(f"/api/projects/{pid}/start")
-    assert r.status_code == 400
+    assert r.status_code in (400, 401)
 
 
 # ── PATCH /projects/{id}/storyboard ───────────────────────────────────────────
@@ -107,7 +113,7 @@ async def test_approve_script_success(client, project_in_script_review):
     # Path-as-truth: _enqueue_next_shot_task always enqueues run_shot_pipeline.
     # Tail frame use is decided by the worker (resolve_tail_frame), not here.
     client.arq.enqueue_job.assert_called_with(
-        "run_shot_pipeline", pid, f"user:{USER}"
+        "run_shot_pipeline", pid, f"user:{USER}", reservation_id=ANY
     )
 
 
@@ -130,7 +136,7 @@ async def test_regenerate_script_success(client, project_in_script_review, cos_p
     assert p["status"] == "scripting"
     assert p["shots"] == []
     client.arq.enqueue_job.assert_called_once_with(
-        "run_screenwriter", pid, f"user:{USER}"
+        "run_screenwriter", pid, f"user:{USER}", reservation_id=ANY
     )
 
 
@@ -217,7 +223,7 @@ async def test_regenerate_shots_skips_tail_frame_generation(
 
     # Straight to video generation, NOT tail-frame generation
     client.arq.enqueue_job.assert_called_once_with(
-        "run_shot_pipeline", pid, f"user:{USER}"
+        "run_shot_pipeline", pid, f"user:{USER}", reservation_id=ANY
     )
     async with db_session_factory() as s:
         shot = (
@@ -240,13 +246,16 @@ async def test_regenerate_shots_invalid_transition(client, db_session_factory):
     assert r.status_code == 409
 
 
-async def test_regenerate_shots_no_user_header(client, project_in_shot_review):
+async def test_regenerate_shots_without_any_credentials_is_rejected(
+    client, project_in_shot_review
+):
+    client.headers.pop("Cookie", None)
     pid = project_in_shot_review
     r = await client.post(
         f"/api/projects/{pid}/regenerate-shots",
         json={"shot_ids": [1]},
     )
-    assert r.status_code == 400
+    assert r.status_code in (400, 401)
 
 
 # ── POST /projects/{id}/continue-generation ──────────────────────────────────
@@ -263,7 +272,7 @@ async def test_continue_generation_success(client, db_session_factory):
     p = (await client.get(f"/api/projects/{pid}")).json()
     assert p["status"] == "shot_generating"
     client.arq.enqueue_job.assert_called_with(
-        "run_shot_pipeline", pid, f"user:{USER}"
+        "run_shot_pipeline", pid, f"user:{USER}", reservation_id=ANY
     )
 
 

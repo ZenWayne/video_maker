@@ -40,6 +40,9 @@ async def auth_client(client, redis, monkeypatch):
     monkeypatch.setattr(settings, "auth_enforced", False)
     monkeypatch.setattr(settings, "machine_token", "")
     monkeypatch.setattr(settings, "machine_token_user", "")
+    # conftest 的 client 默认带一个已登录会话；鉴权测试要自己控制身份，
+    # 先把它摘掉，需要身份的用例再显式传 Cookie 头。
+    client.headers.pop("Cookie", None)
     return client
 
 
@@ -714,21 +717,66 @@ async def test_ac12_500_credits_covers_four_eight_second_shots(
 
 # ── 匿名路径（P1 线上态）不受影响 ──────────────────────────────────────────
 
-async def test_anonymous_path_is_unchanged_when_not_enforced(
+async def test_anonymous_can_still_read_when_not_enforced(auth_client, db_session_factory):
+    """开关关着时**读**仍与鉴权上线前一致——分期上线只对读放宽。"""
+    await owned_project(db_session_factory, None, status="script_review", shots=2)
+
+    r = await auth_client.get("/api/projects", headers={"X-User-Name": "anonymous"})
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+
+
+async def test_anonymous_cannot_trigger_billed_operations_even_when_not_enforced(
     auth_client, db_session_factory
 ):
-    """P1 的判据：AUTH_ENFORCED=false 时线上行为与鉴权上线前完全一致。"""
+    """匿名调用会计费的端点一律 401，**不受 AUTH_ENFORCED 控制**。
+
+    没有账号就没有余额可扣，放行等于把一条免费的 LLM 通道挂在公网上——那正是
+    本 FRD 一开始要解决的问题。FR-3 也写明免鉴权白名单「不含任何会触发计费的
+    端点」。
+    """
     pid = await owned_project(db_session_factory, None, status="script_review", shots=2)
     auth_client.arq.enqueue_job.reset_mock()
+    anon = {"X-User-Name": "anonymous"}
 
-    r = await auth_client.post(
-        f"/api/projects/{pid}/approve-script", headers={"X-User-Name": "anonymous"}
-    )
-    assert r.status_code == 202
-    # 未计费路径的入队调用与鉴权上线前逐字相同 —— 不带 reservation_id
-    auth_client.arq.enqueue_job.assert_called_once_with(
-        "run_shot_pipeline", pid, "user:anonymous"
-    )
+    for method, path in [
+        ("post", f"/api/projects/{pid}/approve-script"),
+        ("post", f"/api/projects/{pid}/start"),
+        ("post", f"/api/projects/{pid}/regenerate-script"),
+        ("post", f"/api/projects/{pid}/shots/1/rewrite-prompt"),
+        ("post", f"/api/projects/{pid}/shots/1/generate-tail-frame"),
+        ("post", f"/api/projects/{pid}/shots/1/generate-first-frame"),
+        ("post", f"/api/projects/{pid}/character-calibrate-all"),
+    ]:
+        r = await getattr(auth_client, method)(path, headers=anon)
+        assert r.status_code == 401, f"{method.upper()} {path} 匿名却被放行"
 
+    # 关键判据：一个任务都没入队，一分钱流水都没有
+    auth_client.arq.enqueue_job.assert_not_called()
     async with db_session_factory() as s:
         assert (await s.execute(select(CreditLedger))).scalars().all() == []
+
+
+async def test_anonymous_ai_edit_is_blocked_before_the_model_call(
+    auth_client, db_session_factory, monkeypatch
+):
+    """同步 LLM 端点必须**在打模型之前**就被挡住，而不是打完再说。"""
+    pid = await owned_project(db_session_factory, None, status="shot_review", shots=1)
+
+    called = False
+
+    async def _never(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    import app.agents.shot_editor as shot_editor
+    monkeypatch.setattr(shot_editor, "run_shot_editor", _never)
+
+    r = await auth_client.post(
+        f"/api/projects/{pid}/shots/1/ai-edit",
+        json={"instruction": "改得短一点"},
+        headers={"X-User-Name": "anonymous"},
+    )
+    assert r.status_code == 401
+    assert called is False, "匿名请求不该走到模型调用"

@@ -1,3 +1,4 @@
+from unittest.mock import ANY
 """候选创建/删除端点（ARQ mock、真实 in-memory DB）。文件上传/删除会真的打 COS
 ——涉及的用例用 requires_cos 单独 gate，其余（不碰文件的路由/校验逻辑）不需要。"""
 import io
@@ -35,7 +36,7 @@ async def test_create_auto_candidate_enqueues_worker(client, db_session_factory)
     assert cand["prompt_source"] == "auto"
 
     client.arq.enqueue_job.assert_called_once_with(
-        "run_image_candidate", pid, 1, cand["id"], f"user:{USER}"
+        "run_image_candidate", pid, 1, cand["id"], f"user:{USER}", reservation_id=ANY
     )
 
 

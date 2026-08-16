@@ -95,6 +95,19 @@ async def test_reserve_is_a_noop_for_zero_or_negative_cost(amount):
     ) is None
 
 
-async def test_reserve_is_a_noop_without_identity():
-    """AUTH_ENFORCED=false 下的匿名调用不扣点数——行为与鉴权上线前一致。"""
-    assert await credits.reserve(None, 100, ref_type="t", ref_id="r") is None
+async def test_reserve_rejects_anonymous_callers():
+    """匿名调用计费操作一律 401，**不受 AUTH_ENFORCED 控制**。
+
+    没有账号就没有余额可扣。放行等于把一条免费的 LLM 通道挂在公网上——那正是
+    这份 FRD 一开始要解决的问题；FR-3 也写明免鉴权白名单「不含任何会触发计费
+    的端点」。分期上线只对读放宽。
+    """
+    with pytest.raises(credits.AuthenticationRequired) as exc:
+        await credits.reserve(None, 100, ref_type="t", ref_id="r")
+    assert exc.value.status_code == 401
+
+    with pytest.raises(credits.AuthenticationRequired):
+        await credits.ensure_balance(None, 100)
+
+    with pytest.raises(credits.AuthenticationRequired):
+        credits.require_identity(None)
