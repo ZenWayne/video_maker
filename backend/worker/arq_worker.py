@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import redis.asyncio as aioredis
 
 from app.config import settings
+from app.db import build_pool_kwargs
 from app.services import cos_client
 from worker.tasks import (
     run_screenwriter,
@@ -27,6 +28,24 @@ for _name in ("worker", "app"):
     _logger.addHandler(_handler)
 
 
+def _build_db_engine():
+    """Build the worker's DB engine — split out from ``startup`` purely so it
+    can be unit-tested without also standing up Redis/COS. Must use
+    ``resolved_database_url`` (the single source of truth introduced in Phase
+    0 Task 1), not the raw ``database_url`` fallback: Task 5 removed
+    DATABASE_URL from compose, so ``database_url`` now silently falls back to
+    sqlite — pointing the worker at a local, table-less sqlite file while the
+    backend talks to PostgreSQL.
+    """
+    database_url = settings.resolved_database_url
+    return create_async_engine(
+        database_url,
+        echo=False,
+        future=True,
+        **build_pool_kwargs(database_url),
+    )
+
+
 async def startup(ctx: dict) -> None:
     """Startup hook - create Redis and DB connections."""
     # COS credentials must be warmed before any job runs: to_media_url() (used
@@ -46,11 +65,7 @@ async def startup(ctx: dict) -> None:
     )
 
     # Database engine and session factory
-    engine = create_async_engine(
-        settings.database_url,
-        echo=False,
-        future=True,
-    )
+    engine = _build_db_engine()
     ctx["engine"] = engine
     ctx["session_factory"] = async_sessionmaker(
         engine,

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import redis.asyncio as aioredis
 
 from app.config import settings
+from app.db import build_pool_kwargs
 from app.services import cos_client
 from worker.tasks import run_voice_convert, run_voice_convert_batch
 
@@ -25,6 +26,22 @@ for _name in ("worker", "app"):
     _logger.addHandler(_handler)
 
 
+def _build_db_engine():
+    """Build the worker's DB engine — split out from ``startup`` purely so it
+    can be unit-tested without also standing up Redis/COS. See
+    ``arq_worker._build_db_engine``: must use ``resolved_database_url``, not
+    the raw ``database_url`` fallback (which silently points at sqlite now
+    that Task 5 removed DATABASE_URL from compose).
+    """
+    database_url = settings.resolved_database_url
+    return create_async_engine(
+        database_url,
+        echo=False,
+        future=True,
+        **build_pool_kwargs(database_url),
+    )
+
+
 async def startup(ctx: dict) -> None:
     # See arq_worker.startup: cos_client is a zero-app.api-dependency module —
     # never import warm_credentials via app.main from a worker process.
@@ -34,7 +51,7 @@ async def startup(ctx: dict) -> None:
     ctx["redis"] = await aioredis.from_url(
         settings.redis_url, encoding="utf-8", decode_responses=True
     )
-    engine = create_async_engine(settings.database_url, echo=False, future=True)
+    engine = _build_db_engine()
     ctx["engine"] = engine
     ctx["session_factory"] = async_sessionmaker(
         engine, expire_on_commit=False, autoflush=False
