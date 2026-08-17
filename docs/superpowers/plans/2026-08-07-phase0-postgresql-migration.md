@@ -1670,7 +1670,10 @@ curl -sI localhost:4000
 - [ ] **Step 7: 确认业务代码零改动**
 
 ```bash
-git diff --stat master..HEAD -- backend/app/api backend/app/agents backend/app/services backend/worker
+# 基线用第 0 期的实际起点，不要用 master ——
+# 本仓库的本地 master 可能落后 HEAD 上百个提交（含大量与本期无关的已合并功能），
+# 用它做基线会把别人的改动算到本期头上。
+git diff --stat 1a730e0..HEAD -- backend/app/api backend/app/agents backend/app/services backend/worker
 ```
 
 预期：只有 `backend/app/services/` 下**无**输出，`backend/app/scripts/cos_migration/runner.py` 有改动（那是删建列调用，已在 Task 3 说明）。若 `api/`、`agents/`、`worker/` 出现任何 diff，说明越界了，回退那部分改动。
