@@ -99,3 +99,66 @@ async def test_sequences_are_realigned_after_copy(sqlite_src):
         total = (await s.execute(text("SELECT count(*) FROM events"))).scalar()
         assert total == 2
     await engine.dispose()
+
+
+@pytest.fixture
+async def sqlite_src_no_autoincrement_rows(tmp_path):
+    """源库里三张自增主键表全为空，只有 projects 有行。
+
+    setval 的第三个参数走的是 `MAX(id) IS NOT NULL` 分支——空表时必须让序列
+    保持「未被调用」状态，下一个 id 才会是 1。设坏了会变成从 2 开始。
+    """
+    url = f"sqlite+aiosqlite:///{tmp_path / 'src_empty.db'}"
+    engine = create_async_engine(url, poolclass=NullPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(Project(
+            id="33333333-3333-3333-3333-333333333333",
+            title="空表样例", theme_text="主题", creator_name="wayne",
+            status="draft", aspect_ratio="9:16",
+        ))
+        await s.commit()
+    yield url
+    await engine.dispose()
+
+
+async def test_sequences_start_at_one_when_source_tables_empty(
+    sqlite_src_no_autoincrement_rows,
+):
+    """源库自增表为空时，setval 不能把序列设坏——新行的 id 必须从 1 开始。"""
+    dst = create_async_engine(_pg_url(), poolclass=NullPool)
+    async with dst.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    await dst.dispose()
+
+    counts = await copy_all(sqlite_src_no_autoincrement_rows, _pg_url())
+    assert counts["shots"] == 0
+    assert counts["events"] == 0
+    assert counts["reference_samples"] == 0
+
+    engine = create_async_engine(_pg_url(), poolclass=NullPool)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
+        ev = Event(
+            project_id="33333333-3333-3333-3333-333333333333",
+            actor="system:worker", event_type="first_after_migration",
+        )
+        s.add(ev)
+        await s.commit()
+        await s.refresh(ev)
+        # 序列被设坏（is_called=true）的话这里会是 2
+        assert ev.id == 1
+
+        shot = Shot(
+            project_id="33333333-3333-3333-3333-333333333333",
+            shot_id=1, text="台词", shot_type="Close-up",
+            visual_description="描述", shot_duration=8, status="pending",
+        )
+        s.add(shot)
+        await s.commit()
+        await s.refresh(shot)
+        assert shot.id == 1
+    await engine.dispose()

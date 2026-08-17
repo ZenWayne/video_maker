@@ -41,22 +41,33 @@ _SEQUENCE_TABLES: tuple[tuple[str, str], ...] = (
 
 
 async def copy_all(src_url: str, dst_url: str) -> dict[str, int]:
-    """按外键顺序全量搬迁，返回每张表搬了多少行。"""
+    """按外键顺序全量搬迁，返回每张表搬了多少行。
+
+    整体事务：目标库的全部插入 + 序列对齐（setval）都在同一个
+    `dst.begin()` 事务里。任何一步失败（如外键冲突），事务整体回滚，
+    目标库保持搬迁前的状态，不留半搬残留——操作者可以直接重跑，
+    不需要先手工清空目标库。
+
+    适用范围：一次性搬迁、数据量适中（当前 dev 库规模）。每张表都是
+    先整表 `SELECT` 进内存再一次性 `INSERT`——对当前规模没问题，但若
+    将来用于大规模迁移（千万行级），需要改成分批读取/插入，避免整表
+    常驻内存。
+    """
     src = create_async_engine(src_url, poolclass=NullPool)
     dst = create_async_engine(dst_url, poolclass=NullPool)
     counts: dict[str, int] = {}
     try:
-        for name in TABLE_ORDER:
-            table = Base.metadata.tables[name]
-            async with src.connect() as sconn:
-                rows = [dict(r) for r in (await sconn.execute(select(table))).mappings()]
-            if rows:
-                async with dst.begin() as dconn:
-                    await dconn.execute(insert(table), rows)
-            counts[name] = len(rows)
-
-        # 对齐自增序列：不做的话下一次 INSERT 会从 1 开始，撞上已搬入的主键。
         async with dst.begin() as dconn:
+            for name in TABLE_ORDER:
+                table = Base.metadata.tables[name]
+                async with src.connect() as sconn:
+                    rows = [dict(r) for r in (await sconn.execute(select(table))).mappings()]
+                if rows:
+                    await dconn.execute(insert(table), rows)
+                counts[name] = len(rows)
+
+            # 对齐自增序列：不做的话下一次 INSERT 会从 1 开始，撞上已搬入的
+            # 主键。必须在同一事务内、且在所有插入之后执行。
             for table_name, pk in _SEQUENCE_TABLES:
                 await dconn.execute(text(
                     f"SELECT setval("
