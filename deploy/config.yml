@@ -48,10 +48,15 @@ cos_signed_url_ttl_sec: 7200
 # ── 应用级鉴权（FRD 2026-08-11） ──────────────────────────────────────────
 # AUTH_ENFORCED 是唯一的「未认证是否放行」开关，也是唯一的回滚手段：
 # 改回 false 即恢复放行，无需回滚镜像。
-#   P1（后端上线）/ P2（前端上线）：保持 false —— 线上行为与鉴权上线前一致。
-#   P3：完成 FR-8.3 存量数据迁移 + 备份数据库之后才置 true。
 # ⚠️ 顺序不能颠倒：先开强制校验再迁移，中间窗口里用户会看到空列表。
-AUTH_ENFORCED: "false"
+#
+# 本文件是**本地开发**的配置。本地库已经跑完 FR-8.3 迁移（owner_id 全部回填），
+# 所以这里置 true。生产的开关在 deploy/k8s/10-configmap.yaml，仍是 false ——
+# 那边的镜像还没含鉴权代码，更没做迁移，两边不同步是有意的。
+#
+# 注意 config.env 由本文件生成（make config / make dev），直接改 config.env
+# 会在下次 make 时被覆盖。
+AUTH_ENFORCED: "true"
 SESSION_TTL_DAYS: "7"
 # 跨站 cookie 必须 Secure（前端在 Vercel、API 在集群，是不同站点）。
 # 只有本地纯 http 调试才需要置 false。
@@ -59,8 +64,9 @@ SESSION_COOKIE_SECURE: "true"
 # 机器令牌绑定的账号。**留空 = 该令牌按未鉴权处理**：开关关着时 MCP 落回匿名
 # 照常可用，AUTH_ENFORCED=true 之后就是 401。P3 打开开关前必须绑好，否则
 # MCP 会被一并挡死（FRD 风险表里专门列了这条）。
-# 注意绑定会连 is_admin 一起继承——绑管理员账号意味着持令牌者能自行发放点数。
-MACHINE_TOKEN_USER: ""
+# 注意绑定会连 is_admin 一起继承：stella 是管理员，所以持有该令牌的人可以调
+# 发放接口给任何账号发点数。这是已知且已接受的取舍（令牌只存在 secret 里）。
+MACHINE_TOKEN_USER: "stella"
 # 注册限流：每 IP 每小时 1 次（FR-10）。上线后观察 429 触发量，
 # 若真实用户（CGNAT/办公室 NAT 共享出口）被误伤，优先放宽到按天计。
 REGISTER_RATE_LIMIT: "1"

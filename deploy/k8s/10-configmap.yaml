@@ -104,8 +104,9 @@ data:
   # 前端在 Vercel、API 在集群，是不同站点：会话 cookie 必须 Secure + SameSite=None。
   SESSION_COOKIE_SECURE: "true"
   # 机器令牌绑定的账号。留空 = 该令牌按未鉴权处理（开关打开后 MCP 会 401）。
-  # P3 打开 AUTH_ENFORCED 之前必须绑好；绑定会连 is_admin 一起继承。
-  MACHINE_TOKEN_USER: ""
+  # P3 打开 AUTH_ENFORCED 之前必须绑好；绑定会连 is_admin 一起继承——stella 是
+  # 管理员，故持令牌者可调发放接口。已知取舍，令牌仅存于 secret。
+  MACHINE_TOKEN_USER: "stella"
   # 注册限流：每 IP 每小时 1 次。取 IP 用 CF-Connecting-IP，
   # 因为前面压着 Cloudflare + cn-ingress，socket 地址是它们的。
   REGISTER_RATE_LIMIT: "1"
