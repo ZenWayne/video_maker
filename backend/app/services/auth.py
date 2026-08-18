@@ -103,6 +103,9 @@ class Principal:
     is_admin: bool = False
     is_machine: bool = False
     session_token: Optional[str] = None
+    # 访客身份：只读。归属过滤和点数照常生效，另外由中间件挡掉所有非 GET
+    # 请求——光靠 0 点余额挡不住删项目、改文案、裁剪这类不花钱的写操作。
+    is_guest: bool = False
 
     @property
     def is_billable(self) -> bool:
@@ -205,6 +208,36 @@ async def _machine_principal() -> Optional[Principal]:
         user_id=user.id,
         is_admin=bool(user.is_admin),
         is_machine=True,
+    )
+
+
+async def guest_principal() -> Optional[Principal]:
+    """未登录访客对应的身份；未配置 GUEST_USERNAME 时返回 None。
+
+    访客是一个**真实账号**，不是特例分支：因此它自动继承已有的两道约束——
+    owner 过滤让它只看得见自己名下的演示数据，0 点余额让它碰不了任何计费操作。
+    只读则由中间件另外强制（见 is_guest）。
+    """
+    username = (settings.guest_username or "").strip()
+    if not username:
+        return None
+
+    from app import db as db_module
+    from app.models.project import User
+
+    async with db_module.AsyncSession() as session:
+        user = (await session.execute(
+            select(User).where(User.username == username)
+        )).scalar_one_or_none()
+    if user is None or not user.is_active:
+        logger.warning("GUEST_USERNAME=%r 不存在或已停用 —— 访客模式未生效", username)
+        return None
+
+    return Principal(
+        username=user.username,
+        user_id=user.id,
+        is_admin=False,   # 访客永远不继承管理员位，哪怕账号被误设成管理员
+        is_guest=True,
     )
 
 

@@ -780,3 +780,116 @@ async def test_anonymous_ai_edit_is_blocked_before_the_model_call(
     )
     assert r.status_code == 401
     assert called is False, "匿名请求不该走到模型调用"
+
+
+# ── 访客模式（未登录 = 只读的匿名账号） ──────────────────────────────────────
+
+@pytest.fixture
+async def guest_setup(auth_client, db_session_factory, monkeypatch):
+    """配好访客账号 + 一个它名下的演示项目，并打开强制校验。
+
+    访客是**真实账号**，不是特例分支：所以 owner 过滤、0 点余额这两道约束
+    自动生效，测试要验的是它们确实生效，外加只读那一道。
+    """
+    guest_id = await make_user(db_session_factory, "guest", credits_=0)
+    demo = await owned_project(db_session_factory, guest_id, status="shot_review", shots=1)
+    monkeypatch.setattr(settings, "guest_username", "guest")
+    monkeypatch.setattr(settings, "auth_enforced", True)
+    return {"guest_id": guest_id, "demo": demo}
+
+
+async def test_guest_can_browse_demo_data_without_any_credentials(
+    auth_client, guest_setup
+):
+    """未登录也能看——这正是「访客」的意义，即使强制校验已打开。"""
+    r = await auth_client.get("/api/projects")
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    assert (await auth_client.get(f"/api/projects/{guest_setup['demo']}")).status_code == 200
+    # 注：SSE 不在这里断言——放行之后它会真的一直流，httpx 会挂住等 body。
+    # 访客能连 SSE 已用 curl（带超时）在真实栈上验过。
+
+
+async def test_guest_is_read_only(auth_client, guest_setup):
+    """0 点余额只挡得住计费操作；删项目、改文案、裁剪这些不花钱的写操作
+    必须靠只读位挡住。"""
+    demo = guest_setup["demo"]
+    for method, path in [
+        ("post", "/api/projects"),
+        ("post", f"/api/projects/{demo}/start"),
+        ("post", f"/api/projects/{demo}/approve-script"),
+        ("post", f"/api/projects/{demo}/shots/1/rewrite-prompt"),
+        ("patch", f"/api/projects/{demo}/shots/1"),
+        ("delete", f"/api/projects/{demo}"),
+        ("post", f"/api/projects/{demo}/export"),
+    ]:
+        # httpx 的 delete() 不收 json 参数，用通用的 request() 统一发
+        r = await auth_client.request(method.upper(), path, json={})
+        assert r.status_code == 403, f"{method.upper()} {path} 访客却能写"
+        assert r.json()["error"]["code"] == "readonly_guest"
+
+
+async def test_guest_never_triggers_billing(auth_client, guest_setup, db_session_factory):
+    auth_client.arq.enqueue_job.reset_mock()
+    await auth_client.post(f"/api/projects/{guest_setup['demo']}/approve-script")
+    auth_client.arq.enqueue_job.assert_not_called()
+    async with db_session_factory() as s:
+        assert (await s.execute(select(CreditLedger))).scalars().all() == []
+
+
+async def test_guest_me_returns_401_so_frontend_treats_it_as_logged_out(
+    auth_client, guest_setup
+):
+    """前端零改动的关键。
+
+    /me 返回 401 → AuthProvider 判定未登录 → 显示「登录」而不是「登出 + 余额」；
+    而它探测强制校验的那个请求会被访客身份放行，于是不会把人踢去登录页。
+    """
+    assert (await auth_client.get("/api/auth/me")).status_code == 401
+
+
+async def test_guest_cannot_see_other_users_projects(
+    auth_client, guest_setup, db_session_factory
+):
+    """演示数据之外的东西，访客一律看不到——哪怕知道 id。"""
+    alice = await make_user(db_session_factory, "alice_guest")
+    private = await owned_project(db_session_factory, alice)
+
+    assert (await auth_client.get("/api/projects")).json()["total"] == 1  # 只有演示项目
+    assert (await auth_client.get(f"/api/projects/{private}")).status_code == 404
+
+
+async def test_guest_never_inherits_admin(auth_client, db_session_factory, monkeypatch):
+    """访客账号被误设成管理员时，也不能拿到管理员位。"""
+    await make_user(db_session_factory, "guestadmin", credits_=0, is_admin=True)
+    monkeypatch.setattr(settings, "guest_username", "guestadmin")
+    monkeypatch.setattr(settings, "auth_enforced", True)
+
+    # 管理接口是 POST，先被只读挡下；即便如此也不该有管理员位
+    r = await auth_client.post("/api/admin/users/guestadmin/credits", json={"delta": 999})
+    assert r.status_code == 403
+
+
+async def test_login_stays_reachable_for_guests(auth_client, guest_setup, db_session_factory):
+    """访客只读，但不能把登录入口也堵死，否则没人进得来。"""
+    await make_user(db_session_factory, "realuser")
+    r = await auth_client.post(
+        "/api/auth/login", json={"username": "realuser", "password": PASSWORD}
+    )
+    assert r.status_code == 200
+
+
+async def test_guest_disabled_restores_plain_401(auth_client, db_session_factory, monkeypatch):
+    """没配 GUEST_USERNAME 就是原来的行为：强制校验下未认证 401。"""
+    monkeypatch.setattr(settings, "guest_username", "")
+    monkeypatch.setattr(settings, "auth_enforced", True)
+    assert (await auth_client.get("/api/projects")).status_code == 401
+
+
+async def test_guest_username_pointing_at_missing_account_is_ignored(
+    auth_client, monkeypatch
+):
+    """配了个不存在的账号（打错字）不能变成放行——退回 401。"""
+    monkeypatch.setattr(settings, "guest_username", "no-such-guest")
+    monkeypatch.setattr(settings, "auth_enforced", True)
+    assert (await auth_client.get("/api/projects")).status_code == 401

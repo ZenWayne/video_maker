@@ -309,6 +309,13 @@ class Settings(BaseSettings):
     # 所以不绑账号就不放行。设成某个用户名后，机器调用与该用户完全同权同计费
     # （包括继承它的 is_admin）。
     machine_token_user: str = ""
+    # 访客（未登录）身份落到哪个账号。置空 = 关闭访客模式，未认证按原样处理
+    # （开关关着放行、打开 401）。配上之后，**任何没有凭据的请求都解析成这个
+    # 账号，并强制只读**：它只看得见自己名下的演示数据，非 GET 一律 403，
+    # 余额为 0 所以任何计费操作也进不去。
+    # 刻意不做成令牌：浏览器拿不住秘密，发到前端 JS 里的令牌等于公开。
+    guest_username: str = ""
+
     # 注册限流：每个来源 IP 每 window 秒最多注册 N 次（FR-10，已定 1 次/小时）。
     register_rate_limit: int = 1
     register_rate_limit_window_sec: int = 3600

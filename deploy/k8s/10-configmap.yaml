@@ -107,6 +107,11 @@ data:
   # P3 打开 AUTH_ENFORCED 之前必须绑好；绑定会连 is_admin 一起继承——stella 是
   # 管理员，故持令牌者可调发放接口。已知取舍，令牌仅存于 secret。
   MACHINE_TOKEN_USER: "stella"
+
+  # 访客（未登录）落到哪个账号；置空 = 关闭。配上后无凭据请求解析成该账号并
+  # 强制只读。演示数据由 app.scripts.seed_guest_demo 复制。该账号余额必须为 0。
+  # 生产先留空，等演示数据准备好再开。
+  GUEST_USERNAME: ""
   # 注册限流：每 IP 每小时 1 次。取 IP 用 CF-Connecting-IP，
   # 因为前面压着 Cloudflare + cn-ingress，socket 地址是它们的。
   REGISTER_RATE_LIMIT: "1"

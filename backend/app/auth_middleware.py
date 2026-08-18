@@ -25,7 +25,7 @@ import re
 from sqlalchemy import select
 
 from app.config import settings
-from app.services.auth import Principal, resolve_principal
+from app.services.auth import Principal, guest_principal, resolve_principal
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,10 @@ _PROJECT_PATH_RE = re.compile(r"^/api/projects/(?P<project_id>[^/]+)")
 
 def _unauthorized(detail: str = "Authentication required"):
     return 401, {"error": {"code": "unauthenticated", "message": detail}}
+
+
+def _forbidden_readonly():
+    return 403, {"error": {"code": "readonly_guest", "message": "访客只能浏览，请登录后再操作。"}}
 
 
 def _not_found():
@@ -109,10 +113,18 @@ class AuthMiddleware:
         headers = dict(scope.get("headers") or [])
         principal = await resolve_principal(headers)
 
+        if principal is None:
+            # 访客兜底：配了 GUEST_USERNAME 就把无凭据的请求落到那个账号上，
+            # 而不是 401。它是个真实账号，所以 owner 过滤和 0 点余额自动生效；
+            # 只读则在下面强制。没配就维持原样（开关关着放行、打开 401）。
+            principal = await guest_principal()
+
         state = scope.setdefault("state", {})
         state["principal"] = principal
 
         if path.rstrip("/") in PUBLIC_PATHS:
+            # 登录/注册必须放行——访客身份是只读的，若把它们也拦下来，访客就
+            # 永远登不进来了。
             await self.app(scope, receive, send)
             return
 
@@ -124,6 +136,14 @@ class AuthMiddleware:
             # 开关关闭：与鉴权上线前完全一致地放行，身份为 None
             # （不按用户过滤、不扣点数）。
             await self.app(scope, receive, send)
+            return
+
+        # 访客只读。0 点余额只挡得住计费操作，删项目、改分镜文案、裁剪这些
+        # 不花钱的写操作照样做得了——所以按方法拦一道。放在归属校验之前：
+        # 「访客不能写」与「这个项目是不是你的」是两件事，前者更靠外。
+        if principal.is_guest and scope.get("method") not in ("GET", "HEAD"):
+            status, body = _forbidden_readonly()
+            await self._reject(send, status, body)
             return
 
         # 有身份 → 逐对象归属校验。服务主体（未绑定账号的机器令牌）没有
