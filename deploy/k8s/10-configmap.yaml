@@ -82,7 +82,11 @@ data:
   # plain HTTP to HTTPS, so an http:// origin would never legitimately appear.
   # The localhost entries are kept for local `make dev` against this same
   # config; drop them if you want the deployment to be strict.
-  CORS_ORIGINS: "https://video-maker.kuanzw.com,http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000,http://127.0.0.1:4000"
+  # video-maker-tan.vercel.app 是 Vercel 侧的别名域，线上 ConfigMap 里有、本文件
+  # 之前漏了 —— apply 一次就会把它从白名单里删掉，那个域名下的前端随即全部
+  # CORS 失败。allow_credentials=True 时规范禁止用 "*"，只能精确列举，所以少一个
+  # 就是断一个。
+  CORS_ORIGINS: "https://video-maker.kuanzw.com,https://video-maker-tan.vercel.app,http://localhost:3000,http://127.0.0.1:3000,http://localhost:4000,http://127.0.0.1:4000"
 
   # Langfuse (LLM observability)
   LANGFUSE_ENABLED: "true"
@@ -99,7 +103,9 @@ data:
   # 唯一的「未认证是否放行」开关，也是唯一的回滚手段（改回 "false" 即恢复放行，
   # 无需回滚镜像）。P1/P2 保持 "false"；P3 完成存量数据迁移 + 数据库备份之后
   # 才置 "true" —— 顺序颠倒会让用户在中间窗口里看到空列表。
-  AUTH_ENFORCED: "false"
+  # ⚠️ 线上已于 2026-08-19 开启并完成存量数据迁移。这里写 "false" 会在
+  # `kubectl apply` 时把强制校验关掉，所以必须与线上保持一致。
+  AUTH_ENFORCED: "true"
   SESSION_TTL_DAYS: "7"
   # 前端在 Vercel、API 在集群，是不同站点：会话 cookie 必须 Secure + SameSite=None。
   SESSION_COOKIE_SECURE: "true"

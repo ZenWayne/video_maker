@@ -1,0 +1,142 @@
+# 合并到 master 即构建并部署后端 —— 补上前端有、后端没有的那半条流水线。
+#
+# 这个 workflow 的由来是一次真实事故：前端由 Vercel 跟 git 自动部署，后端靠人手
+# 发镜像。P2 合并后前端立刻上线，后端还是旧镜像；新前端不再发 X-User-Name、
+# 旧后端仍强制要求它，于是**所有写端点 400 而读一切正常**——页面看着没问题，
+# 一动手就失败，几个小时后才被发现。
+#
+# 所以这里的目标不只是"自动部署"，而是**让前后端不再各走各的**。
+name: Deploy Backend
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'backend/**'
+      - 'deploy/Dockerfile.worker'
+      - 'deploy/k8s/**'
+      - '.github/workflows/deploy-backend.yml'
+  # 允许手工触发：回滚、或改了 ConfigMap 想立刻生效时
+  workflow_dispatch:
+
+concurrency:
+  # 同一分支的部署串行，避免两次合并并发推同一个 :latest 造成竞态
+  group: deploy-backend
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ccr.ccs.tencentyun.com
+  NAMESPACE: video-maker
+  K8S_NAMESPACE: video-maker
+
+jobs:
+  test:
+    name: 后端测试
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6381:6379']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: 安装依赖
+        working-directory: ./backend
+        run: uv sync --project .
+      - name: 单元测试
+        working-directory: ./backend
+        # 只跑 unit：integration 依赖真实 COS 凭据，CI 里没有
+        run: uv run --project . pytest tests/unit -q
+
+  build-and-deploy:
+    name: 构建、推送、滚动更新
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 登录腾讯云容器镜像服务
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # backend 与 worker 是两个镜像、两个 Dockerfile，但同一份 backend/ 源码。
+      # 必须一起发：退款逻辑在 worker 里，只发 backend 会让两者版本错位。
+      - name: 构建并推送 backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/video-maker-backend:latest
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/video-maker-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 构建并推送 worker
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./deploy/Dockerfile.worker
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/video-maker-worker:latest
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/video-maker-worker:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 配置 kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: 滚动更新
+        run: |
+          set -euo pipefail
+          # 用带 sha 的 tag 而不是 :latest —— :latest + imagePullPolicy:Always 在
+          # rollout 显示成功时并不保证 pod 真的换了代码（README 记过这个坑）。
+          # 指定 sha 让 k8s 有明确的变更可比对。
+          kubectl -n "$K8S_NAMESPACE" set image deploy/video-maker-backend \
+            backend="$REGISTRY/$NAMESPACE/video-maker-backend:${{ github.sha }}"
+          kubectl -n "$K8S_NAMESPACE" set image deploy/video-maker-worker \
+            worker="$REGISTRY/$NAMESPACE/video-maker-worker:${{ github.sha }}"
+          kubectl -n "$K8S_NAMESPACE" rollout status deploy/video-maker-backend --timeout=5m
+          kubectl -n "$K8S_NAMESPACE" rollout status deploy/video-maker-worker  --timeout=5m
+
+      - name: 验证跑的确实是新代码
+        run: |
+          set -euo pipefail
+          # rollout 成功 ≠ 新代码。README 记过一次：推错命名空间后 rollout 照样
+          # 成功，pod 里还是旧的。这里进 pod 实证，而不是只看 rollout 结果。
+          RUNNING=$(kubectl -n "$K8S_NAMESPACE" get deploy/video-maker-backend \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          echo "backend 镜像: $RUNNING"
+          case "$RUNNING" in
+            *"${{ github.sha }}") echo "✓ 镜像 tag 与本次提交一致" ;;
+            *) echo "✗ 镜像 tag 不是本次提交"; exit 1 ;;
+          esac
+          # 再用一个只有新代码才有的路由做端到端确认
+          kubectl -n "$K8S_NAMESPACE" exec deploy/video-maker-backend -- python -c "
+          import json, urllib.request, sys
+          spec = json.load(urllib.request.urlopen('http://127.0.0.1:8000/openapi.json'))
+          need = {'/api/auth/login', '/api/auth/me'}
+          missing = need - set(spec['paths'])
+          print('路由数:', len(spec['paths']))
+          sys.exit(1) if missing else print('✓ 鉴权路由齐全')
+          "
+
+      - name: 失败时回滚
+        if: failure()
+        run: |
+          kubectl -n "$K8S_NAMESPACE" rollout undo deploy/video-maker-backend || true
+          kubectl -n "$K8S_NAMESPACE" rollout undo deploy/video-maker-worker || true
