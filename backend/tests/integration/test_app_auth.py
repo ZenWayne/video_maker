@@ -893,3 +893,32 @@ async def test_guest_username_pointing_at_missing_account_is_ignored(
     monkeypatch.setattr(settings, "guest_username", "no-such-guest")
     monkeypatch.setattr(settings, "auth_enforced", True)
     assert (await auth_client.get("/api/projects")).status_code == 401
+
+
+async def test_invalid_credentials_never_degrade_to_guest(
+    auth_client, guest_setup, db_session_factory, monkeypatch
+):
+    """带了凭据却无效 → 401，**不能**降级成访客。
+
+    降级是静默给错数据：MCP 的令牌打错或轮换后不会报错，而是安静地拿到访客的
+    演示数据、以为自己在正常工作；浏览器端会话过期则让用户看到别人的演示项目、
+    以为自己的数据没了（FRD 专门警告过「用户以为数据丢了」这类失败）。
+    安静地给错数据比报错更糟。
+    """
+    monkeypatch.setattr(settings, "machine_token", "the-real-token")
+    monkeypatch.setattr(settings, "machine_token_user", "")
+
+    # 错误的 Bearer 令牌
+    r = await auth_client.get("/api/projects", headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401, "无效令牌被降级成了访客"
+
+    # 失效的会话 cookie
+    r = await auth_client.get(
+        "/api/projects", headers={"Cookie": f"{settings.session_cookie_name}=expired-token"}
+    )
+    assert r.status_code == 401, "失效会话被降级成了访客"
+
+    # 对照：什么都不带才是访客
+    r = await auth_client.get("/api/projects")
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
