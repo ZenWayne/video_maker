@@ -42,6 +42,11 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: 安装 ffmpeg
+        # tests/unit 里有 21 个用例直接 shell 出去调 ffmpeg/ffprobe（裁剪、
+        # 合并、音频归一化、抽帧、非破坏式不变量）。ubuntu-latest 不预装它，
+        # 缺了会是一片 FileNotFoundError —— 看着像代码坏了，其实是环境缺依赖。
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - name: 安装依赖
         working-directory: ./backend
         run: uv sync --project .
