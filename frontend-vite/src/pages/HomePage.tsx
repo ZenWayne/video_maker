@@ -43,7 +43,7 @@ const statusColors: Record<ProjectStatus, string> = {
 
 export default function HomePage() {
   const navigate = useNavigate()
-  const { addToast, userName } = useStore()
+  const { addToast } = useStore()
   const [projects, setProjects] = useState<Project[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
@@ -99,16 +99,6 @@ export default function HomePage() {
   const filteredProjects = projects.filter((p) =>
     p.title.toLowerCase().includes(searchQuery.toLowerCase())
   )
-
-  // 检查是否需要设置用户名
-  useEffect(() => {
-    if (!userName) {
-      addToast({
-        type: 'info',
-        message: '请先点击右上角设置用户名',
-      })
-    }
-  }, [userName, addToast])
 
   return (
     <div className="min-h-screen bg-zinc-50">

@@ -45,7 +45,9 @@ describe('content analysis api', () => {
     expect(url).toContain('/api/analyses')
     expect(opts.method).toBe('POST')
     expect(opts.body instanceof FormData).toBe(true)
-    expect(opts.headers['X-User-Name']).toBe('testuser')
+    // 身份改由会话 cookie 承载（FR-7 删掉了自称的 X-User-Name）。跨站 cookie
+    // 只有显式 credentials:'include' 才会被带上——漏了就是登录后仍然 401。
+    expect(opts.credentials).toBe('include')
 
     const form = opts.body as FormData
     expect(form.get('title')).toBe('My Niche')

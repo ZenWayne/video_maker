@@ -141,17 +141,19 @@ async def test_attach_brief_snapshots_into_project(client, db_session_factory):
 
 
 async def test_attach_brief_requires_auth(client, db_session_factory):
-    """BLOCKING 4: attach-brief is a mutating endpoint — every other one in
-    this codebase requires X-User-Name (see pipeline.py/voice.py/
-    image_candidates.py/projects.py and create_analysis in this module)."""
+    """attach-brief 是写操作，必须要有调用方身份。
+
+    身份来源已从自称的 X-User-Name 改成会话（FR-7），所以这里断言的是「一点
+    凭据都没有时被拒」，而不再是「缺某个请求头」。"""
     async with db_session_factory() as s:
         a = ContentAnalysis(title="t", status="completed",
                             brief_json='{"screenwriter_directives":"x"}')
         p = Project(title="p", theme_text="th", creator_name="test-user",
                     status=ProjectStatus.DRAFT.value)
         s.add_all([a, p]); await s.commit(); aid, pid = a.id, p.id
+    client.headers.pop("Cookie", None)
     r = await client.post(f"/api/projects/{pid}/attach-brief", json={"analysis_id": aid})
-    assert r.status_code == 400
+    assert r.status_code in (400, 401)
     async with db_session_factory() as s:
         p = (await s.execute(select(Project).where(Project.id == pid))).scalar_one()
         assert p.content_analysis_id is None

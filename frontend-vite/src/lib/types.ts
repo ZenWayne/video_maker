@@ -264,3 +264,11 @@ export interface CreationBrief {
   dont: string[]
   screenwriter_directives: string
 }
+
+
+// 当前登录用户（GET /api/auth/me）——镜像后端 UserResponse
+export interface CurrentUser {
+  username: string
+  credits: number
+  is_admin: boolean
+}

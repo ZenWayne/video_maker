@@ -8,48 +8,64 @@ import type {
   APIError,
   ImageCandidate,
   ContentAnalysis,
+  CurrentUser,
 } from './types'
 
 const BASE = import.meta.env.VITE_API_BASE || ''
 
-class APIErrorClass extends Error {
+export class APIErrorClass extends Error {
   code: string
+  /** HTTP 状态码。401（未登录）与 402（点数不足）的处置完全不同，调用方要能区分。 */
+  status: number
 
-  constructor(error: APIError) {
+  constructor(error: APIError, status = 0) {
     super(error.message)
     this.code = error.code
+    this.status = status
     this.name = 'APIError'
   }
 }
 
-function getUserName(): string {
-  if (typeof window === 'undefined') return 'anonymous'
-  const name = localStorage.getItem('user_name')
-  if (!name) {
-    localStorage.setItem('user_name', 'anonymous')
-    return 'anonymous'
-  }
-  return name
+/** 点数不足：提示余额，**不要**跳登录页。 */
+export function isInsufficientCredits(e: unknown): boolean {
+  return e instanceof APIErrorClass && e.status === 402
+}
+
+// 会话失效时的回调：由 AuthProvider 注册，避免 api.ts 直接依赖 react-router。
+let onUnauthorized: (() => void) | null = null
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler
+}
+
+// 所有请求共用：跨站 cookie 必须显式 include，否则浏览器根本不带上会话
+// （前端在 Vercel、API 在集群，是不同站点）。
+const CREDENTIALS: RequestCredentials = 'include'
+
+function handleUnauthorized(status: number): void {
+  // 401 = 没登录/会话过期 → 交给 AuthProvider 跳登录页。
+  // 402 = 点数不足，**绝不能**走这条路：两者都是「被拒绝」，但把 402 也当成
+  // 掉线处理会让用户在余额不足时莫名其妙被登出。
+  if (status === 401) onUnauthorized?.()
 }
 
 async function request<T>(
   method: string,
   path: string,
-  body?: unknown
+  body?: unknown,
+  // silent401：不触发「跳登录页」回调。启动时的身份探测必须用它，否则
+  // AuthProvider 还没决定要不要跳转，探测本身就先把页面踢走了（死循环）。
+  opts?: { silent401?: boolean },
 ): Promise<T> {
   const url = `${BASE}${path}`
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
 
-  const userName = getUserName()
-  if (userName) {
-    headers['X-User-Name'] = userName
-  }
-
   const options: RequestInit = {
     method,
     headers,
+    credentials: CREDENTIALS,
   }
 
   if (body !== undefined) {
@@ -59,6 +75,7 @@ async function request<T>(
   const response = await fetch(url, options)
 
   if (!response.ok) {
+    if (!opts?.silent401) handleUnauthorized(response.status)
     let errorData: { error?: APIError; detail?: string }
     try {
       errorData = await response.json()
@@ -66,12 +83,12 @@ async function request<T>(
       throw new APIErrorClass({
         code: 'UNKNOWN_ERROR',
         message: `HTTP ${response.status}: ${response.statusText}`,
-      })
+      }, response.status)
     }
     const apiError: APIError = errorData.error
       ?? (errorData.detail ? { code: 'API_ERROR', message: errorData.detail } : null)
       ?? { code: 'UNKNOWN_ERROR', message: 'Unknown error' }
-    throw new APIErrorClass(apiError)
+    throw new APIErrorClass(apiError, response.status)
   }
 
   if (response.status === 204) {
@@ -85,18 +102,16 @@ async function request<T>(
 async function uploadSingle<T>(path: string, file: File): Promise<T> {
   const formData = new FormData()
   formData.append('file', file)
-  const headers: Record<string, string> = {}
-  const userName = getUserName()
-  if (userName) headers['X-User-Name'] = userName
-
-  const response = await fetch(`${BASE}${path}`, { method: 'POST', headers, body: formData })
+  const response = await fetch(`${BASE}${path}`, { method: 'POST', body: formData, credentials: CREDENTIALS })
   if (!response.ok) {
+    handleUnauthorized(response.status)
     let errorData: { error?: APIError; detail?: string }
     try { errorData = await response.json() } catch {
-      throw new APIErrorClass({ code: 'UPLOAD_ERROR', message: `Upload failed: ${response.status}` })
+      throw new APIErrorClass({ code: 'UPLOAD_ERROR', message: `Upload failed: ${response.status}` }, response.status)
     }
     throw new APIErrorClass(
-      errorData.error ?? (errorData.detail ? { code: 'UPLOAD_ERROR', message: errorData.detail } : { code: 'UPLOAD_ERROR', message: 'Upload failed' })
+      errorData.error ?? (errorData.detail ? { code: 'UPLOAD_ERROR', message: errorData.detail } : { code: 'UPLOAD_ERROR', message: 'Upload failed' }),
+      response.status,
     )
   }
   return response.json()
@@ -106,10 +121,11 @@ async function uploadSingle<T>(path: string, file: File): Promise<T> {
 async function uploadForm<T>(path: string, form: FormData): Promise<T> {
   const response = await fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'X-User-Name': getUserName() },
     body: form,
+    credentials: CREDENTIALS,
   })
   if (!response.ok) {
+    handleUnauthorized(response.status)
     const text = await response.text()
     let errorData: { error?: APIError; detail?: string }
     try {
@@ -120,7 +136,7 @@ async function uploadForm<T>(path: string, form: FormData): Promise<T> {
     const apiError: APIError = errorData.error
       ?? (errorData.detail ? { code: 'API_ERROR', message: errorData.detail } : null)
       ?? { code: String(response.status), message: text }
-    throw new APIErrorClass(apiError)
+    throw new APIErrorClass(apiError, response.status)
   }
   return response.json()
 }
@@ -135,6 +151,38 @@ export interface CreateImageCandidateOpts {
 
 // 项目管理
 export const api = {
+  // ── 鉴权 ────────────────────────────────────────────────────────────────
+  // 凭据全靠 httpOnly 会话 cookie，前端拿不到也不该拿到 token；这几个方法只
+  // 负责触发 Set-Cookie 和读回身份。
+
+  register: (username: string, password: string): Promise<CurrentUser> =>
+    request<CurrentUser>('POST', '/api/auth/register', { username, password }),
+
+  login: (username: string, password: string): Promise<CurrentUser> =>
+    request<CurrentUser>('POST', '/api/auth/login', { username, password }),
+
+  logout: (): Promise<void> => request<void>('POST', '/api/auth/logout'),
+
+  /** 当前用户 + 余额。未登录时抛 401（status=401），且不触发跳转。 */
+  me: (): Promise<CurrentUser> =>
+    request<CurrentUser>('GET', '/api/auth/me', undefined, { silent401: true }),
+
+  /**
+   * 后端是否已开启强制校验（AUTH_ENFORCED）。
+   *
+   * 前端的登录门禁**跟随后端**而不是自己硬来：分期上线期间开关是关的，未登录
+   * 也能正常使用，这时把人挡在登录页会平白改变现有用户的工作流。探测方式是拿
+   * 一个受保护端点试一下——200 说明没强制，401 说明强制了。
+   */
+  isAuthEnforced: async (): Promise<boolean> => {
+    try {
+      await request('GET', '/api/projects?limit=1', undefined, { silent401: true })
+      return false
+    } catch (e) {
+      return e instanceof APIErrorClass && e.status === 401
+    }
+  },
+
   // 获取项目列表
   listProjects: (params?: {
     status?: string
@@ -182,17 +230,11 @@ export const api = {
     formData.append('kind', kind)
 
     const url = `${BASE}/api/projects/${id}/reference-images`
-    const headers: Record<string, string> = {}
-
-    const userName = getUserName()
-    if (userName) {
-      headers['X-User-Name'] = userName
-    }
 
     const response = await fetch(url, {
       method: 'POST',
-      headers,
       body: formData,
+      credentials: CREDENTIALS,
     })
 
     if (!response.ok) {
@@ -326,11 +368,8 @@ export const api = {
     files.forEach((file) => formData.append('files', file))
 
     const url = `${BASE}/api/projects/${projectId}/shots/${shotId}/reference-images`
-    const headers: Record<string, string> = {}
-    const userName = getUserName()
-    if (userName) headers['X-User-Name'] = userName
 
-    const response = await fetch(url, { method: 'POST', headers, body: formData })
+    const response = await fetch(url, { method: 'POST', body: formData, credentials: CREDENTIALS })
     if (!response.ok) {
       let errorData: { error?: APIError }
       try { errorData = await response.json() } catch {
@@ -453,8 +492,8 @@ export const api = {
     form.append('file', file)
     const res = await fetch(`${BASE}/api/projects/${projectId}/reference-voice/upload`, {
       method: 'POST',
-      headers: { 'X-User-Name': getUserName() },
       body: form,
+      credentials: CREDENTIALS,
     })
     if (!res.ok) throw new Error(`Upload failed: ${res.status}`)
     return res.json()
@@ -627,5 +666,4 @@ export const api = {
   },
 }
 
-export { APIErrorClass }
 export type { APIError }

@@ -58,6 +58,24 @@ def ai_edit_cost() -> int:
     return settings.credit_cost_ai_edit
 
 
+class AuthenticationRequired(HTTPException):
+    """401：计费操作必须先有身份。
+
+    **这一条不受 AUTH_ENFORCED 控制。** 开关管的是「未认证能不能浏览」，而计费
+    操作是另一回事：没有账号就没有余额可扣，放行等于把一条免费的 LLM 通道挂在
+    公网上——那正是本 FRD 一开始要解决的问题（"被扫描到只是时间问题，届时是直接
+    烧配额"）。FR-3 也明确写了免鉴权白名单"不含任何会触发计费的端点"。
+
+    所以分期上线只对读放宽，对花钱的操作始终收紧。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=401,
+            detail="此操作会调用付费模型，请先登录。",
+        )
+
+
 class InsufficientCredits(HTTPException):
     """402：余额不足。**不入队、不产生任何外部调用。**"""
 
@@ -90,13 +108,15 @@ async def reserve(
 ) -> Optional[str]:
     """原子预扣 *amount* 点并写一条 reserve 流水，返回该流水 id。
 
-    返回 ``None`` 表示本次调用不计费：无身份（``AUTH_ENFORCED=false`` 下的匿名
-    调用，行为与鉴权上线前一致）、服务主体、或单价配成了 0。
+    无身份直接抛 :class:`AuthenticationRequired`（401）——计费操作不接受匿名调用，
+    见该异常的说明。余额不足抛 :class:`InsufficientCredits`（402）。**调用方必须
+    在入队之前调用它，并且把这两个异常原样透传出去。**
 
-    余额不足抛 :class:`InsufficientCredits`（402）。**调用方必须在入队之前
-    调用它，并且在它抛异常时直接把 402 透传出去。**
+    返回 ``None`` 表示本次确实不计费（单价配成了 0，或身份没有账号可扣）。
     """
-    if principal is None or not principal.is_billable or amount <= 0:
+    if principal is None:
+        raise AuthenticationRequired()
+    if not principal.is_billable or amount <= 0:
         return None
 
     async with _session_factory()() as session:
@@ -135,6 +155,18 @@ async def reserve(
         return entry.id
 
 
+def require_identity(principal: Optional[Principal]) -> None:
+    """计费端点的**第一道**闸：没身份直接 401。
+
+    reserve/ensure_balance 里也有同样的判断，但那两处的位置取决于端点自己的写法——
+    有的端点会先做业务校验（"没有可校准的分镜"→400），匿名调用就会拿到 400 而不是
+    401。金额算得出来之前先把身份卡住，才能保证「匿名 = 一律进不去」而不是「看
+    你先撞上哪个校验」。
+    """
+    if principal is None:
+        raise AuthenticationRequired()
+
+
 async def ensure_balance(principal: Optional[Principal], amount: int) -> None:
     """在**任何状态变更之前**先把「余额不足」挡掉，抛 402。
 
@@ -145,8 +177,12 @@ async def ensure_balance(principal: Optional[Principal], amount: int) -> None:
     这是一次**只读**预检，不承担防透支职责——防透支仍然是 reserve 的原子扣减。
     残余竞态：两个并发请求都过了预检、只有一个扣成功，输的那个仍会在状态变更
     之后拿到 402。这需要同一项目上余额刚好卡在边界的并发操作，罕见且可重试。
+
+    与 reserve 一样，无身份直接 401：匿名调用连预检都不该过。
     """
-    if principal is None or not principal.is_billable or amount <= 0:
+    if principal is None:
+        raise AuthenticationRequired()
+    if not principal.is_billable or amount <= 0:
         return
     async with _session_factory()() as session:
         user = (await session.execute(

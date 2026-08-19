@@ -160,8 +160,17 @@ async def me(
 ):
     """当前用户名 + 余额（供前端展示，并在触发计费前提示余额不足）。"""
     principal = require_principal(request)
+    if principal.is_guest:
+        # 访客不是「登录用户」，这里必须 401。
+        #
+        # 这一条正是前端零改动的关键：AuthProvider 拿到 401 → user=null → 显示
+        # 「登录」而不是「登出 + 余额」；同时它探测强制校验的那个请求会被访客
+        # 身份放行（200），于是判定为「未强制」，不把人踢去登录页。结果就是
+        # 访客能浏览演示数据、看得到登录入口，而前端一行都不用改。
+        raise HTTPException(status_code=401, detail="访客未登录")
     if not principal.is_billable:
-        # 未绑定账号的机器令牌：有身份但没有账号，也就没有余额。
+        # 兜底：现在每种身份都必然带账号（没绑账号的机器令牌已按未鉴权处理），
+        # 走到这里说明冒出了新的无账号身份——按 0 余额返回而不是 500。
         return UserResponse(username=principal.username, credits=0, is_admin=principal.is_admin)
 
     user = (await session.execute(

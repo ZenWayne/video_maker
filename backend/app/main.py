@@ -56,8 +56,9 @@ def check_auth_config() -> None:
         )
     if settings.machine_token and not settings.machine_token_user:
         logger.warning(
-            "机器令牌已配置但未绑定账号（MACHINE_TOKEN_USER 为空）："
-            "持有该令牌的调用方不受归属过滤、也不扣点数。请按高权限凭据保管。"
+            "机器令牌已配置但未绑定账号（MACHINE_TOKEN_USER 为空）：该令牌一律"
+            "按未鉴权处理。开关关着时 MCP 落回匿名照常可用；一旦 AUTH_ENFORCED=true "
+            "就会 401。上线强制校验前必须绑定一个账号。"
         )
 
 

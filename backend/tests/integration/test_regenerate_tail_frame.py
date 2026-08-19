@@ -1,3 +1,4 @@
+from unittest.mock import ANY
 """Integration tests: regenerate must not resurrect tail frame; routing must not auto-generate.
 
 Task 3 requirements:
@@ -125,7 +126,7 @@ async def test_regenerate_connected_shot_no_target_enqueues_shot_pipeline(
 
     # Must enqueue video pipeline, NOT tail-frame pipeline
     client.arq.enqueue_job.assert_called_once_with(
-        "run_shot_pipeline", pid, f"user:{USER}"
+        "run_shot_pipeline", pid, f"user:{USER}", reservation_id=ANY
     )
 
     async with db_session_factory() as s:
@@ -155,5 +156,5 @@ async def test_explicit_generate_tail_frame_endpoint_still_works(client, db_sess
     assert r.status_code == 202
     cid = r.json()["candidate_id"]
     client.arq.enqueue_job.assert_called_once_with(
-        "run_image_candidate", pid, 1, cid, f"user:{USER}"
+        "run_image_candidate", pid, 1, cid, f"user:{USER}", reservation_id=ANY
     )
