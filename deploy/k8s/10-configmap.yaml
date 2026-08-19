@@ -110,8 +110,12 @@ data:
 
   # 访客（未登录）落到哪个账号；置空 = 关闭。配上后无凭据请求解析成该账号并
   # 强制只读。演示数据由 app.scripts.seed_guest_demo 复制。该账号余额必须为 0。
-  # 生产先留空，等演示数据准备好再开。
-  GUEST_USERNAME: ""
+  #
+  # ⚠️ 生产已开启（2026-08-19）：guest 账号名下有 7 个从 stella 复制来的演示项目。
+  # 这个值**必须与线上一致**——线上 ConfigMap 曾长期没有本文件的若干键，
+  # 一次 `kubectl apply -f deploy/k8s/` 就会把它们覆盖成这里的值。写成 "" 会
+  # 静默关掉访客模式，未登录访问者从「看到演示」变成「看到全部数据」。
+  GUEST_USERNAME: "guest"
   # 注册限流：每 IP 每小时 1 次。取 IP 用 CF-Connecting-IP，
   # 因为前面压着 Cloudflare + cn-ingress，socket 地址是它们的。
   REGISTER_RATE_LIMIT: "1"

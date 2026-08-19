@@ -135,6 +135,11 @@ async def run(source: str, target: str, apply: bool, replace: bool,
             .order_by(Project.created_at)
         )).scalars().all()
 
+        # 过滤前的源项目总数。校验「源没被动过」必须拿它比，不能拿
+        # len(sources) + len(skipped) 倒推——那样每加一道过滤都要记得同步，
+        # 漏一道就会报假的校验失败（加 require_video 时就漏过一次）。
+        source_total_before_filters = len(sources)
+
         existing = (await session.execute(
             select(func.count()).select_from(Project).where(Project.owner_id == dst_user.id)
         )).scalar_one()
@@ -243,8 +248,12 @@ async def run(source: str, target: str, apply: bool, replace: bool,
     if total != len(sources):
         print(f"校验失败：应复制 {len(sources)} 个，实际 {total} 个。", file=sys.stderr)
         return 1
-    if src_total != len(sources) + len(skipped):
-        print(f"校验失败：源账号项目数变成了 {src_total}，复制不该动源数据。", file=sys.stderr)
+    if src_total != source_total_before_filters:
+        print(
+            f"校验失败：源账号项目数从 {source_total_before_filters} 变成了 {src_total}，"
+            "复制不该动源数据。",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
