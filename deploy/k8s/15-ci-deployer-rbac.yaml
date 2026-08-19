@@ -1,0 +1,81 @@
+# 给 CI 用的受限身份：只能在 video-maker 命名空间里滚动更新，不能碰别的东西。
+#
+# 不用管理员 kubeconfig 的理由：GitHub Secret 一旦泄漏（仓库写权限、被攻破的
+# 第三方 Action、日志误打印），管理员凭据等于整个集群，这个只等于一个命名空间
+# 里的重新部署。
+#
+# 应用后生成 CI 用的 kubeconfig 并写进 GitHub Secret：
+#
+#   kubectl apply -f deploy/k8s/15-ci-deployer-rbac.yaml
+#   TOKEN=$(kubectl -n video-maker get secret ci-deployer-token -o jsonpath='{.data.token}' | base64 -d)
+#   CA=$(kubectl -n video-maker get secret ci-deployer-token -o jsonpath='{.data.ca\.crt}')
+#   # 用 TOKEN/CA + apiserver 地址拼出 /tmp/ci-kubeconfig，然后：
+#   base64 -w0 /tmp/ci-kubeconfig | gh secret set KUBECONFIG && shred -u /tmp/ci-kubeconfig
+#
+# ⚠️ 验证权限时**别用 `can-i create pods/exec` 这种斜杠写法**。kubectl v1.35 起
+# 它不再被解析成子资源，权限明明配好了也会回 "no" —— 极容易误判成 RBAC 没生效
+# （这个坑实际踩过，白查了半天）。正确写法：
+#
+#   kubectl -n video-maker auth can-i create pods --subresource=exec   # 期望 yes
+#   kubectl -n video-maker auth can-i patch deploy                     # 期望 yes
+#   kubectl -n video-maker auth can-i get replicasets                  # 期望 yes
+#   kubectl -n video-maker auth can-i delete pods                      # 期望 no
+#   kubectl -n video-maker auth can-i get secrets                      # 期望 no
+#
+# 也可以不切 kubeconfig，直接用管理员身份按 SA 查（更省事）：
+#   kubectl -n video-maker auth can-i <verb> <res> --as=system:serviceaccount:video-maker:ci-deployer
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-deployer
+  namespace: video-maker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-deployer
+  namespace: video-maker
+rules:
+  # set image + rollout undo
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  # rollout status 需要读 replicasets
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  # 部署后进 pod 实证「跑的确实是新代码」
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  # 失败时看日志
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer
+  namespace: video-maker
+subjects:
+  - kind: ServiceAccount
+    name: ci-deployer
+    namespace: video-maker
+roleRef:
+  kind: Role
+  name: ci-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# k8s 1.24+ 不再自动给 ServiceAccount 发长期 token，显式建一个
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ci-deployer-token
+  namespace: video-maker
+  annotations:
+    kubernetes.io/service-account.name: ci-deployer
+type: kubernetes.io/service-account-token
