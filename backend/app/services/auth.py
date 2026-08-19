@@ -241,6 +241,24 @@ async def guest_principal() -> Optional[Principal]:
     )
 
 
+def credentials_presented(headers: dict[bytes, bytes]) -> bool:
+    """调用方**是否出示了凭据**（不论有效与否）。
+
+    用来区分两种「解析不出身份」：
+
+    - 什么都没带 → 访客（未登录的正常访问者）
+    - 带了但无效 → 401，**绝不能降级成访客**
+
+    后者若也落到访客身上，失效凭据就变成了静默降级：MCP 的令牌打错或轮换后
+    不会报错，而是安静地拿到访客的演示数据，以为自己在正常工作；浏览器端会话
+    过期则会让用户看到别人的演示项目，以为自己的数据没了。安静地给错数据比
+    报错更糟。
+    """
+    return _bearer_token(headers) is not None or bool(
+        _cookie_value(headers, settings.session_cookie_name)
+    )
+
+
 def _bearer_token(headers: dict[bytes, bytes]) -> Optional[str]:
     raw = headers.get(b"authorization")
     if not raw:

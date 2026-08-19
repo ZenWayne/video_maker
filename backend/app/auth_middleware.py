@@ -25,7 +25,12 @@ import re
 from sqlalchemy import select
 
 from app.config import settings
-from app.services.auth import Principal, guest_principal, resolve_principal
+from app.services.auth import (
+    Principal,
+    credentials_presented,
+    guest_principal,
+    resolve_principal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,10 +118,13 @@ class AuthMiddleware:
         headers = dict(scope.get("headers") or [])
         principal = await resolve_principal(headers)
 
-        if principal is None:
-            # 访客兜底：配了 GUEST_USERNAME 就把无凭据的请求落到那个账号上，
+        if principal is None and not credentials_presented(headers):
+            # 访客兜底：配了 GUEST_USERNAME 就把**没带凭据**的请求落到那个账号上，
             # 而不是 401。它是个真实账号，所以 owner 过滤和 0 点余额自动生效；
             # 只读则在下面强制。没配就维持原样（开关关着放行、打开 401）。
+            #
+            # 带了凭据却无效的（令牌打错、会话过期）**不走这条**——那会把失效
+            # 凭据静默降级成访客，让调用方拿到演示数据还以为一切正常。
             principal = await guest_principal()
 
         state = scope.setdefault("state", {})
