@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import redis.asyncio as aioredis
 
 from app.config import settings
-from app.db import build_pool_kwargs
+from app.db import assert_migrations_current, build_pool_kwargs
 from app.services import cos_client
 from worker.tasks import (
     run_screenwriter,
@@ -66,6 +66,12 @@ async def startup(ctx: dict) -> None:
 
     # Database engine and session factory
     engine = _build_db_engine()
+    # 库没升到 Alembic head 就拒绝启动——迁移到 Alembic 之后表结构不再由
+    # create_all 兜底，backend 的 init_db() 已经这样守门（见 app/main.py
+    # lifespan），worker 是独立进程、必须自己也守一道：否则库版本滞后时
+    # worker 不会干净失败，而是在处理某个正在计费的任务中途以
+    # UndefinedColumn/UndefinedTable 这类底层 SQL 错误炸掉。
+    await assert_migrations_current(engine)
     ctx["engine"] = engine
     ctx["session_factory"] = async_sessionmaker(
         engine,

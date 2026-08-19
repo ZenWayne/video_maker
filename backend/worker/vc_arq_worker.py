@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import redis.asyncio as aioredis
 
 from app.config import settings
-from app.db import build_pool_kwargs
+from app.db import assert_migrations_current, build_pool_kwargs
 from app.services import cos_client
 from worker.tasks import run_voice_convert, run_voice_convert_batch
 
@@ -52,6 +52,9 @@ async def startup(ctx: dict) -> None:
         settings.redis_url, encoding="utf-8", decode_responses=True
     )
     engine = _build_db_engine()
+    # 见 arq_worker.startup 的同一处注释：库没升到 Alembic head 就拒绝启动，
+    # 避免 vc-worker 在处理一个正在计费的语音转换任务中途才炸出底层 SQL 错误。
+    await assert_migrations_current(engine)
     ctx["engine"] = engine
     ctx["session_factory"] = async_sessionmaker(
         engine, expire_on_commit=False, autoflush=False
