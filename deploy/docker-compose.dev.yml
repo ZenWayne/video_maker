@@ -88,6 +88,7 @@ services:
              export LANGFUSE_SECRET_KEY=$(cat /run/secrets/langfuse_secret_key) &&
              export COS_SECRET_ID=$(cat /run/secrets/cos_secret_id) &&
              export COS_SECRET_KEY=$(cat /run/secrets/cos_secret_key) &&
+             uv run --project . alembic upgrade head &&
              uv run --project . uvicorn app.main:app --host 0.0.0.0 --port 8002
              --reload --reload-dir /app/app --reload-dir /app/worker"
     depends_on:
