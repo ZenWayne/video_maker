@@ -5,6 +5,15 @@
 
 # 数据库连接分量 —— 三个 Python 服务共用这一处定义。
 # 迁移前这里是 3 份写死的 DATABASE_URL，改一处漏两处是常态。
+#
+# 回滚到 SQLite（第 0 期的安全网，已实测可用）：
+#   在 backend / worker / vc-worker 三个服务的 environment: 里各加两行显式键，
+#   YAML 显式键会覆盖 `<<: *db-env` 合并进来的同名键 ——
+#       POSTGRES_HOST: ""                                  # 让 resolved_database_url 走回退
+#       DATABASE_URL: sqlite+aiosqlite:////app/data/dev.db  # 旧库仍在 app-data 卷里
+#   app-data 卷全程未被本期写入，切回即用。build_pool_kwargs 会自动改回 NullPool，
+#   backend command 里的 `alembic upgrade head` 在 SQLite 上同样能建出正确表结构
+#   （实测：7 张业务表 + alembic_version，compare_metadata 与 ORM 零差异）。
 x-db-env: &db-env
   POSTGRES_HOST: video-maker-postgres-dev
   POSTGRES_PORT: "5432"
